@@ -53,6 +53,11 @@ Passing repository checks proves only that the planning scaffold and metadata
 are internally consistent. It does not prove SSO behavior, protocol support,
 or an API.
 
+The [security policy](SECURITY.md) provides private reporting and the
+[versioned threat model](docs/security/threat-model.md) records proposed trust
+boundaries and future executable evidence. This planning module is not
+releasable; neither document establishes implemented security controls.
+
 See the versioned [Golib ecosystem index](https://github.com/faustbrian/go-library-tools/blob/v1.4.0/docs/ecosystem/README.md)
 and [package-family guidance](https://github.com/faustbrian/go-library-tools/blob/v1.4.0/docs/ecosystem/design-language.md#package-families-and-selection)
 for the shared design language.
