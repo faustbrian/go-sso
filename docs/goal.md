@@ -20,7 +20,9 @@ That record contains proposed contracts; it is not implementation evidence.
 - Record the frozen Service Edge family, enterprise SSO capabilities,
   ownership, and delivery lifecycle in schema-v2 engineering metadata.
 - Validate the metadata locally and in hosted CI with immutable,
-  checksum-verified `go-library-tools` v1.4.0 tooling.
+  checksum-verified public `go-library-tools` v2.1.2 tooling, without building
+  it from source. Keep ordinary structure, specification and links offline,
+  with unconditional secret checks and explicit online authority refresh.
 - Do not claim a public package identifier, installation path, runtime API,
   protocol support, compatibility promise, or released behavior.
 
