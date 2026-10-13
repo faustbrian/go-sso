@@ -1,5 +1,8 @@
 # Goal: planned go-sso boundary
 
+[Documentation map](index.md) · [Repository README](../README.md)
+[Next: Enterprise SSO threat model](security/threat-model.md)
+
 Status: planned
 
 The coordination plan identifies `github.com/faustbrian/go-sso` as the future

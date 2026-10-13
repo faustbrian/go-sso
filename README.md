@@ -10,6 +10,12 @@ enterprise token custody, and directory synchronization. The plan keeps those
 concepts separate from protocol wire handling, persistence, SCIM, and
 application concerns.
 
+## Planning documentation
+
+This repository remains planned and non-releasable. The
+[documentation map](docs/index.md) links its proposed contracts and security
+boundaries; it is not an installation or runtime guide.
+
 ## Planned responsibility
 
 The future root package is intended to own storage-neutral enterprise SSO
@@ -89,8 +95,8 @@ local contract. Scheduled and manual CI also refresh those authorities online
 and run whole-tree secrets. Passing any of these planning routes is not runtime
 security or release qualification.
 
-See the versioned [Golib ecosystem index](https://github.com/faustbrian/go-library-tools/blob/v1.4.0/docs/ecosystem/README.md)
-and [package-family guidance](https://github.com/faustbrian/go-library-tools/blob/v1.4.0/docs/ecosystem/design-language.md#package-families-and-selection)
+See the versioned [Golib ecosystem index](https://github.com/faustbrian/go-library-tools/blob/v1.8.4/docs/ecosystem/README.md)
+and [package-family guidance](https://github.com/faustbrian/go-library-tools/blob/v1.8.4/docs/ecosystem/design-language.md#package-families-and-selection)
 for the shared design language.
 
 ## License

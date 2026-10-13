@@ -1,5 +1,8 @@
 # Enterprise SSO threat model
 
+[Documentation map](../index.md) · [Repository README](../../README.md)
+[Next: Goal: planned go-sso boundary](../goal.md)
+
 Version: 1. Scope: the planned root `github.com/faustbrian/go-sso` boundary.
 
 ## Status and assets
