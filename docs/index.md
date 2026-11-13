@@ -9,6 +9,7 @@ not proof of whole-unit or platform completion.
 ## Choose and adopt
 
 - [Goal: planned go-sso boundary](goal.md).
+- [Selected DNS implementation](../domain-verification/README.md).
 - Select the separately versioned DNS and PostgreSQL adapters for the complete
   DNS proof profile; their implementation is not included in the root module.
 

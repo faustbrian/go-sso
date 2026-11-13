@@ -16,7 +16,7 @@ The root package defines immutable `DomainProofRequest`,
 `DomainProofEngine.Observe(context.Context, DomainProofRequest)`. It imports
 neither the DNS implementation nor database/transaction types.
 
-- The separately versioned `domain-verification` adapter implements the bounded
+- The separately versioned [domain-verification](domain-verification/README.md) adapter implements the bounded
   DNS profile.
 - The separately versioned `postgres` adapter supplies encrypted challenge persistence and
   the existing native organization evidence facade. It stores no proof truth or
