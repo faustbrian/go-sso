@@ -25,6 +25,18 @@
       "coverage_required": true,
       "build_required": true,
       "build_tags": []
+    },
+    {
+      "module_directory": "postgres",
+      "directory": "postgres",
+      "name": "postgres",
+      "import_path": "github.com/faustbrian/go-sso/postgres",
+      "kind": "public",
+      "production": true,
+      "executable": true,
+      "coverage_required": true,
+      "build_required": true,
+      "build_tags": []
     }
   ]
 }

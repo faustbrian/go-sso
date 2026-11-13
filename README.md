@@ -16,9 +16,9 @@ The root package defines immutable `DomainProofRequest`,
 `DomainProofEngine.Observe(context.Context, DomainProofRequest)`. It imports
 neither the DNS implementation nor database/transaction types.
 
-- The separately versioned [domain-verification](domain-verification/README.md) adapter implements the bounded
+- [domain-verification](domain-verification/README.md) implements the bounded
   DNS profile.
-- The separately versioned `postgres` adapter supplies encrypted challenge persistence and
+- [postgres](postgres/README.md) supplies encrypted challenge persistence and
   the existing native organization evidence facade. It stores no proof truth or
   command outcomes.
 - `github.com/faustbrian/go-organization` owns domain claims, unique ownership,
@@ -61,11 +61,11 @@ _ = current
 return err
 ```
 
-The root module contains orchestration contracts, not a DNS resolver or database
-implementation. The complete executable composition belongs to the independently
-versioned PostgreSQL adapter and requires that adapter's published implementation.
-Actual native owners retain organization, authorization, session, risk,
-transaction, audit and proof authority.
+The complete executable native composition is in
+[postgres/domain_integration_test.go](postgres/domain_integration_test.go).
+Its independent authoritative DNS server controls only external TXT publication;
+actual public native owners retain all organization, authorization, session,
+risk, transaction, audit and proof authority.
 
 ## Custody and recovery
 
@@ -84,8 +84,6 @@ No global request selector, background worker, cached allow or replacement
 ownership authority exists.
 
 Before Apply, SSO saves only the original safe organization recovery binding.
-A lost/uncertain response to saving that binding also returns Unknown with the
-exact original scope and never proceeds to Apply.
 A lost commit response exposes Unknown and no proof. `RecoverDomain`, and a
 verification retry with saved recovery scope, query only that original native
 command and never perform DNS or reexecute.

@@ -1,0 +1,421 @@
+//go:build integration
+
+package postgres_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	auditpg "github.com/faustbrian/go-audit/postgres"
+	auth "github.com/faustbrian/go-authentication/v2"
+	"github.com/faustbrian/go-authorization/v3"
+	authority "github.com/faustbrian/go-authorization/v3/postgres"
+	"github.com/faustbrian/go-clock"
+	identity "github.com/faustbrian/go-identity"
+	passwordpg "github.com/faustbrian/go-identity/password/postgres"
+	kernel "github.com/faustbrian/go-identity/postgres"
+	"github.com/faustbrian/go-identity/risk"
+	riskpg "github.com/faustbrian/go-identity/risk/postgres"
+	"github.com/faustbrian/go-identity/session"
+	sessionpg "github.com/faustbrian/go-identity/session/postgres"
+	migrations "github.com/faustbrian/go-migrations/v3"
+	migrationpg "github.com/faustbrian/go-migrations/v3/postgres"
+	organization "github.com/faustbrian/go-organization"
+	organizationpg "github.com/faustbrian/go-organization/postgres"
+	database "github.com/faustbrian/go-postgres"
+	lifecyclepg "github.com/faustbrian/go-transactional-outbox/postgres/identity"
+	outboxpg "github.com/faustbrian/go-transactional-outbox/v2/postgres"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
+)
+
+type migrationList []migrations.Migration
+
+func (s migrationList) Load(ctx context.Context) ([]migrations.Migration, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return append([]migrations.Migration(nil), s...), nil
+}
+
+type fixturePolicy struct{}
+
+func (fixturePolicy) Decide(ctx context.Context, c authorization.DecisionContext) (authorization.Decision, error) {
+	if err := ctx.Err(); err != nil {
+		return authorization.Decision{}, err
+	}
+	if c.PolicyRevision != 1 || c.Request.Subject.Kind != authorization.SubjectUser || !strings.HasPrefix(string(c.Request.Tenant), "org-test-") {
+		return authorization.Decision{Outcome: authorization.Deny, Revision: 1}, nil
+	}
+	return authorization.Decision{Outcome: authorization.Allow, Revision: 1}, nil
+}
+
+type orgFixture struct {
+	ctx                            context.Context
+	pool                           *database.Pool
+	service                        *organizationpg.Service
+	sessions                       *session.SessionService
+	key                            session.DigestKey
+	authentication                 map[string]organization.Authentication
+	profile                        sessionpg.IdentifierAdmissionConfig
+	participant                    *organizationpg.Contributor
+	configuration                  organizationpg.ServiceConfig
+	dsn                            string
+	database                       string
+	history                        migrationList
+	teams                          organization.TeamConfig
+	domains                        organization.DomainConfig
+	domainEvidence                 *organizationpg.DomainEvidenceSource
+	dynamicRoles                   organization.DynamicRoleConfig
+	ownerTransferPrimary           *passwordpg.ActionPrimarySource
+	lifecycle                      organization.LifecycleConfig
+	archivePrimary, restorePrimary *passwordpg.ActionPrimarySource
+}
+
+func migrationBundle(t *testing.T, version migrations.Version, name string, files fs.FS, prefix string) migrations.Migration {
+	t.Helper()
+	entries, e := fs.ReadDir(files, ".")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var sql strings.Builder
+	sql.WriteString(prefix)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			t.Fatal("unexpected native migration entry")
+		}
+		wire, e := fs.ReadFile(files, entry.Name())
+		if e != nil {
+			t.Fatal(e)
+		}
+		sql.WriteString("\n")
+		sql.WriteString(strings.Split(string(wire), "-- +migrations Down")[0])
+	}
+	m, e := migrations.NewMigration(version, name, migrations.TransactionModeDefault, sql.String(), "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	return m
+}
+
+func newOrgFixture(t *testing.T, additions ...migrations.Source) *orgFixture {
+	return newOrgFixtureWithIdentities(t, nil, nil, additions...)
+}
+
+func newOrgFixtureWithIdentities(t *testing.T, tenants []identity.TenantID, users []identity.UserID, additions ...migrations.Source) *orgFixture {
+	t.Helper()
+	dsn := os.Getenv("GOLIB_ORGANIZATION_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Fatal("GOLIB_ORGANIZATION_TEST_POSTGRES_DSN must identify the task-owned isolated PostgreSQL fixture")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	t.Cleanup(cancel)
+	admin, e := pgx.Connect(ctx, dsn)
+	if e != nil {
+		t.Fatal("isolated PostgreSQL unavailable")
+	}
+	var preexistingRoles bool
+	if e = admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname IN ('audit_writer','audit_reader','audit_retention'))`).Scan(&preexistingRoles); e != nil || preexistingRoles {
+		_ = admin.Close(ctx)
+		t.Fatal("isolated fixture requires native audit roles to be absent")
+	}
+	id, e := identity.NewCommandID()
+	if e != nil {
+		t.Fatal(e)
+	}
+	name := "organization_test_" + strings.ReplaceAll(string(id), "-", "_")
+	quoted := pgx.Identifier{name}.Sanitize()
+	if _, e = admin.Exec(ctx, "CREATE DATABASE "+quoted); e != nil {
+		t.Fatal("isolated database creation failed")
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if _, e := admin.Exec(cleanup, "DROP DATABASE "+quoted); e != nil {
+			t.Error("owned database cleanup failed")
+		}
+		// The fixture requires a task-owned cluster: audit's fixed roles are
+		// cluster-wide, so remove them only after this fixture database is gone.
+		for _, role := range []string{"audit_writer", "audit_reader", "audit_retention"} {
+			if _, e := admin.Exec(cleanup, "DROP ROLE "+pgx.Identifier{role}.Sanitize()); e != nil {
+				t.Error("owned audit role cleanup failed")
+			}
+		}
+		_ = admin.Close(cleanup)
+	})
+	config, e := pgx.ParseConfig(dsn)
+	if e != nil {
+		t.Fatal("invalid isolated DSN")
+	}
+	config.Database = name
+	db := stdlib.OpenDB(*config)
+	t.Cleanup(func() { _ = db.Close() })
+	if tenants == nil {
+		tenants = []identity.TenantID{"org-test-basic", "org-test-rollback", "org-test-target", "org-test-race", "org-test-scope", "org-test-unknown"}
+	}
+	if users == nil {
+		users = []identity.UserID{"owner", "second", "member", "outsider"}
+	}
+	base := kernel.StatusMigrationSource{Base: kernel.CredentialMigrationSource{Base: kernel.DirectoryAuthorityMigrationSource{Base: kernel.MigrationSource{}, Version: 10, GlobalAuthorityID: "organization-tests", TenantIDs: tenants}, Version: 11}, Version: 12}
+	history, e := base.Load(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
+	add := func(source migrations.Source) {
+		t.Helper()
+		more, e := source.Load(ctx)
+		if e != nil {
+			t.Fatal(e)
+		}
+		history = append(history, more...)
+	}
+	add(sessionpg.MigrationSource{Schema: "organization_sessions", Version: 20})
+	m, e := authority.AuthoritySchemaMigration(30)
+	if e != nil {
+		t.Fatal(e)
+	}
+	converted, e := migrations.NewMigration(30, m.Name, migrations.TransactionModeDefault, m.Up, "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	history = append(history, converted)
+	add(riskpg.LockoutMigrationSource{Base: riskpg.CounterMigrationSource{Base: riskpg.ReservationMigrationSource{Base: riskpg.IssuanceIDMigrationSource{Base: riskpg.MigrationSource{Schema: "organization_risk", Version: 40}, Version: 41}, Version: 42}, Version: 43}, Version: 44})
+	history = append(history, migrationBundle(t, 200, "organization_native_audit", auditpg.Migrations(), auditpg.FreshInstallPreflightSQL()), migrationBundle(t, 201, "organization_native_outbox", outboxpg.Migrations(), ""), migrationBundle(t, 202, "organization_native_lifecycle", lifecyclepg.Migrations(), ""))
+	add(organizationpg.MigrationSource{Version: 300})
+	for _, source := range additions {
+		add(source)
+	}
+	backend, e := migrationpg.New(db)
+	if e != nil {
+		t.Fatal(e)
+	}
+	runner, e := migrations.NewRunner(migrationList(history), backend)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = runner.Up(ctx); e != nil {
+		t.Fatal("native migration installation failed", e)
+	}
+	if _, e = runner.Up(ctx); e != nil {
+		t.Fatal("migration replay failed", e)
+	}
+	pool, e := database.Connect(ctx, database.Config{DSN: dsn, MaxConns: 4, Configure: func(c *database.PoolConfig) error { c.ConnConfig.Database = name; return nil }})
+	if e != nil {
+		t.Fatal("native pool unavailable")
+	}
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if e := pool.Close(cleanup); e != nil {
+			t.Error("owned pool cleanup failed")
+		}
+	})
+	f := &orgFixture{ctx: ctx, pool: pool, dsn: dsn, database: name, authentication: map[string]organization.Authentication{}, profile: sessionpg.IdentifierAdmissionConfig{GlobalAuthorityID: "organization-tests", PolicyNamespace: "users", Audience: "organization-test", AuthenticationMethod: "password", CredentialKind: identity.CredentialPassword, CredentialOwner: "identity/password"}}
+	f.history = append(migrationList(nil), history...)
+	f.key, e = session.NewDigestKey(1, bytes.Repeat([]byte{0x41}, 32))
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, tenant := range tenants {
+		for _, user := range users {
+			f.seedUser(t, tenant, user)
+		}
+	}
+	f.sessions, e = sessionpg.NewSessionService(pool, sessionpg.SessionServiceConfig{Repository: sessionpg.Config{Schema: "organization_sessions", MaximumDuration: time.Second}, Profile: f.profile, Validation: session.ServiceConfig{Profile: session.StorageStatefulOpaque, Audience: f.profile.Audience, Clock: clock.System{}, MaximumDuration: 2 * time.Second, ClockUncertainty: time.Millisecond, LookupKeys: []session.DigestKey{f.key}}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.compose(t)
+	return f
+}
+
+func (f *orgFixture) compose(t *testing.T) {
+	f.composeWithTenantLimit(t, 1000)
+}
+
+func (f *orgFixture) composeWithTenantLimit(t *testing.T, maximum uint64) {
+	t.Helper()
+	pool := f.pool
+	repository, e := organizationpg.NewRepository(pool, organizationpg.Config{MaximumDuration: 2 * time.Second})
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.participant, e = organizationpg.NewContributor(repository, organizationpg.ContributorConfig{Session: sessionpg.Config{Schema: "organization_sessions", MaximumDuration: time.Second}, Profile: f.profile, LookupKeys: map[uint32]session.DigestKey{1: f.key}, PolicyID: "organization", PolicyVersion: 1, MaximumMembers: 100, MaximumPerUser: 100, MaximumPerTenant: maximum, Teams: f.teams, Domains: f.domains, DomainEvidence: f.domainEvidence, DynamicRoles: f.dynamicRoles, OwnerTransferPrimary: f.ownerTransferPrimary, Lifecycle: f.lifecycle, ArchivePrimary: f.archivePrimary, RestorePrimary: f.restorePrimary})
+	if e != nil {
+		t.Fatal(e)
+	}
+	counters := nativeRisk(t)
+	domain, e := kernel.NewRepository(pool, kernel.Config{MaximumDuration: 2 * time.Second})
+	if e != nil {
+		t.Fatal(e)
+	}
+	audits, e := auditpg.NewIdentityContributor(auditpg.Config{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	outbox, e := lifecyclepg.NewContributor()
+	if e != nil {
+		t.Fatal(e)
+	}
+	registry, e := kernel.NewContributorRegistry([]kernel.Contributor{domain, audits, outbox, counters, f.participant})
+	if e != nil {
+		t.Fatal(e)
+	}
+	coordinator, e := kernel.NewCoordinator(pool, registry, kernel.CoordinatorConfig{MaximumDuration: 3 * time.Second, LeaseDuration: time.Minute, CurrentFingerprintKeyVersion: 1, RetainedFingerprintKeys: map[uint32][32]byte{1: {0x45}}, QueryPolicy: &kernel.CommandQueryPolicy{Authorization: fixturePolicy{}, Clock: clock.System{}, PolicyVersion: 1}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.configuration = organizationpg.ServiceConfig{Core: organization.Config{Clock: clock.System{}, MaximumDuration: 4 * time.Second, PolicyID: "organization", PolicyVersion: 1, MaximumMembers: 100, MaximumPerUser: 100, MaximumPerTenant: maximum, ValidateCanonicalID: func(_ context.Context, id organization.ID) error {
+		if id == "" {
+			return errors.New("invalid")
+		}
+		return nil
+	}}, Sessions: f.sessions, Authorization: fixturePolicy{}, Risk: counters, Coordinator: coordinator, Registry: registry}
+	f.configuration.Core.Teams = f.teams
+	f.configuration.Core.DynamicRoles = f.dynamicRoles
+	f.configuration.Core.Domains = f.domains
+	f.configuration.Core.Lifecycle = f.lifecycle
+	f.service, e = organizationpg.NewService(f.participant, f.configuration)
+	if e != nil {
+		t.Fatal(e)
+	}
+}
+
+func nativeRisk(t *testing.T) *riskpg.Repository {
+	t.Helper()
+	policy, e := risk.NewPolicy(risk.PolicyConfig{Version: 1, Limits: risk.VelocityLimits{MaxDimensions: 4, MaxCounters: 16, MaxWindow: time.Hour, MaxLimit: 120, KeyBytes: 64, RetryAfterMax: time.Hour}, Profiles: []risk.Profile{
+		{Class: risk.Authentication, Phase: risk.BeforeCredential, Dimensions: []risk.Dimension{risk.TenantDimension, risk.NetworkDimension, risk.DeviceDimension, risk.IdentifierDimension}, Window: 5 * time.Minute, Limit: 10, ThresholdAction: risk.Throttle, EvidenceTTL: 5 * time.Minute, Unknown: risk.DenyUnknown, MaxCounters: 4, RequiredSignals: []string{"status", "velocity"}},
+		{Class: risk.CredentialMutation, Phase: risk.ReserveWithCommand, Dimensions: []risk.Dimension{risk.TenantDimension, risk.SubjectDimension, risk.SessionDimension, risk.NetworkDimension}, Window: 15 * time.Minute, Limit: 5, ThresholdAction: risk.Deny, EvidenceTTL: 15 * time.Minute, Unknown: risk.DenyUnknown, MaxCounters: 4, RequiredSignals: []string{"status", "velocity"}},
+		{Class: risk.Privileged, Phase: risk.ReserveWithCommand, Dimensions: []risk.Dimension{risk.TenantDimension, risk.ActorDimension, risk.ResourceDimension, risk.NetworkDimension}, Window: time.Hour, Limit: 20, ThresholdAction: risk.Deny, EvidenceTTL: 15 * time.Minute, Unknown: risk.DenyUnknown, MaxCounters: 4, RequiredSignals: []string{"status", "velocity"}},
+		{Class: risk.StateNeutralRead, Phase: risk.BeforeReturn, Dimensions: []risk.Dimension{risk.TenantDimension, risk.SubjectOrNetworkDimension}, Window: time.Minute, Limit: 120, ThresholdAction: risk.Throttle, EvidenceTTL: time.Minute, Unknown: risk.StepUpWithIndependentFactor, MaxCounters: 2, RequiredSignals: []string{"status", "velocity"}},
+	}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	key, e := risk.NewCounterDigestKey(1, bytes.Repeat([]byte{0x42}, 32))
+	if e != nil {
+		t.Fatal(e)
+	}
+	evidence, e := risk.NewEvidenceKey(1, bytes.Repeat([]byte{0x43}, 32), bytes.Repeat([]byte{0x44}, 32))
+	if e != nil {
+		t.Fatal(e)
+	}
+	r, e := riskpg.NewRepository(riskpg.Config{Schema: "organization_risk", PolicyVersion: 1, EvidenceKeys: []risk.EvidenceKey{evidence}, EnvelopeKeys: map[string][]byte{"test": bytes.Repeat([]byte{0x46}, 32)}, CurrentEnvelopeKey: "test", CommandCounters: &risk.CommandCounterPolicyConfig{Policy: policy, Keys: []risk.CounterDigestKey{key}}, EnforceLockouts: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	return r
+}
+
+func (f *orgFixture) seedUser(t *testing.T, tenant identity.TenantID, user identity.UserID) {
+	t.Helper()
+	if _, e := f.pool.Raw().Exec(f.ctx, `INSERT INTO identity.users(tenant_id,user_id,status,version) VALUES($1,$2,'active',1);`, string(tenant), string(user)); e != nil {
+		t.Fatal("identity fixture failed", e)
+	}
+	if _, e := f.pool.Raw().Exec(f.ctx, `INSERT INTO identity.credential_references(tenant_id,user_id,credential_id,kind,owner,version,enabled) VALUES($1,$2,'password',1,'identity/password',1,true)`, string(tenant), string(user)); e != nil {
+		t.Fatal("credential fixture failed", e)
+	}
+	policyScope := authority.AuthorityScope{TenantID: authorization.TenantID(tenant), PolicyNamespace: "users", SubjectID: authorization.SubjectID(user)}
+	if _, e := authority.InitializeAuthority(f.ctx, f.pool.Raw(), policyScope, time.Second); e != nil {
+		t.Fatal(e)
+	}
+	remember, e := session.ResolveRememberPolicy(session.BrowserSession, session.LifetimeConfig{Default: session.BrowserSession, AbsoluteTTL: time.Hour, IdleTTL: 30 * time.Minute, RefreshAfter: 5 * time.Minute, FreshFor: 15 * time.Minute})
+	if e != nil {
+		t.Fatal(e)
+	}
+	keys, e := kernel.KernelAuthorityKeys(kernel.DirectoryAuthorityQuery{GlobalAuthorityID: "organization-tests", TenantID: tenant}, user)
+	if e != nil {
+		t.Fatal(e)
+	}
+	sessionID, family := "session-"+string(user), "family-"+string(user)
+	sk, e := sessionpg.SessionAuthorityKeys(tenant, user, family, sessionID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	pk, e := policyScope.Key()
+	if e != nil {
+		t.Fatal(e)
+	}
+	bind := func(k string) session.AuthorityBinding { return session.AuthorityBinding{ScopeKey: k, Version: 1} }
+	authoritySpec := session.AuthoritySnapshotSpec{Global: bind(keys.Global), Tenant: bind(keys.Tenant), User: bind(keys.User), Identifier: bind(keys.Identifier), Credential: bind(keys.Credential), SessionFamily: bind(sk.Family), Session: bind(sk.Session), Authorization: bind(pk)}
+	vector, e := session.NewAuthoritySnapshot(authoritySpec)
+	if e != nil {
+		t.Fatal(e)
+	}
+	token, e := session.NewToken(32)
+	if e != nil {
+		t.Fatal(e)
+	}
+	digest, e := token.Digest(f.key, string(tenant))
+	if e != nil {
+		t.Fatal(e)
+	}
+	wire, e := token.Reveal()
+	if e != nil {
+		t.Fatal(e)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	metadata := session.AuthenticationMetadata{Kind: session.AuthenticationVerified, Proof: auth.Proof{ID: "abcdefghijklmnopqrstuv", Tenant: string(tenant), Subject: string(user), Method: "password", Assurance: auth.AssuranceSingleFactor, Purpose: "session-issue", Audience: f.profile.Audience, IssuedAt: now.Add(-time.Second), ExpiresAt: now.Add(time.Minute)}, ProofVersion: 1, CredentialID: "password", CredentialVersion: 1}
+	record, e := session.NewSession(session.SessionSpec{SessionID: sessionID, FamilyID: family, TenantID: tenant, UserID: user, Audience: f.profile.Audience, Version: 1, FamilyVersion: 1, Remember: remember, Authority: vector, Lookup: digest, Authentication: metadata, IssuedAt: now, LastActivityAt: now})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = record.Bindings(); e != nil {
+		t.Fatal(e)
+	}
+	resolved, _ := remember.Bindings()
+	payload, e := json.Marshal(map[string]any{"Schema": 1, "SessionID": sessionID, "FamilyID": family, "TenantID": tenant, "UserID": user, "Audience": f.profile.Audience, "Version": uint64(1), "FamilyVersion": uint64(1), "Remember": resolved, "Authority": authoritySpec, "Lookup": digest, "Authentication": metadata, "IssuedAt": now, "LastActivityAt": now})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = f.pool.Raw().Exec(f.ctx, `INSERT INTO organization_sessions.families(tenant_id,family_id,user_id,version,state,issued_at) VALUES($1,$2,$3,1,'active',$4)`, string(tenant), family, string(user), now.Format("2006-01-02T15:04:05.000000000Z")); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = f.pool.Raw().Exec(f.ctx, `INSERT INTO organization_sessions.sessions(tenant_id,session_id,user_id,family_id,version,family_version,state,digest_version,digest,expires_at,record) VALUES($1,$2,$3,$4,1,1,'active',1,$5,$6,$7)`, string(tenant), sessionID, string(user), family, digest.Sum[:], now.Add(30*time.Minute).Format("2006-01-02T15:04:05.000000000Z"), payload); e != nil {
+		t.Fatal(e)
+	}
+	f.authentication[string(tenant)+":"+string(user)] = organization.Authentication{TenantID: tenant, Bearer: auth.NewBearerCredential(wire)}
+}
+
+func commandID(t *testing.T) identity.CommandID {
+	t.Helper()
+	id, e := identity.NewCommandID()
+	if e != nil {
+		t.Fatal(e)
+	}
+	return id
+}
+func (f *orgFixture) auth(tenant, user string) organization.Authentication {
+	return f.authentication[tenant+":"+user]
+}
+func (f *orgFixture) create(t *testing.T, tenant string) organizationpg.PreparedCommand {
+	t.Helper()
+	p, e := f.service.PrepareCreate(f.ctx, organization.CreateRequest{Authentication: f.auth(tenant, "owner"), CommandID: commandID(t), ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", Slug: "example", Name: "Example", CorrelationID: "organization-test"}, "127.0.0.1")
+	if e != nil {
+		t.Fatal("prepare create", e)
+	}
+	r, e := f.service.Execute(f.ctx, p)
+	if e != nil || r.Receipt.Outcome != identity.CommitOutcomeCommitted {
+		t.Fatal("create did not commit", r.Receipt.Outcome, e)
+	}
+	return p
+}
+func (f *orgFixture) add(t *testing.T, tenant, user string, role organization.Role, version uint64) organizationpg.PreparedCommand {
+	t.Helper()
+	p, e := f.service.PrepareAddMember(f.ctx, organization.MemberRequest{Authentication: f.auth(tenant, "owner"), CommandID: commandID(t), OrganizationID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", UserID: identity.UserID(user), Role: role, OrganizationVersion: version, CorrelationID: "organization-test"}, "127.0.0.1")
+	if e != nil {
+		t.Fatal("prepare member", e)
+	}
+	r, e := f.service.Execute(f.ctx, p)
+	if e != nil || r.Receipt.Outcome != identity.CommitOutcomeCommitted {
+		t.Fatal("member did not commit", r.Receipt.Outcome, e)
+	}
+	return p
+}
