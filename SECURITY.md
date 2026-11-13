@@ -2,15 +2,17 @@
 
 ## Current support boundary
 
-This repository is planning-only. It contains no implemented SSO package,
-runtime API, supported protocol, or published release. Its module declaration
-is a tooling identity, not an installable security product. No version is
-currently supported for production use, and no module release is eligible.
+The experimental runtime profile is DNS domain challenge/proof orchestration,
+with optional bounded DNS retrieval and encrypted native challenge custody.
+Organization remains the sole domain proof/ownership authority. Provider
+registration, routing, HTTPS verification, protocol login, JIT and HTTP routes
+are not implemented or advertised. No stable supported production release or
+complete SSO-platform security qualification is claimed.
 
 The [threat model](docs/security/threat-model.md) records design requirements
-for future work, not verified protections or a completed security assessment.
-Future implementation requires its own behavioral security evidence and review
-before any support or release claim.
+for the selected profile and future work, not a completed security assessment.
+Behavioral evidence and independent review remain required before support or
+release claims; scanner success does not establish those properties.
 
 ## Private reporting
 
@@ -23,7 +25,7 @@ Include the affected commit or planning document, the relevant trust boundary,
 a minimal sanitized reproduction where possible, and the expected impact.
 The repository maintainer owns acknowledgement, severity assessment,
 remediation coordination, and disclosure. No response-time or runtime support
-guarantee is made by this planning policy.
+guarantee is made by this policy.
 
 Confirmed issues are triaged by impact and reproducibility. Coordinate public
 disclosure through the private report; identify affected source and versions
@@ -34,7 +36,7 @@ or automation defects may be fixed without a module release.
 
 ## Release verdict
 
-Non-releasable. There is no runtime attack surface to exercise here yet;
-runtime scans, protocol tests, and public consumer installation are not proof
-that the planning design has been implemented. Repository automation and
-documentation remain subject to review and required CI.
+Experimental and not fully release-qualified. Selected DNS behavioral evidence
+does not establish every SSO unit, protocol, supply-chain or release obligation.
+Repository automation, runtime source and documentation remain subject to review
+and applicable required checks.

@@ -3,16 +3,35 @@
 [Documentation map](../index.md) · [Repository README](../../README.md)
 [Next: Goal: planned go-sso boundary](../goal.md)
 
-Version: 1. Scope: the planned root `github.com/faustbrian/go-sso` boundary.
+Version: 2. Scope: selected experimental DNS proof profile and retained broader
+`github.com/faustbrian/go-sso` planning boundary.
 
 ## Status and assets
 
-No runtime implementation exists. The following requirements must be proved
-when executable code is introduced; none is an assertion of current protocol
-support or security behavior. Present assets are planning integrity, maintainer
-authority, immutable automation inputs, and private security reports. Future
-assets include organization membership, verified domains, login transactions,
-enterprise tokens, directory state, and break-glass access.
+The selected runtime issues bounded capability-bound DNS challenges and consumes
+organization-owned proof transitions. Assets include encrypted challenge
+capabilities, original safe recovery scope, organization isolation, freshness and
+current session/management authority. No provider, routing, protocol login, JIT,
+HTTPS or HTTP capability is exposed. The broader requirements below remain
+future scope, not current protocol or whole-platform security claims.
+
+## Selected DNS boundaries
+
+| Boundary | Current policy and attributable regression |
+| --- | --- |
+| Current caller to issued challenge | Actual primary organization claim/session admission plus SSO action policy; tenant/org/claim/version, actor, purpose, method, command ID and original expiry bind the existing signed capability. |
+| Current invocation to DNS observation | Private invocation-scoped exact-request/current-network binding; existing fail-closed rate admission for tenant/org/domain/network and fixed process concurrency before bounded external work. No global request selector. |
+| DNS wire to non-authoritative observation | Exact TXT owner/value, canonical IDNA/PSL scope, bounded UDP/records/bytes, zero CNAME depth, classified denial/unavailability, no retries, cache or DNSSEC claim. Domain/DNS fuzz targets and an independent authoritative DNS wire server exercise this boundary. |
+| Observation to organization proof | Only the configured trusted organization source and existing native facade may prepare/apply evidence. Actual kernel/org/session/risk/audit/outbox owners retain current authority, commit, rollback, unique ownership and current-proof reads. |
+| Ciphertext to challenge custody | Existing secret-envelope AEAD binds exact scope and UTC times. No capability plaintext, DNS answers, private network addresses or raw dependency diagnostics enter persistence/log output. |
+| Ambiguous attempt to recovery | Original safe binding saved before Apply; lost commit recovers the identical native result without DNS. Saved-but-unapplied absence/denial remains unresolved, never inferred rollback or automatic reexecution. Historical proof does not replace current primary proof. |
+
+Native tests cover wrong-tenant, mismatch, expired/withdrawn challenge, current
+network throttle, pre-Apply cancellation and actual lost COMMIT response. Local
+profile evidence is not complete unit/release qualification or live external
+DNS validation. Callers own keys, configured resolver, bounded policy/rate owners
+and runtime resource lifetime; they do not supply substitute domain stores or
+proof/transaction authorities.
 
 ## Proposed trust boundaries
 
@@ -48,9 +67,9 @@ behavioral contracts or replace independent design review.
 
 | Risk | Owner, rationale, mitigation and review condition |
 | --- | --- |
-| Proposed design mistaken for a usable SSO implementation | Repository maintainer; planning documents can be mistaken for guarantees. README and security policy state no runtime/release, metadata marks non-releasable. Review on any source, catalog or release change. |
+| Selected DNS profile mistaken for complete SSO | Repository maintainer; the README and security policy name the exact experimental runtime and excluded variants. Whole-unit/release qualification remains separate. Review on any capability, source, catalog or release change. |
 | Application or protocol adapter mistakes after future composition | Future application and adapter owners; those components are intentionally outside this root boundary. Require explicit integration authority and executable binding/failure tests before implementation or support claims. Not an acceptance of an exploitable runtime defect. |
 
-No known runtime finding is accepted or declared fixed in this planning-only
-repository. A future implementation must revisit this model and produce its
-own release verdict; this document cannot satisfy that future completion gate.
+No broader protocol or platform security acceptance is implied. Each additional
+profile must revisit this model and establish its own executable evidence and
+release verdict; this document does not satisfy that future completion gate.

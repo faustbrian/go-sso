@@ -1,104 +1,125 @@
 # go-sso
 
-> **Status: planned.** This repository does not currently provide an
-> installable package, a released version, or a runtime API.
+Experimental, storage-neutral enterprise SSO workflows for Go 1.27.
 
-`go-sso` reserves the planned Golib boundary for enterprise SSO provider
-lifecycle, verified-domain routing, discovery policy, attribute mapping, JIT
-provisioning, organization membership, enforcement, break-glass recovery,
-enterprise token custody, and directory synchronization. The plan keeps those
-concepts separate from protocol wire handling, persistence, SCIM, and
-application concerns.
+The selected profile is **DNS domain proof only**: an existing authorized
+organization claim receives an SSO-issued capability-bound challenge, the DNS
+adapter observes its exact TXT commitment, and the organization owner alone
+commits and reads authoritative proof. This profile is not a release-qualified
+SSO platform. Provider registration, routing, HTTPS verification, login, JIT,
+protocol adapters and HTTP routes are not implemented or advertised.
 
-## Planning documentation
+## Composition
 
-This repository remains planned and non-releasable. The
-[documentation map](docs/index.md) links its proposed contracts and security
-boundaries; it is not an installation or runtime guide.
+The root package defines immutable `DomainProofRequest`,
+`DomainProofObservation`, `DomainProofMethod` and exactly
+`DomainProofEngine.Observe(context.Context, DomainProofRequest)`. It imports
+neither the DNS implementation nor database/transaction types.
 
-## Planned responsibility
+- The separately versioned `domain-verification` adapter implements the bounded
+  DNS profile.
+- The separately versioned `postgres` adapter supplies encrypted challenge persistence and
+  the existing native organization evidence facade. It stores no proof truth or
+  command outcomes.
+- `github.com/faustbrian/go-organization` owns domain claims, unique ownership,
+  versioning, expiry, withdrawal/revocation and current proof reads.
 
-The future root package is intended to own storage-neutral enterprise SSO
-policy, provider and login lifecycle, protocol-neutral transactions and
-assertions, provisioning coordination, enforcement, and directory-sync state.
-Its contracts remain proposals until they are implemented, reviewed, verified,
-and released.
+Configure the existing native organization/kernel/session/risk/audit/outbox
+owners first. Construct the challenge store and DNS engine, then construct
+`NewDomainObserver` and install it as the deployment-selected
+`organization/postgres.DomainEvidenceSource`. This ensures external observation
+runs only inside organization's existing current claim/session/policy admission.
+The native `NewDomainEvidenceFactory` wraps that same organization service.
 
-## Non-goals
+Create an invocation-scoped `NewService` with current authentication and the
+canonical client IP from a trusted transport. The caller supplies configuration,
+capability keys/resolver, the existing authorization service and a fail-closed
+rate-limit service/policy, not missing domain stores or transaction glue.
 
-The planned root boundary does not own:
+```go
+issued, err := service.ChallengeDomain(ctx, sso.DomainChallengeRequest{
+    OrganizationID: organizationID,
+    ClaimID:        existingClaimID,
+    CommandID:      originalCommandID,
+    CorrelationID:  "domain-proof",
+})
+if err != nil {
+    return err
+}
+owner, value := issued.DNSTXT()
+// Publish exactly this owner/value through your DNS administrator.
+_ = owner
+_ = value
 
-- OAuth 2.0, OpenID Connect, or SAML wire handling;
-- SCIM protocol behavior or generic identity user interfaces;
-- consumer social-login provider catalogs; or
-- database clients, migrations, transactions, caches, or persistence adapters.
-
-Those concerns may become separate modules or compose existing Golib packages.
-Their presence in planning material does not make them available here.
-
-## Lifecycle and ownership
-
-Implementation, hardening, and release have not started. The current module
-declaration exists only so repository tooling can validate the planned module
-identity, family, ownership, and lifecycle metadata.
-
-The plan requires caller-owned configuration and runtime resources, copied
-mutable inputs, context-bounded external operations, and no package-owned
-background work. These are design constraints, not claims about released
-behavior.
-
-## Planning and verification
-
-The [repository goal](docs/goal.md) and `modules.json` record the planning scope
-and schema-v2 engineering inventory. Planned lifecycle state excludes this
-module from installable and released consumer catalogs. The local
-`make cohesion` target validates that boundary with the exact checksum-pinned
-`go-library-tools` release declared in `.golib.yaml`.
-
-Passing repository checks proves only that the planning scaffold and metadata
-are internally consistent. It does not prove SSO behavior, protocol support,
-or an API.
-
-The [security policy](SECURITY.md) provides private reporting and the
-[versioned threat model](docs/security/threat-model.md) records proposed trust
-boundaries and future executable evidence. This planning module is not
-releasable; neither document establishes implemented security controls.
-
-Use the checksum-verified public `golib` v2.1.2 release declared in
-`.golib.yaml`, with Go 1.27.2 as the verification producer. The planned module's
-minimum remains Go 1.27.0; no runtime package or release is introduced.
-An ordinary standalone checkout is sufficient, without sibling repositories,
-goal ledgers or building Tools from source:
-
-```sh
-make check
-make ci
+result, err := service.VerifyDomain(ctx, issued.Request())
+if err != nil {
+    // Retain the original request and outcome. Unknown must be recovered.
+    return err
+}
+current, err := service.GetDomainProof(ctx, organization.DomainProofKey(result.Proof))
+_ = current
+return err
 ```
 
-Both routes, and the `make fast-check` alias, check configuration, repository
-structure, cohesion, offline specification decisions, local documentation links
-and unconditional whole-tree secrets. They run no application tests, mutation
-campaigns or release checks. Hosted Required applies the same structural checks
-and scans committed changed content against the exact validated PR base or push
-before commit, without a fallback base or a duplicate full-history scan.
-Missing or invalid change identities and failed checks remain failures.
-The changed-content scanner has a fatal 75-second deadline and five-second
-termination grace, allowing bounded cold compilation without skipping scans.
+The root module contains orchestration contracts, not a DNS resolver or database
+implementation. The complete executable composition belongs to the independently
+versioned PostgreSQL adapter and requires that adapter's published implementation.
+Actual native owners retain organization, authorization, session, risk,
+transaction, audit and proof authority.
 
-`make check-full` optionally preserves the previous full manifest-selected
-contract, including broad spelling and external-link documentation assurance.
-It is not an ordinary CI prerequisite and does not establish runtime or release
-qualification for this planned module.
+## Custody and recovery
 
-`make check-online` explicitly adds authoritative specification refresh to the
-local contract. Scheduled and manual CI also refresh those authorities online
-and run whole-tree secrets. Passing any of these planning routes is not runtime
-security or release qualification.
+Generate a command ID using `identity.NewCommandID` and preserve it. There is one
+immutable challenge per exact tenant/organization/claim; issuance retries never
+renew its expiry. The capability is envelope-encrypted at rest. DNS contains
+only its SHA-256 commitment. The commitment and a method label confer no
+organization authority by themselves. Current owner/admin authentication and
+explicit SSO action policy are required again at verification and recovery.
 
-See the versioned [Golib ecosystem index](https://github.com/faustbrian/go-library-tools/blob/v1.8.4/docs/ecosystem/README.md)
-and [package-family guidance](https://github.com/faustbrian/go-library-tools/blob/v1.8.4/docs/ecosystem/design-language.md#package-families-and-selection)
-for the shared design language.
+The observer receives a private invocation-scoped binding with the exact issued
+request and **current invoking network**, not the original challenge's network.
+It applies the existing rate limiter to tenant, organization, domain and network
+before DNS. The engine additionally bounds process concurrency and network work.
+No global request selector, background worker, cached allow or replacement
+ownership authority exists.
 
-## License
+Before Apply, SSO saves only the original safe organization recovery binding.
+A lost/uncertain response to saving that binding also returns Unknown with the
+exact original scope and never proceeds to Apply.
+A lost commit response exposes Unknown and no proof. `RecoverDomain`, and a
+verification retry with saved recovery scope, query only that original native
+command and never perform DNS or reexecute.
 
-MIT. See [LICENSE](LICENSE).
+A process/cancellation window after saving the binding but before Apply is
+also Unknown, not a proved rollback. The native generic coordinator deliberately
+makes absent and denied recovery indistinguishable. Such recovery may remain
+undisclosed; retain the original Unknown and binding. Do not infer
+NotCommitted, automatically retry observation or invent a new command outcome.
+An operator who explicitly abandons the attempt may use the existing
+current-authorized organization withdrawal operation, then reserve a **new**
+immutable claim and issue a new challenge. This is not automatic renewal,
+transfer or takeover.
+
+For process recovery, rebuild the invocation service with fresh current
+authentication, use `LoadDomainRequest` with the exact original key, then call
+`RecoverDomain`. A historical committed result remains historical after expiry
+or withdrawal. Only `GetDomainProof` consults current primary proof authority;
+neither a retained challenge nor recovered proof snapshot authorizes routing.
+
+## Verification and limits
+
+Focused module tests, native integration, race/cancellation, bounded domain/DNS
+fuzzing and representative indexed query tests cover this selected profile.
+The query test records actual pgx SQL/binding types and plans on 100,001
+synthetic challenge rows; its local warmed timings are not production claims.
+Full unit coverage/mutation, release supply-chain and clean published-consumer
+qualification remain separate obligations. No full `sso`,
+`sso/domain-verification`, `sso/postgres` or M25 completion is claimed.
+
+Every Go run needs task-owned `GOCACHE`, `GOMODCACHE` and `GOTMPDIR`. Run tests
+inside the selected module; native tests require the explicitly task-owned
+`GOLIB_ORGANIZATION_TEST_POSTGRES_DSN` fixture and integration tag. Never point
+the fixture at an existing/shared database cluster.
+
+See [SECURITY.md](SECURITY.md), [the repository goal](docs/goal.md) and
+[CHANGELOG.md](CHANGELOG.md). Existing planning goals retain the broader scope.
