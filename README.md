@@ -2,12 +2,32 @@
 
 Experimental, storage-neutral enterprise SSO workflows for Go 1.27.
 
-The selected profile is **DNS domain proof only**: an existing authorized
+One selected profile is **DNS domain proof**: an existing authorized
 organization claim receives an SSO-issued capability-bound challenge, the DNS
 adapter observes its exact TXT commitment, and the organization owner alone
-commits and reads authoritative proof. This profile is not a release-qualified
-SSO platform. Provider registration, routing, HTTPS verification, login, JIT,
-protocol adapters and HTTP routes are not implemented or advertised.
+commits and reads authoritative proof. A separate native profile registers
+**disabled, metadata-only static OIDC providers** and reads safe organization
+metadata. Neither profile is a release-qualified SSO platform. Provider enable,
+credentials, routing, HTTPS verification, login, JIT, protocol adapters and HTTP
+routes are not implemented or advertised.
+
+## Disabled static OIDC provider values
+
+`NewOIDCStaticMetadata` validates explicit HTTPS issuer, authorization, token
+and JWKS locations without fetching them. `NewAttributeMapping` freezes a
+positive mapping version and explicit flat claim names; it interprets no claims
+and grants no roles or permissions. Zero values are invalid. Their explicit
+`Spec` projections are detached configuration, not protocol or domain proof;
+implicit formatting is redacted and serialization fails closed.
+
+The storage-neutral `ProviderRegisterOidcRequest` accepts these values, an exact
+issuer, canonical distinct pending domains, a command ID and an idempotency key.
+It accepts no provider credential, enabled flag or freshly manufactured proof.
+The native [PostgreSQL composition](postgres/README.md) authenticates current
+organization administration and owns persistence through the existing identity
+coordinator. `ProviderGetRequest` and bounded `ProviderListRequest` select safe
+metadata only. Registered providers remain disabled with empty `VerifiedDomains`;
+requested domains do not become ownership evidence or routes.
 
 ## Composition
 

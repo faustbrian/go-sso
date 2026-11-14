@@ -1,6 +1,7 @@
 // Package sso implements explicitly selected enterprise federation workflows.
-// The current profile issues DNS challenges and delegates proof authority to
-// organization; provider registration, routing and login are not implemented.
+// Selected profiles issue DNS challenges with organization-owned proof authority
+// and register disabled static-OIDC metadata through the native adapter. Provider
+// enable, routing, protocol login and JIT provisioning are not implemented.
 package sso
 
 import (

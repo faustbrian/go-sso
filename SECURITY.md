@@ -2,11 +2,12 @@
 
 ## Current support boundary
 
-The experimental runtime profile is DNS domain challenge/proof orchestration,
-with optional bounded DNS retrieval and encrypted native challenge custody.
-Organization remains the sole domain proof/ownership authority. Provider
-registration, routing, HTTPS verification, protocol login, JIT and HTTP routes
-are not implemented or advertised. No stable supported production release or
+The experimental runtime profiles are DNS domain challenge/proof orchestration
+and disabled, metadata-only static OIDC provider registration. Native storage
+encrypts challenge and provider configuration custody; organization remains the
+sole domain proof/ownership authority. Provider enable, routing, HTTPS
+verification, protocol login, JIT and HTTP routes are not implemented or
+advertised. No stable supported production release or
 complete SSO-platform security qualification is claimed.
 
 The [threat model](docs/security/threat-model.md) records design requirements
