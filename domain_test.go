@@ -62,6 +62,32 @@ func TestChallengeDigestLengthRejectsBeforeDecodingAllocation(t *testing.T) {
 	}
 }
 
+func TestHTTPSChallengeMethodAndObservationStayBound(t *testing.T) {
+	r := testProofRequest()
+	r.record.Method = DomainProofHTTPS
+	if err := r.Validate(); err != nil {
+		t.Fatal("issued HTTPS custody rejected", err)
+	}
+	result := DomainChallengeResult{request: r}
+	url, body := result.HTTPSWellKnown()
+	if url != "https://example.com/.well-known/golib-sso" || body != "golib-sso="+r.ChallengeDigest() {
+		t.Fatal("HTTPS publication widened exact host/path/body")
+	}
+	if owner, value := result.DNSTXT(); owner != "" || value != "" {
+		t.Fatal("HTTPS issuance exposed DNS downgrade")
+	}
+	at := r.IssuedAt().Add(time.Minute)
+	if _, err := NewDomainProofObservation(r, DomainObservedMatch, at, at.Add(time.Minute), DomainSourceHTTPS); err != nil {
+		t.Fatal("HTTPS observation rejected", err)
+	}
+	if _, err := NewDomainProofObservation(r, DomainObservedMatch, at, at.Add(time.Minute), DomainSourceDNS); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("DNS observation substituted for HTTPS", err)
+	}
+	if use := capabilityUse(DomainConfig{}, r.record); use.Caveats["method"] != "https-well-known" {
+		t.Fatal("capability did not bind HTTPS method")
+	}
+}
+
 func FuzzChallengeDigest(f *testing.F) {
 	for _, seed := range []string{strings.Repeat("a", 64), "", strings.Repeat("A", 64), strings.Repeat("f", 65), "not-hex"} {
 		f.Add(seed)

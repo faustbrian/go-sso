@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add explicit opt-in HTTPS well-known domain challenges and method-bound
+  observations through the existing organization-owned proof transition.
+  Existing DNS constructors and request/config literal shapes remain unchanged;
+  original retries and unknown recovery never repeat external observation.
+
 - Require 1 through 128 canonical distinct pending domains for provider
   registration; domainless registration is unsupported.
 - Add immutable explicit static-OIDC metadata and flat attribute-mapping values,

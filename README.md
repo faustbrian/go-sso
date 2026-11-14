@@ -2,13 +2,14 @@
 
 Experimental, storage-neutral enterprise SSO workflows for Go 1.27.
 
-One selected profile is **DNS domain proof**: an existing authorized
-organization claim receives an SSO-issued capability-bound challenge, the DNS
-adapter observes its exact TXT commitment, and the organization owner alone
+Selected profiles are **DNS domain proof** and explicitly opted-in **HTTPS
+well-known domain proof**: an existing authorized organization claim receives
+an SSO-issued capability-bound challenge, the selected adapter observes its
+exact public commitment, and the organization owner alone
 commits and reads authoritative proof. A separate native profile registers
 **disabled, metadata-only static OIDC providers** and reads safe organization
 metadata. Neither profile is a release-qualified SSO platform. Provider enable,
-credentials, routing, HTTPS verification, login, JIT, protocol adapters and HTTP
+credentials, routing, login, JIT, protocol adapters and HTTP
 routes are not implemented or advertised.
 
 ## Disabled static OIDC provider values
@@ -36,8 +37,8 @@ The root package defines immutable `DomainProofRequest`,
 `DomainProofEngine.Observe(context.Context, DomainProofRequest)`. It imports
 neither the DNS implementation nor database/transaction types.
 
-- [domain-verification](domain-verification/README.md) implements the bounded
-  DNS profile.
+- [domain-verification](domain-verification/README.md) implements bounded DNS
+  and verified-TLS HTTPS profiles.
 - [postgres](postgres/README.md) supplies encrypted challenge persistence and
   the existing native organization evidence facade. It stores no proof truth or
   command outcomes.
@@ -86,6 +87,27 @@ The complete executable native composition is in
 Its independent authoritative DNS server controls only external TXT publication;
 actual public native owners retain all organization, authorization, session,
 risk, transaction, audit and proof authority.
+
+### Explicit HTTPS composition
+
+Install `postgres.DomainChallengeMethodMigrationSource` after the original
+challenge migration and before enabling HTTPS callers. Keep `NewStore`,
+`NewDomainObserver`, `NewService` and the original request/config literals for
+unchanged DNS behavior, including against the original schema.
+
+For HTTPS, use `postgres.NewHTTPSStore`, `domainverification.NewHTTPSFetcher`,
+`domainverification.NewHTTPSEngine`, `NewHTTPSDomainObserver` and
+`NewHTTPSService` at the same existing composition points. `ChallengeDomain`
+then selects HTTPS; publish the URL/body from `issued.HTTPSWellKnown()` with
+exact `Content-Type: text/plain`, no parameters or trailing newline. The URL is
+`https://<canonical-claim-domain>/.well-known/golib-sso` on port 443 and the body
+is `golib-sso=<issued lowercase SHA-256 digest>`. `DNSTXT` returns empty strings
+for HTTPS issuance, and vice versa. Verification, recovery and current-proof
+reads use the same methods above and the organization owner remains authoritative.
+
+Method changes cannot replace an original challenge or renew it. Use a new
+organization-owned immutable claim after an authorized withdrawal; no automatic
+renewal, takeover, DNS fallback or HTTPS-to-DNS downgrade is implemented.
 
 ## Custody and recovery
 

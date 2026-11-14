@@ -1,6 +1,6 @@
 // Package sso implements explicitly selected enterprise federation workflows.
-// Selected profiles issue DNS challenges with organization-owned proof authority
-// and register disabled static-OIDC metadata through the native adapter. Provider
+// Selected profiles issue DNS or opt-in HTTPS challenges with organization-owned
+// proof authority and register disabled static-OIDC metadata through the native adapter. Provider
 // enable, routing, protocol login and JIT provisioning are not implemented.
 package sso
 
@@ -40,8 +40,8 @@ const (
 	domainPurpose                   = "identity.sso.domain-verify"
 )
 
-// DomainProofMethod is the closed immutable observation profile. HTTPS is
-// reserved, not supported by the selected DNS-only service.
+// DomainProofMethod is the closed immutable observation profile. HTTPS requires
+// explicit deployment opt-in; the existing NewService constructor selects DNS.
 type DomainProofMethod uint8
 
 const (
@@ -68,7 +68,10 @@ const (
 // DomainObservationSource is attribution, never a DNSSEC or ownership claim.
 type DomainObservationSource string
 
-const DomainSourceDNS DomainObservationSource = "dns-response"
+const (
+	DomainSourceDNS   DomainObservationSource = "dns-response"
+	DomainSourceHTTPS DomainObservationSource = "https-response"
+)
 
 // DomainChallengeKey selects exactly one tenant/org/immutable claim. There is no
 // domain search, competing-owner discovery, automatic renewal or takeover.
@@ -104,7 +107,7 @@ func (r ChallengeRecord) Validate() error {
 	if err != nil || domain != r.Claim.Domain || commandErr != nil || !canonicalDigest(r.ChallengeDigest) {
 		return ErrInvalidInput
 	}
-	if r.Claim.State != organization.DomainRequested || r.Claim.Version != 1 || r.Method != DomainProofDNS || r.Purpose != domainPurpose {
+	if r.Claim.State != organization.DomainRequested || r.Claim.Version != 1 || (r.Method != DomainProofDNS && r.Method != DomainProofHTTPS) || r.Purpose != domainPurpose {
 		return ErrInvalidInput
 	}
 	if r.IssuedAt.IsZero() || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.Sub(r.IssuedAt) > 24*time.Hour {
@@ -188,7 +191,7 @@ func (o DomainProofObservation) ExpiresAt() time.Time                   { return
 func NewDomainProofObservation(r DomainProofRequest, class DomainObservationClass, at, until time.Time, source DomainObservationSource) (DomainProofObservation, error) {
 	at = at.UTC().Truncate(time.Microsecond)
 	until = until.UTC().Truncate(time.Microsecond)
-	if r.Validate() != nil || source != DomainSourceDNS || at.Before(r.IssuedAt()) || !until.After(at) || until.After(r.ExpiresAt()) {
+	if r.Validate() != nil || source != domainSource(r.Method()) || at.Before(r.IssuedAt()) || !until.After(at) || until.After(r.ExpiresAt()) {
 		return DomainProofObservation{}, ErrInvalidInput
 	}
 	switch class {
@@ -279,7 +282,21 @@ func publicError(ctx context.Context, err error) error {
 }
 
 func capabilityUse(c DomainConfig, r ChallengeRecord) capability.Use {
-	return capability.Use{Issuer: c.Issuer, Audience: c.Audience, Subject: string(r.ActorID), Resource: string(r.Claim.ID), Operation: domainPurpose, Tenant: string(r.Claim.TenantID), Caveats: map[string]string{"organization": string(r.Claim.OrganizationID), "domain": r.Claim.Domain, "claim-version": strconv.FormatUint(r.Claim.Version, 10), "method": "dns-txt"}}
+	return capability.Use{Issuer: c.Issuer, Audience: c.Audience, Subject: string(r.ActorID), Resource: string(r.Claim.ID), Operation: domainPurpose, Tenant: string(r.Claim.TenantID), Caveats: map[string]string{"organization": string(r.Claim.OrganizationID), "domain": r.Claim.Domain, "claim-version": strconv.FormatUint(r.Claim.Version, 10), "method": domainMethodName(r.Method)}}
+}
+
+func domainMethodName(method DomainProofMethod) string {
+	if method == DomainProofHTTPS {
+		return "https-well-known"
+	}
+	return "dns-txt"
+}
+
+func domainSource(method DomainProofMethod) DomainObservationSource {
+	if method == DomainProofHTTPS {
+		return DomainSourceHTTPS
+	}
+	return DomainSourceDNS
 }
 
 // DomainObserver is the trusted deployment-selected organization observer. Its
@@ -288,6 +305,7 @@ type DomainObserver struct {
 	config DomainConfig
 	store  DomainChallengeStore
 	engine DomainProofEngine
+	https  bool
 }
 
 func (DomainObserver) Format(s fmt.State, _ rune) {
@@ -311,6 +329,18 @@ func NewDomainObserver(c DomainConfig, store DomainChallengeStore, engine Domain
 		return nil, ErrInvalidInput
 	}
 	return &DomainObserver{config: c, store: store, engine: engine}, nil
+}
+
+// NewHTTPSDomainObserver explicitly admits HTTPS evidence in addition to DNS.
+// It requires a method-aware challenge store and the selected HTTPS engine;
+// unlike NewDomainObserver it never interprets HTTPS as DNS.
+func NewHTTPSDomainObserver(c DomainConfig, store DomainChallengeStore, engine DomainProofEngine) (*DomainObserver, error) {
+	observer, err := NewDomainObserver(c, store, engine)
+	if err != nil {
+		return nil, err
+	}
+	observer.https = true
+	return observer, nil
 }
 
 func (o *DomainObserver) ObserveDomain(ctx context.Context, claim organization.DomainClaim) (out organization.DomainObservation, err error) {
@@ -348,7 +378,7 @@ func (o *DomainObserver) ObserveDomain(ctx context.Context, claim organization.D
 	if !invoked || invocation.request.record != r || !canonicalDigest(invocation.networkDigest) {
 		return out, ErrForbidden
 	}
-	if r.Validate() != nil || len(r.Capability) == 0 || r.Claim != claim || !now.Before(r.ExpiresAt) || now.Before(r.IssuedAt) || state.Recovery.CommandID != "" {
+	if r.Validate() != nil || (r.Method == DomainProofHTTPS && !o.https) || len(r.Capability) == 0 || r.Claim != claim || !now.Before(r.ExpiresAt) || now.Before(r.IssuedAt) || state.Recovery.CommandID != "" {
 		return out, ErrForbidden
 	}
 	grant, e := capability.Verify(bounded, r.Capability, o.config.Resolver, capability.VerifyOptions{Issuer: o.config.Issuer, Now: now, Limits: capability.DefaultLimits()})
@@ -372,10 +402,14 @@ func (o *DomainObserver) ObserveDomain(ctx context.Context, claim organization.D
 	if bounded.Err() != nil {
 		return out, bounded.Err()
 	}
-	if observed.request != request || observed.class != DomainObservedMatch || observed.source != DomainSourceDNS || observed.at.Before(r.IssuedAt) || observed.at.After(now) || !observed.until.After(now) || observed.until.After(r.ExpiresAt) {
+	if observed.request != request || observed.class != DomainObservedMatch || observed.source != domainSource(r.Method) || observed.at.Before(r.IssuedAt) || observed.at.After(now) || !observed.until.After(now) || observed.until.After(r.ExpiresAt) {
 		return out, ErrForbidden
 	}
-	return organization.DomainObservation{Claim: claim, Method: organization.DomainDNS, ObservedAt: observed.at, ExpiresAt: observed.until, Verified: true}, nil
+	method := organization.DomainDNS
+	if r.Method == DomainProofHTTPS {
+		method = organization.DomainHTTPS
+	}
+	return organization.DomainObservation{Claim: claim, Method: method, ObservedAt: observed.at, ExpiresAt: observed.until, Verified: true}, nil
 }
 
 func admitDomain(ctx context.Context, config DomainConfig, claim organization.DomainClaim, networkDigest string) error {
@@ -415,7 +449,7 @@ type DomainEvidenceFactory interface {
 	DomainEvidence(organization.Authentication, string, identity.CommandBinding) (DomainEvidenceAuthority, error)
 }
 
-// Service is an immutable invocation-scoped DNS challenge orchestrator. The
+// Service is an immutable invocation-scoped domain challenge orchestrator. The
 // supplied current bearer and canonical network must come from trusted transport.
 // Reconstruct a Service with fresh authentication for recovery after process loss.
 type Service struct {
@@ -425,6 +459,7 @@ type Service struct {
 	store          DomainChallengeStore
 	authentication organization.Authentication
 	network        string
+	method         DomainProofMethod
 }
 
 func (Service) Format(s fmt.State, _ rune)    { _, _ = s.Write([]byte("sso.Service(redacted)")) }
@@ -439,6 +474,19 @@ func NewService(c DomainConfig, claims DomainClaimReader, factory DomainEvidence
 	return &Service{config: c, claims: claims, factory: factory, store: store, authentication: authentication, network: network}, nil
 }
 
+// NewHTTPSService explicitly selects HTTPS well-known challenge issuance.
+// NewService retains DNS issuance. Both methods use one immutable challenge
+// and original recovery binding per claim, without method-changing retries.
+// Install the native method migration and use its HTTPS-aware store first.
+func NewHTTPSService(c DomainConfig, claims DomainClaimReader, factory DomainEvidenceFactory, store DomainChallengeStore, authentication organization.Authentication, network string) (*Service, error) {
+	service, err := NewService(c, claims, factory, store, authentication, network)
+	if err != nil {
+		return nil, err
+	}
+	service.method = DomainProofHTTPS
+	return service, nil
+}
+
 // DomainChallengeRequest selects an existing organization-owned claim and a
 // caller-generated canonical command ID retained across all retries.
 type DomainChallengeRequest struct {
@@ -447,7 +495,7 @@ type DomainChallengeRequest struct {
 	CorrelationID           string
 }
 
-// DomainChallengeResult exposes only the exact public DNS commitment, not a
+// DomainChallengeResult exposes only the exact public proof commitment, not a
 // bearer capability. Keep Request for verification or reload it by exact key.
 type DomainChallengeResult struct{ request DomainProofRequest }
 
@@ -459,7 +507,19 @@ func (DomainChallengeResult) MarshalText() ([]byte, error) { return nil, ErrSens
 
 func (r DomainChallengeResult) Request() DomainProofRequest { return r.request }
 func (r DomainChallengeResult) DNSTXT() (string, string) {
+	if r.request.Method() != DomainProofDNS {
+		return "", ""
+	}
 	return "_golib-sso." + r.request.Claim().Domain + ".", "golib-sso=" + r.request.ChallengeDigest()
+}
+
+// HTTPSWellKnown returns the exact HTTPS URL and text/plain body to publish,
+// without a newline. Non-HTTPS results return two empty strings.
+func (r DomainChallengeResult) HTTPSWellKnown() (string, string) {
+	if r.request.Method() != DomainProofHTTPS {
+		return "", ""
+	}
+	return "https://" + r.request.Claim().Domain + "/.well-known/golib-sso", "golib-sso=" + r.request.ChallengeDigest()
 }
 
 func (s *Service) authorize(ctx context.Context, op string, v organization.View, correlation string) error {
@@ -502,6 +562,10 @@ func (s *Service) ChallengeDomain(ctx context.Context, r DomainChallengeRequest)
 	if s == nil || ctx == nil {
 		return out, ErrInvalidInput
 	}
+	method := s.method
+	if method == DomainProofMethodInvalid {
+		method = DomainProofDNS
+	}
 	if _, e := identity.ParseCommandID(string(r.CommandID)); e != nil {
 		return out, ErrInvalidInput
 	}
@@ -519,13 +583,13 @@ func (s *Service) ChallengeDomain(ctx context.Context, r DomainChallengeRequest)
 	}
 	at := s.config.Clock.Now().UTC().Truncate(time.Second)
 	network := sha256.Sum256([]byte(s.network))
-	if len("_golib-sso."+v.DomainClaim.Domain+".") > 254 {
+	if method == DomainProofDNS && len("_golib-sso."+v.DomainClaim.Domain+".") > 254 {
 		return out, ErrInvalidInput
 	}
 	if e = admitDomain(bounded, s.config, v.DomainClaim, hex.EncodeToString(network[:])); e != nil {
 		return out, e
 	}
-	record := ChallengeRecord{Claim: v.DomainClaim, ActorID: v.Actor.UserID, CommandID: r.CommandID, Method: DomainProofDNS, Purpose: domainPurpose, CorrelationID: r.CorrelationID, NetworkDigest: hex.EncodeToString(network[:]), IssuedAt: at, ExpiresAt: at.Add(s.config.ChallengeTTL)}
+	record := ChallengeRecord{Claim: v.DomainClaim, ActorID: v.Actor.UserID, CommandID: r.CommandID, Method: method, Purpose: domainPurpose, CorrelationID: r.CorrelationID, NetworkDigest: hex.EncodeToString(network[:]), IssuedAt: at, ExpiresAt: at.Add(s.config.ChallengeTTL)}
 	use := capabilityUse(s.config, record)
 	token, e := capability.Issue(bounded, capability.Payload{Version: 1, Issuer: use.Issuer, Audiences: []string{use.Audience}, Subject: use.Subject, Resource: use.Resource, Operation: use.Operation, IssuedAt: at, NotBefore: at, ExpiresAt: record.ExpiresAt, ID: string(record.CommandID), Tenant: use.Tenant, Caveats: use.Caveats}, s.config.Signer, capability.DefaultLimits())
 	if e != nil {
@@ -538,7 +602,7 @@ func (s *Service) ChallengeDomain(ctx context.Context, r DomainChallengeRequest)
 	if e != nil {
 		return out, publicError(bounded, e)
 	}
-	if saved.Validate() != nil || saved.Key() != record.Key() || saved.ActorID != record.ActorID || saved.CommandID != record.CommandID || !s.config.Clock.Now().Before(saved.ExpiresAt) {
+	if saved.Validate() != nil || saved.Key() != record.Key() || saved.ActorID != record.ActorID || saved.CommandID != record.CommandID || saved.Method != method || !s.config.Clock.Now().Before(saved.ExpiresAt) {
 		return out, ErrConflict
 	}
 	return DomainChallengeResult{request: DomainProofRequest{record: saved}}, nil
@@ -571,7 +635,7 @@ func (s *Service) LoadDomainRequest(ctx context.Context, key DomainChallengeKey)
 
 // VerifyDomain observes only a new original attempt. SaveRecovery precedes
 // Apply, so every retry/restart after an attempted mutation queries the sole
-// organization coordinator and never repeats DNS. Historical recovery is not a
+// organization coordinator and never repeats network observation. Historical recovery is not a
 // current routing authorization; always use GetDomainProof for current trust.
 func (s *Service) VerifyDomain(ctx context.Context, r DomainProofRequest) (out organization.DomainEvidenceResult, err error) {
 	defer func() {

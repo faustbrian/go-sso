@@ -21,7 +21,7 @@
           "build_tags": []
         }
       ],
-      "purpose": "Experimental storage-neutral DNS challenge and domain-proof orchestration through the organization-owned evidence transition; provider administration, federation routing and login remain unfinished.",
+      "purpose": "Experimental storage-neutral DNS and opt-in HTTPS challenge orchestration through the organization-owned evidence transition; provider enablement, federation routing and login remain unfinished.",
       "lifecycle": "experimental",
       "kind": "public library",
       "releasable": true,
@@ -76,14 +76,14 @@
         "responsibility": "Own issued domain challenge custody and orchestration, with current policy and organization-owned proof authority.",
         "non_goals": [
           "Own domain ownership truth, organization membership, transactions, outcome journals or DNS transport.",
-          "Claim provider lifecycle, routing, JIT, federation login, HTTPS verification or complete qualification from the selected DNS profile."
+          "Claim provider enablement, routing, JIT, federation login or complete qualification from the selected domain-proof profiles."
         ],
         "public_package_identifier": "sso",
         "primary_entry_packages": [
           "github.com/faustbrian/go-sso"
         ],
         "package_selection": {
-          "github.com/faustbrian/go-sso": "Experimental storage-neutral DNS challenge and domain-proof orchestration through the organization-owned evidence transition; provider administration, federation routing and login remain unfinished."
+          "github.com/faustbrian/go-sso": "Experimental storage-neutral DNS and opt-in HTTPS challenge orchestration through the organization-owned evidence transition; provider enablement, federation routing and login remain unfinished."
         },
         "lifecycle_status": "active",
         "maturity": "experimental",
