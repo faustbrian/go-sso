@@ -6,9 +6,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +21,7 @@ import (
 	capability "github.com/faustbrian/go-capability/v2"
 	"github.com/faustbrian/go-clock"
 	identity "github.com/faustbrian/go-identity"
+	migrations "github.com/faustbrian/go-migrations/v3"
 	organization "github.com/faustbrian/go-organization"
 	organizationpg "github.com/faustbrian/go-organization/postgres"
 	ratelimit "github.com/faustbrian/go-rate-limit/v2"
@@ -33,10 +38,12 @@ import (
 // Only its external TXT publication seam is controlled; proof/claim/session/
 // policy/transaction custody uses actual public native owners below.
 type dnsZone struct {
-	mu      sync.RWMutex
-	records map[string]string
-	queries atomic.Int32
-	ttl     uint32
+	mu           sync.RWMutex
+	records      map[string]string
+	queries      atomic.Int32
+	ttl          uint32
+	httpsGate    <-chan struct{}
+	httpsStarted chan<- struct{}
 }
 
 func (z *dnsZone) publish(owner, value string) {
@@ -66,17 +73,27 @@ func (z *dnsZone) serve(w dns.ResponseWriter, q *dns.Msg) {
 }
 
 type domainFixture struct {
-	org     *orgFixture
-	store   *ssopg.Store
-	config  sso.DomainConfig
-	zone    *dnsZone
-	service *sso.Service
-	custody ssopg.Config
+	org           *orgFixture
+	store         *ssopg.Store
+	config        sso.DomainConfig
+	zone          *dnsZone
+	service       *sso.Service
+	custody       ssopg.Config
+	httpsRequests *atomic.Int32
+	engine        *domainverification.Engine
 }
 
 func nativeDomainFixture(t *testing.T) *domainFixture {
+	return nativeDomainFixtureMethod(t, false)
+}
+
+func nativeDomainFixtureMethod(t *testing.T, https bool) *domainFixture {
 	t.Helper()
-	f := newOrgFixtureWithIdentities(t, []identity.TenantID{"org-test-basic", "org-test-other"}, []identity.UserID{"owner"}, organizationpg.DomainClaimMigrationSource{Version: 310}, organizationpg.DomainEvidenceMigrationSource{Version: 311}, ssopg.DomainChallengeMigrationSource{Version: 312})
+	sources := []migrations.Source{organizationpg.DomainClaimMigrationSource{Version: 310}, organizationpg.DomainEvidenceMigrationSource{Version: 311}, ssopg.DomainChallengeMigrationSource{Version: 312}}
+	if https {
+		sources = append(sources, ssopg.DomainChallengeMethodMigrationSource{Version: 313})
+	}
+	f := newOrgFixtureWithIdentities(t, []identity.TenantID{"org-test-basic", "org-test-other"}, []identity.UserID{"owner"}, sources...)
 	provider, e := keyring.New(map[string][]byte{"domain-custody": bytes.Repeat([]byte{0x91}, 32)})
 	if e != nil {
 		t.Fatal(e)
@@ -87,6 +104,9 @@ func nativeDomainFixture(t *testing.T) *domainFixture {
 	}
 	custody := ssopg.Config{MaximumDuration: time.Second, Envelope: crypto, KeyReference: "domain-custody"}
 	store, e := ssopg.NewStore(f.pool, custody)
+	if https {
+		store, e = ssopg.NewHTTPSStore(f.pool, custody)
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -96,9 +116,6 @@ func nativeDomainFixture(t *testing.T) *domainFixture {
 	}
 	zone := &dnsZone{records: map[string]string{}, ttl: 60}
 	server := &dns.Server{PacketConn: packet, Handler: dns.HandlerFunc(zone.serve)}
-	done := make(chan error, 1)
-	go func() { done <- server.ActivateAndServe() }()
-	t.Cleanup(func() { _ = server.Shutdown(); <-done })
 	resolver, e := domainverification.NewDNSResolver(packet.LocalAddr().String(), time.Second, 1232, 8)
 	if e != nil {
 		t.Fatal(e)
@@ -111,6 +128,68 @@ func nativeDomainFixture(t *testing.T) *domainFixture {
 	if e != nil {
 		t.Fatal(e)
 	}
+	requests := new(atomic.Int32)
+	if https {
+		web := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			if r.Host != "example.com" || r.URL.Path != "/.well-known/golib-sso" || r.TLS.ServerName != "example.com" {
+				t.Error("HTTPS publication scope changed")
+			}
+			w.Header().Set("Content-Type", "text/plain")
+			zone.mu.RLock()
+			body := zone.records["https-body"]
+			gate, started := zone.httpsGate, zone.httpsStarted
+			zone.mu.RUnlock()
+			if gate != nil {
+				started <- struct{}{}
+				select {
+				case <-gate:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(web.Close)
+		roots := x509.NewCertPool()
+		roots.AddCert(web.Certificate())
+		// The resolver fixture is independent DNS wire protocol; dial routing is
+		// a network-only simulation. Production still verifies SNI and the CA.
+		server.Handler = dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
+			m := new(dns.Msg).SetReply(q)
+			if len(q.Question) != 1 || q.Question[0].Name != "example.com." {
+				t.Error("unexpected HTTPS DNS scope")
+			}
+			if q.Question[0].Qtype == dns.TypeA {
+				m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: q.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("93.184.216.34")}}
+			}
+			_ = w.WriteMsg(m)
+		})
+		fetcher, err := domainverification.NewHTTPSFetcher(domainverification.HTTPSFetcherConfig{Timeout: time.Second, RootCAs: roots, Resolver: &net.Resolver{PreferGo: true, StrictErrors: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "udp4", packet.LocalAddr().String())
+		}}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != "93.184.216.34:443" {
+				return nil, errors.New("unpinned fixture destination")
+			}
+			conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", web.Listener.Addr().String())
+			if err != nil {
+				return nil, err
+			}
+			return domainHTTPSConn{Conn: conn}, nil
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		engine, e = domainverification.NewHTTPSEngine(profile, fetcher)
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	// Select the handler before starting its owning goroutine. Mutating an
+	// active dns.Server races its initialization even before the first query.
+	done := make(chan error, 1)
+	go func() { done <- server.ActivateAndServe() }()
+	t.Cleanup(func() { _ = server.Shutdown(); <-done })
 	signer, e := capability.NewHMACSHA256Signer("domain-signing", bytes.Repeat([]byte{0x92}, 32))
 	if e != nil {
 		t.Fatal(e)
@@ -138,6 +217,9 @@ func nativeDomainFixture(t *testing.T) *domainFixture {
 		return capability.ResolvedKey{Issuer: "domain-issuer", Verifier: verifier}, nil
 	}), Authorization: fixturePolicy{}, PolicyVersion: 1, Rate: rate, RatePolicy: policy}
 	observer, e := sso.NewDomainObserver(c, store, engine)
+	if https {
+		observer, e = sso.NewHTTPSDomainObserver(c, store, engine)
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -153,10 +235,257 @@ func nativeDomainFixture(t *testing.T) *domainFixture {
 		t.Fatal(e)
 	}
 	service, e := sso.NewService(c, f.service, factory, store, f.auth("org-test-basic", "owner"), "127.0.0.1")
+	if https {
+		service, e = sso.NewHTTPSService(c, f.service, factory, store, f.auth("org-test-basic", "owner"), "127.0.0.1")
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
-	return &domainFixture{org: f, store: store, config: c, zone: zone, service: service, custody: custody}
+	return &domainFixture{org: f, store: store, config: c, zone: zone, service: service, custody: custody, httpsRequests: requests, engine: engine}
+}
+
+type domainHTTPSConn struct{ net.Conn }
+
+func (domainHTTPSConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP("93.184.216.34"), Port: 443}
+}
+
+func TestNativeHTTPSChallengeCurrentProofAndOriginalRecovery(t *testing.T) {
+	f := nativeDomainFixtureMethod(t, true)
+	issued := f.issue(t, "https-proof", "example.com", 1)
+	url, body := issued.HTTPSWellKnown()
+	if url != "https://example.com/.well-known/golib-sso" || issued.Request().Method() != sso.DomainProofHTTPS {
+		t.Fatal("HTTPS profile not selected")
+	}
+	f.zone.publish("https-body", body)
+	result, err := f.service.VerifyDomain(f.org.ctx, issued.Request())
+	if err != nil || result.Receipt.Outcome != identity.CommitOutcomeCommitted || result.Proof.Method != organization.DomainHTTPS {
+		t.Fatal("native HTTPS proof not committed", result.Receipt.Outcome, err)
+	}
+	key := organization.DomainProofKey(result.Proof)
+	if current, err := f.service.GetDomainProof(f.org.ctx, key); err != nil || current != result.Proof {
+		t.Fatal("HTTPS current organization proof missing", err)
+	}
+	loaded, err := f.service.LoadDomainRequest(f.org.ctx, sso.DomainChallengeKey{TenantID: key.TenantID, OrganizationID: key.OrganizationID, ClaimID: key.ClaimID})
+	if err != nil || loaded.Method() != sso.DomainProofHTTPS {
+		t.Fatal("durable method custody missing", err)
+	}
+	f.zone.publish("https-body", "withdrawn-publication")
+	for range 2 {
+		recovered, err := f.service.VerifyDomain(f.org.ctx, loaded)
+		if err != nil || recovered.Proof != result.Proof {
+			t.Fatal("original retry changed proof", err)
+		}
+	}
+	if f.httpsRequests.Load() != 1 {
+		t.Fatal("original recovery refetched HTTPS")
+	}
+	// Old DNS readers cannot reinterpret HTTPS ciphertext. Its method is bound
+	// into both capability caveats and AEAD, not just an advisory SQL value.
+	old, err := ssopg.NewStore(f.org.pool, f.custody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = old.LoadDomainChallenge(f.org.ctx, sso.DomainChallengeKey{TenantID: key.TenantID, OrganizationID: key.OrganizationID, ClaimID: key.ClaimID}); err == nil {
+		t.Fatal("DNS-only reader opened HTTPS custody")
+	}
+	factory, _ := ssopg.NewDomainEvidenceFactory(f.org.service)
+	foreign, err := sso.NewHTTPSService(f.config, f.org.service, factory, f.store, f.org.auth("org-test-other", "owner"), "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := foreign.VerifyDomain(f.org.ctx, loaded); err == nil || got.Proof != (organization.DomainProof{}) {
+		t.Fatal("foreign authority recovered HTTPS proof")
+	}
+	withdraw, err := f.org.service.PrepareWithdrawDomain(f.org.ctx, organization.DomainClaimRequest{Authentication: f.org.auth("org-test-basic", "owner"), CommandID: commandID(t), OrganizationID: key.OrganizationID, ClaimID: key.ClaimID, Domain: key.Domain, OrganizationVersion: 3, ClaimVersion: 1, CorrelationID: "https-withdraw"}, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.org.service.Execute(f.org.ctx, withdraw); err != nil || got.Receipt.Outcome != identity.CommitOutcomeCommitted {
+		t.Fatal("withdraw HTTPS proof failed", err)
+	}
+	if got, err := f.service.GetDomainProof(f.org.ctx, key); err == nil || got != (organization.DomainProof{}) {
+		t.Fatal("withdrawn historical HTTPS proof still current")
+	}
+}
+
+func TestNativeHTTPSUnknownNeverRefetchesOrCreatesAuthority(t *testing.T) {
+	f := nativeDomainFixtureMethod(t, true)
+	issued := f.issue(t, "https-unknown", "example.com", 1)
+	_, body := issued.HTTPSWellKnown()
+	f.zone.publish("https-body", body)
+	factory, _ := ssopg.NewDomainEvidenceFactory(f.org.service)
+	service, err := sso.NewHTTPSService(f.config, f.org.service, factory, lostRecoveryACKStore{DomainChallengeStore: f.store}, f.org.auth("org-test-basic", "owner"), "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.VerifyDomain(f.org.ctx, issued.Request())
+	var unknown identity.UnknownCommitError
+	if !errors.As(err, &unknown) || got.Receipt.Outcome != identity.CommitOutcomeUnknown || got.Proof != (organization.DomainProof{}) {
+		t.Fatal("lost recovery ACK lost unknown", got.Receipt.Outcome, err)
+	}
+	f.zone.publish("https-body", "removed")
+	for range 2 {
+		if retry, err := f.service.VerifyDomain(f.org.ctx, issued.Request()); err == nil || retry.Proof != (organization.DomainProof{}) {
+			t.Fatal("unknown original reapplied or refetched")
+		}
+	}
+	if f.httpsRequests.Load() != 1 {
+		t.Fatal("unknown repeated HTTPS observation")
+	}
+	var proofs int
+	if err = f.org.pool.Raw().QueryRow(f.org.ctx, `SELECT count(*) FROM organization.domain_evidence`).Scan(&proofs); err != nil || proofs != 0 {
+		t.Fatal("unknown manufactured proof", err)
+	}
+}
+
+func TestNativeHTTPSLostCommitRecoversExactOriginalWithoutRefetch(t *testing.T) {
+	f := nativeDomainFixtureMethod(t, true)
+	issued := f.issue(t, "https-lost-commit", "example.com", 1)
+	_, body := issued.HTTPSWellKnown()
+	f.zone.publish("https-body", body)
+	lossy, fault := f.org.lostCommitService(t)
+	factory, err := ssopg.NewDomainEvidenceFactory(lossy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := sso.NewHTTPSService(f.config, f.org.service, armFactory{base: factory, fault: fault}, f.store, f.org.auth("org-test-basic", "owner"), "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.VerifyDomain(f.org.ctx, issued.Request())
+	if err == nil || !fault.lost.Load() || got.Receipt.Outcome != identity.CommitOutcomeUnknown || got.Proof != (organization.DomainProof{}) {
+		t.Fatal("lost COMMIT response fabricated result", got.Receipt.Outcome, err)
+	}
+	f.zone.publish("https-body", "removed")
+	recovered, err := f.service.RecoverDomain(f.org.ctx, issued.Request())
+	if err != nil || recovered.Receipt.Outcome != identity.CommitOutcomeCommitted || recovered.Proof.Method != organization.DomainHTTPS || recovered.Receipt.Binding != got.Receipt.Binding {
+		t.Fatal("lost HTTPS COMMIT did not recover original", err)
+	}
+	if f.httpsRequests.Load() != 1 {
+		t.Fatal("lost COMMIT recovery refetched HTTPS")
+	}
+}
+
+func TestNativeHTTPSCurrentAuthorityAndRequiredEffectsDeny(t *testing.T) {
+	for _, boundary := range []string{"mismatch", "expired", "withdrawn", "revoked-session", "audit", "outbox"} {
+		t.Run(boundary, func(t *testing.T) {
+			f := nativeDomainFixtureMethod(t, true)
+			issued := f.issue(t, "https-denial", "example.com", 1)
+			_, body := issued.HTTPSWellKnown()
+			f.zone.publish("https-body", body)
+			service := f.service
+			switch boundary {
+			case "mismatch":
+				f.zone.publish("https-body", "golib-sso="+strings.Repeat("0", 64))
+			case "expired":
+				config := f.config
+				config.Clock = fixedClock{at: issued.Request().ExpiresAt()}
+				factory, _ := ssopg.NewDomainEvidenceFactory(f.org.service)
+				var err error
+				service, err = sso.NewHTTPSService(config, f.org.service, factory, f.store, f.org.auth("org-test-basic", "owner"), "127.0.0.1")
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "withdrawn":
+				claim := issued.Request().Claim()
+				command, err := f.org.service.PrepareWithdrawDomain(f.org.ctx, organization.DomainClaimRequest{Authentication: f.org.auth("org-test-basic", "owner"), CommandID: commandID(t), OrganizationID: claim.OrganizationID, ClaimID: claim.ID, Domain: claim.Domain, ClaimVersion: 1, OrganizationVersion: 2, CorrelationID: "https-before-withdraw"}, "127.0.0.1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = f.org.service.Execute(f.org.ctx, command); err != nil {
+					t.Fatal(err)
+				}
+			case "revoked-session":
+				if _, err := f.org.pool.Raw().Exec(f.org.ctx, `UPDATE organization_sessions.sessions SET state='revoked' WHERE tenant_id='org-test-basic' AND user_id='owner'`); err != nil {
+					t.Fatal(err)
+				}
+			case "audit", "outbox":
+				table := "public.identity_outbox_bindings"
+				when := ""
+				if boundary == "audit" {
+					table = "audit.records"
+					when = " WHEN (NEW.outcome=1)"
+				}
+				if _, err := f.org.pool.Raw().Exec(f.org.ctx, `CREATE FUNCTION public.https_required_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'controlled HTTPS required effect failure'; END $$; CREATE TRIGGER https_required_fail BEFORE INSERT ON `+table+` FOR EACH ROW`+when+` EXECUTE FUNCTION public.https_required_fail()`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := service.VerifyDomain(f.org.ctx, issued.Request())
+			if err == nil || got.Proof != (organization.DomainProof{}) || got.Receipt.Outcome == identity.CommitOutcomeCommitted {
+				t.Fatal("required denial created HTTPS authority", boundary, got.Receipt.Outcome, err)
+			}
+			if boundary == "audit" || boundary == "outbox" {
+				if got.Receipt.Outcome != identity.CommitOutcomeNotCommitted {
+					t.Fatal("required effect failed without authoritative rollback", got.Receipt.Outcome, err)
+				}
+			}
+			if boundary == "expired" || boundary == "withdrawn" || boundary == "revoked-session" {
+				if f.httpsRequests.Load() != 0 {
+					t.Fatal("stale authority reached HTTPS")
+				}
+			}
+			var proofs int
+			if err = f.org.pool.Raw().QueryRow(f.org.ctx, `SELECT count(*) FROM organization.domain_evidence`).Scan(&proofs); err != nil || proofs != 0 {
+				t.Fatal("denial persisted proof", err)
+			}
+		})
+	}
+}
+
+func TestNativeHTTPSConcurrentObservationsCancelAndRelease(t *testing.T) {
+	f := nativeDomainFixtureMethod(t, true)
+	issued := f.issue(t, "https-concurrent", "example.com", 1)
+	_, body := issued.HTTPSWellKnown()
+	f.zone.publish("https-body", body)
+	gate := make(chan struct{})
+	started := make(chan struct{}, 4)
+	f.zone.mu.Lock()
+	f.zone.httpsGate = gate
+	f.zone.httpsStarted = started
+	f.zone.mu.Unlock()
+	ctx, cancel := context.WithCancel(f.org.ctx)
+	defer cancel()
+	done := make(chan error, 4)
+	for range 4 {
+		go func() { _, err := f.engine.Observe(ctx, issued.Request()); done <- err }()
+	}
+	for range 4 {
+		select {
+		case <-started:
+		case err := <-done:
+			t.Fatal("bounded active slot never reached independent HTTPS", err)
+		}
+	}
+	if _, err := f.engine.Observe(f.org.ctx, issued.Request()); !errors.Is(err, domainverification.ErrThrottled) {
+		t.Fatal("fifth HTTPS call bypassed concurrency bound", err)
+	}
+	if f.httpsRequests.Load() != 4 {
+		t.Fatal("throttled call reached network")
+	}
+	cancel()
+	for range 4 {
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatal("active HTTPS cancellation lost", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("active HTTPS call leaked")
+		}
+	}
+	close(gate)
+	f.zone.mu.Lock()
+	f.zone.httpsGate = nil
+	f.zone.httpsStarted = nil
+	f.zone.mu.Unlock()
+	if observed, err := f.engine.Observe(f.org.ctx, issued.Request()); err != nil || observed.Classification() != sso.DomainObservedMatch {
+		t.Fatal("canceled HTTPS slots not released", err)
+	}
+	var proofs int
+	if err := f.org.pool.Raw().QueryRow(f.org.ctx, `SELECT count(*) FROM organization.domain_evidence`).Scan(&proofs); err != nil || proofs != 0 {
+		t.Fatal("non-authoritative observation created proof", err)
+	}
 }
 
 func (f *domainFixture) issue(t *testing.T, id, domain string, epoch uint64) sso.DomainChallengeResult {

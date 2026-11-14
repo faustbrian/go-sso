@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add opt-in HTTPS method custody on the original encrypted challenge row through
+  a separate additive migration and `NewHTTPSStore`. Apply the extension before
+  enabling the constructor; historical DNS rows and old DNS-only construction
+  remain compatible, while old readers cannot reinterpret HTTPS ciphertext.
+
 - Enforce the provider-registration domain count of 1 through 128 before
   original request preparation and in persisted pending-domain constraints.
 - Add native current-organization administration of disabled, metadata-only

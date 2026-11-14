@@ -1,6 +1,6 @@
 # Native SSO challenge custody
 
-Experimental optional adapter for DNS domain proof and disabled static-OIDC
+Experimental optional adapter for DNS/opt-in HTTPS domain proof and disabled static-OIDC
 provider metadata registration.
 `Store` persists only immutable challenge binding, envelope-encrypted capability
 and original safe organization recovery scope. It has no proof/result table,
@@ -37,6 +37,37 @@ The complete reproducible graph is in
 [domain_integration_test.go](domain_integration_test.go) and its native fixture.
 It uses actual public organization/kernel/session/risk/audit/outbox adapters and
 an independent task-owned authoritative DNS wire server, not fake domain stores.
+
+### Additive HTTPS method custody
+
+The original `DomainChallengeMigrationSource` SQL is immutable.
+`DomainChallengeMethodMigrationSource` is a separate forward-only extension
+adding `method smallint NOT NULL DEFAULT 1` to the **same** challenge row.
+Its constraint allows only historical DNS (1) or HTTPS (2). The constant default
+is a metadata-only PostgreSQL expansion, not a row rewrite/backfill; the new
+check is NOT VALID to avoid scanning historical rows and applies to new writes.
+The migration has a one-second lock timeout and fails rather than waiting behind
+long-held locks. Apply/replay this schema extension first, then explicitly enable
+`NewHTTPSStore` in a later composition rollout. No serving code requires the
+column unless that constructor is selected. No production rollout is performed
+by this library or its tests.
+
+`NewStore` remains DNS-only and works before or after the extension. Its inserts
+receive the database DNS default. `NewHTTPSStore` reads both methods, including
+unchanged historical DNS ciphertext. Method is authenticated in capability
+caveats and envelope AAD; old DNS readers fail closed on HTTPS ciphertext, and
+tampering with the SQL method cannot reinterpret a challenge. The existing
+tenant/org/claim primary key and global command uniqueness preserve exactly one
+original challenge/recovery binding across both methods. A method-changing
+retry conflicts, never creates another original or overwrites recovery custody.
+
+Use `sso.NewHTTPSDomainObserver` with `domainverification.NewHTTPSEngine` and the
+same native organization evidence source/factory, then `sso.NewHTTPSService`.
+Schema/code rollback retains the additive column, ciphertext and original
+recovery data; do not drop them or rotate away decrypting keys during rollback.
+The populated/mixed-reader tests and 100k-row typed native-query plans in
+[domain_method_integration_test.go](domain_method_integration_test.go) cover
+the extension without changing provider storage or organization proof ownership.
 
 ## Disabled static OIDC provider administration
 

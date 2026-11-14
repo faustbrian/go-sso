@@ -38,6 +38,7 @@ type Config struct {
 type Store struct {
 	pool   *database.Pool
 	config Config
+	https  bool
 }
 
 var _ sso.DomainChallengeStore = (*Store)(nil)
@@ -47,6 +48,18 @@ func NewStore(pool *database.Pool, c Config) (*Store, error) {
 		return nil, sso.ErrInvalidInput
 	}
 	return &Store{pool: pool, config: c}, nil
+}
+
+// NewHTTPSStore selects method-aware challenge custody. Apply
+// DomainChallengeMethodMigrationSource first. It reads historical DNS rows and
+// preserves their AAD; NewStore remains usable against the original schema.
+func NewHTTPSStore(pool *database.Pool, c Config) (*Store, error) {
+	store, err := NewStore(pool, c)
+	if err != nil {
+		return nil, err
+	}
+	store.https = true
+	return store, nil
 }
 func (Store) Format(s fmt.State, _ rune)   { _, _ = s.Write([]byte("sso.postgres.Store(redacted)")) }
 func (Store) MarshalJSON() ([]byte, error) { return nil, sso.ErrSensitiveSerialization }
@@ -69,11 +82,15 @@ func storeError(ctx context.Context, err error) error {
 }
 
 func challengeContext(r sso.ChallengeRecord) (envelope.Context, error) {
-	return envelope.NewContext(map[string]string{"owner": "sso/domain-challenge", "tenant": string(r.Claim.TenantID), "organization": string(r.Claim.OrganizationID), "claim": string(r.Claim.ID), "claim-version": "1", "domain": r.Claim.Domain, "actor": string(r.ActorID), "command": string(r.CommandID), "method": "dns-txt", "purpose": r.Purpose, "digest": r.ChallengeDigest, "issued": r.IssuedAt.UTC().Format(time.RFC3339Nano), "expires": r.ExpiresAt.UTC().Format(time.RFC3339Nano)})
+	method := "dns-txt"
+	if r.Method == sso.DomainProofHTTPS {
+		method = "https-well-known"
+	}
+	return envelope.NewContext(map[string]string{"owner": "sso/domain-challenge", "tenant": string(r.Claim.TenantID), "organization": string(r.Claim.OrganizationID), "claim": string(r.Claim.ID), "claim-version": "1", "domain": r.Claim.Domain, "actor": string(r.ActorID), "command": string(r.CommandID), "method": method, "purpose": r.Purpose, "digest": r.ChallengeDigest, "issued": r.IssuedAt.UTC().Format(time.RFC3339Nano), "expires": r.ExpiresAt.UTC().Format(time.RFC3339Nano)})
 }
 
 func (s *Store) CreateDomainChallenge(ctx context.Context, r sso.ChallengeRecord) (sso.ChallengeRecord, error) {
-	if s == nil || ctx == nil || r.Validate() != nil || len(r.Capability) == 0 || len(r.Capability) > 16<<10 || len(r.NetworkDigest) != 64 || r.CorrelationID == "" || len(r.CorrelationID) > 128 {
+	if s == nil || ctx == nil || r.Validate() != nil || (r.Method == sso.DomainProofHTTPS && !s.https) || len(r.Capability) == 0 || len(r.Capability) > 16<<10 || len(r.NetworkDigest) != 64 || r.CorrelationID == "" || len(r.CorrelationID) > 128 {
 		return sso.ChallengeRecord{}, sso.ErrInvalidInput
 	}
 	bounded, cancel := context.WithTimeout(ctx, s.config.MaximumDuration)
@@ -100,7 +117,13 @@ func (s *Store) CreateDomainChallenge(ctx context.Context, r sso.ChallengeRecord
 	if e != nil {
 		return sso.ChallengeRecord{}, sso.ErrInvalidInput
 	}
-	_, e = s.pool.Raw().Exec(bounded, `INSERT INTO sso.domain_challenges(tenant_id,organization_id,claim_id,actor_id,command_id,canonical_domain,challenge_digest,capability_envelope,network_digest,correlation_id,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING`, string(r.Claim.TenantID), string(r.Claim.OrganizationID), string(r.Claim.ID), string(r.ActorID), string(r.CommandID), r.Claim.Domain, digest, wire, network, r.CorrelationID, r.IssuedAt, r.ExpiresAt)
+	query := `INSERT INTO sso.domain_challenges(tenant_id,organization_id,claim_id,actor_id,command_id,canonical_domain,challenge_digest,capability_envelope,network_digest,correlation_id,issued_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT DO NOTHING`
+	args := []any{string(r.Claim.TenantID), string(r.Claim.OrganizationID), string(r.Claim.ID), string(r.ActorID), string(r.CommandID), r.Claim.Domain, digest, wire, network, r.CorrelationID, r.IssuedAt, r.ExpiresAt}
+	if s.https {
+		query = `INSERT INTO sso.domain_challenges(tenant_id,organization_id,claim_id,actor_id,command_id,canonical_domain,challenge_digest,capability_envelope,network_digest,correlation_id,issued_at,expires_at,method) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING`
+		args = append(args, int16(r.Method))
+	}
+	_, e = s.pool.Raw().Exec(bounded, query, args...)
 	if e != nil {
 		return sso.ChallengeRecord{}, storeError(bounded, e)
 	}
@@ -124,11 +147,19 @@ func (s *Store) LoadDomainChallenge(ctx context.Context, key sso.DomainChallenge
 	r := sso.ChallengeRecord{Claim: organization.DomainClaim{TenantID: key.TenantID, OrganizationID: key.OrganizationID, ID: key.ClaimID, Version: 1, State: organization.DomainRequested}, Method: sso.DomainProofDNS, Purpose: "identity.sso.domain-verify"}
 	var actor, command string
 	var digest, wire, network, recovery []byte
-	e := s.pool.Raw().QueryRow(bounded, `SELECT actor_id::text,command_id,canonical_domain,challenge_digest,capability_envelope,network_digest,correlation_id,issued_at,expires_at,recovery FROM sso.domain_challenges WHERE tenant_id=$1 AND organization_id=$2 AND claim_id=$3`, string(key.TenantID), string(key.OrganizationID), string(key.ClaimID)).Scan(&actor, &command, &r.Claim.Domain, &digest, &wire, &network, &r.CorrelationID, &r.IssuedAt, &r.ExpiresAt, &recovery)
+	query := `SELECT actor_id::text,command_id,canonical_domain,challenge_digest,capability_envelope,network_digest,correlation_id,issued_at,expires_at,recovery FROM sso.domain_challenges WHERE tenant_id=$1 AND organization_id=$2 AND claim_id=$3`
+	fields := []any{&actor, &command, &r.Claim.Domain, &digest, &wire, &network, &r.CorrelationID, &r.IssuedAt, &r.ExpiresAt, &recovery}
+	method := int16(sso.DomainProofDNS)
+	if s.https {
+		query = `SELECT actor_id::text,command_id,canonical_domain,challenge_digest,capability_envelope,network_digest,correlation_id,issued_at,expires_at,recovery,method FROM sso.domain_challenges WHERE tenant_id=$1 AND organization_id=$2 AND claim_id=$3`
+		fields = append(fields, &method)
+	}
+	e := s.pool.Raw().QueryRow(bounded, query, string(key.TenantID), string(key.OrganizationID), string(key.ClaimID)).Scan(fields...)
 	if e != nil {
 		return sso.DomainChallengeState{}, storeError(bounded, e)
 	}
 	r.ActorID = identity.UserID(actor)
+	r.Method = sso.DomainProofMethod(method)
 	r.CommandID = identity.CommandID(command)
 	r.IssuedAt = r.IssuedAt.UTC().Truncate(time.Microsecond)
 	r.ExpiresAt = r.ExpiresAt.UTC().Truncate(time.Microsecond)
