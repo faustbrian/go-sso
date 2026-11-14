@@ -1,6 +1,7 @@
 // Package postgres persists encrypted SSO challenge custody and composes the
-// existing organization-owned evidence transition. It is not a proof store,
-// command journal, transaction coordinator or provider implementation.
+// existing organization-owned evidence transition. It separately persists
+// disabled static-OIDC provider metadata through the native coordinator; it is
+// not a proof store, command journal, protocol engine or login implementation.
 package postgres
 
 import (

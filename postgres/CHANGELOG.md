@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Enforce the provider-registration domain count of 1 through 128 before
+  original request preparation and in persisted pending-domain constraints.
+- Add native current-organization administration of disabled, metadata-only
+  static OIDC providers, scoped bounded get/list, exact-original keyed retries
+  and ambiguous-commit recovery through the existing identity coordinator.
+- Add the independent forward-only `ProviderMigrationSource`; apply before
+  enabling provider callers. It stores envelope-encrypted configuration in a
+  separate namespace, enforces owner/issuer uniqueness and retains data on code
+  rollback. Existing DNS migrations and stored challenges are unchanged.
 - Add encrypted immutable DNS challenge persistence and original safe recovery
   binding custody, composed with the existing native organization evidence
   facade as sole commit/current-proof authority.

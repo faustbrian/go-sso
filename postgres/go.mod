@@ -3,15 +3,16 @@ module github.com/faustbrian/go-sso/postgres
 go 1.27.0
 
 require (
+	github.com/faustbrian/go-audit v1.0.0
 	github.com/faustbrian/go-audit/postgres v1.0.2-0.20261015062502-d62df280d85e
 	github.com/faustbrian/go-authentication/v2 v2.0.2-0.20261015052822-d9f5132c7f68
 	github.com/faustbrian/go-authorization/v3 v3.0.1-0.20261015052455-a55bbebb1060
 	github.com/faustbrian/go-capability/v2 v2.0.2-0.20261015044219-caab644d2fec
 	github.com/faustbrian/go-clock v1.2.0
-	github.com/faustbrian/go-identity v0.0.0-20261021021214-46ae60703809
+	github.com/faustbrian/go-identity v0.0.0-20261113182449-aa4bb5fcfafb
 	github.com/faustbrian/go-identity/password/postgres v0.0.0-20261028082559-7ca5d4db76d2
-	github.com/faustbrian/go-identity/postgres v0.0.0-20261025193805-9ccf9a606602
-	github.com/faustbrian/go-identity/risk v0.0.0-20261028092233-945b17fc88c4
+	github.com/faustbrian/go-identity/postgres v0.0.0-20261113234404-7672e7aa715a
+	github.com/faustbrian/go-identity/risk v0.0.0-20261113235539-163f9ee59da2
 	github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261028092233-945b17fc88c4
 	github.com/faustbrian/go-identity/session v0.0.0-20261027053124-3051d2cd42b5
 	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261027044816-80f08eb82bb9
@@ -21,7 +22,7 @@ require (
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
-	github.com/faustbrian/go-sso v0.0.0-20261113214608-10fcf2a4da2d
+	github.com/faustbrian/go-sso v0.0.0-20261114012720-31f7e6603bfb
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261113215445-8bf7395cf227
 	github.com/faustbrian/go-transactional-outbox/postgres/identity v0.0.0-20261020135213-493107bf82af
 	github.com/faustbrian/go-transactional-outbox/v2 v2.0.2-0.20261015062550-37ea15436ae9
@@ -30,7 +31,6 @@ require (
 )
 
 require (
-	github.com/faustbrian/go-audit v1.0.0 // indirect
 	github.com/faustbrian/go-capability/postgres/identity v0.0.0-20261025210917-9c2e20446169 // indirect
 	github.com/faustbrian/go-identifier/v2 v2.0.3-0.20261015083104-9892f17723c0 // indirect
 	github.com/faustbrian/go-identity/delivery v0.0.0-20261015061706-1f0b46ab1053 // indirect

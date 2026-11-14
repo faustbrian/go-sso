@@ -1,10 +1,12 @@
 # Native SSO challenge custody
 
-Experimental optional adapter for the selected DNS domain-proof journey.
+Experimental optional adapter for DNS domain proof and disabled static-OIDC
+provider metadata registration.
 `Store` persists only immutable challenge binding, envelope-encrypted capability
 and original safe organization recovery scope. It has no proof/result table,
-transaction coordinator or alternative ownership truth. Provider/login/JIT
-persistence and every optional wire-protocol module remain unselected.
+transaction coordinator or alternative ownership truth. The separate provider
+service persists disabled metadata only; provider enable, protocol login, JIT
+and every optional wire-protocol module remain unselected.
 
 ## Setup and ownership
 
@@ -36,7 +38,60 @@ The complete reproducible graph is in
 It uses actual public organization/kernel/session/risk/audit/outbox adapters and
 an independent task-owned authoritative DNS wire server, not fake domain stores.
 
-## Recovery
+## Disabled static OIDC provider administration
+
+`NewProviderService(pool, config, authentication, canonicalClientIP)` composes
+the existing native session, organization, directory, authorization, risk,
+coordinator, audit and transactional-outbox owners. Authentication is an actual
+ordinary password-bearer human session, not a caller-provided administrator
+boolean. Current active owner/administrator membership and revision-matched
+`org:sso-write` or `org:sso-read` policy are required on each call. Cookie,
+selected-organization-session and other authentication profiles are not selected.
+No fresh action proof is synthesized or accepted by this profile.
+
+Install the real selected owners' migrations first, including the kernel's
+`PreparationMigrationSource`, `AdmissionPreparationMigrationSource`,
+`CounterPreparationMigrationSource`, `RequestKeyMigrationSource` and
+`RequestKeyPreparationMigrationSource`, native protected counters, organization
+credential authority, audit and outbox. Apply `ProviderMigrationSource` at an
+unused later version before enabling this API. It creates only the new
+`sso_providers` namespace and has no backfill or destructive down migration;
+old code and DNS challenge storage are unaffected, and code rollback retains
+encrypted configuration and original recovery bindings. Provider-only
+installation does not require the DNS challenge migration or change its order.
+
+The complete native composition and calls are in
+[provider_integration_test.go](provider_integration_test.go). Call
+`ProviderRegisterOidc` with the root-owned request. It accepts only complete
+explicit static metadata with an exact matching issuer, 1 through 128 distinct
+canonical pending domains and a positive flat mapping version. It fetches no
+metadata or keys, stores no provider credentials, and never enables a provider,
+creates a domain proof, routes a login or applies mapped claims. Configuration
+is envelope-encrypted with tenant, organization, provider, protocol, purpose and
+version context. Retain decrypting keys while original operations are supported.
+
+Provider IDs are allocated once by the native owner. Issuer identity is exact
+byte identity, uniquely indexed by tenant and organization; endpoints and issuer
+URLs are not normalized. A conflicting owner/issuer registration cannot take
+over the existing provider. Provider mutations, required audit and outbox commit
+atomically in the existing kernel Work. Original session, credential, directory,
+user-policy and organization authority are locked and checked again after waits
+and immediately before commit, without renewing the original admission window.
+
+Retain the exact command, key and request across retries. The existing encrypted
+request-key mapping restores only the original binding. A matching retry recovers
+that command and stable provider ID, not another registration or counter charge;
+changed keyed input conflicts. An acknowledged mapping with no command journal
+remains `Unknown`, never permission to execute afresh. Unknown returns no provider
+metadata. Current organization disclosure authority is required for recovery.
+
+`ProviderGet` and `ProviderList` expose detached nonsecret metadata only; they
+never open the encrypted configuration. Lists use the scoped primary index,
+opaque ID cursor and limits of 1 through 100. Current authority is checked before
+querying and again before disclosure; a cursor grants no authority. Requested
+domains remain pending, `Enabled` is false and `VerifiedDomains` is empty.
+
+## Domain recovery
 
 The exact original safe organization `CommandBinding` is compare-and-set before
 Apply. Neither a saved binding nor an observation grants proof. Only the native
