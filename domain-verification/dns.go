@@ -1,6 +1,6 @@
-// Package domainverification implements the selected bounded DNS TXT profile.
+// Package domainverification implements selected bounded DNS TXT and opt-in HTTPS profiles.
 // It never issues challenges, persists proof, changes ownership or routes SSO.
-// HTTPS, CNAME aliases, DNSSEC validation, retries and local caches are disabled.
+// CNAME aliases, DNSSEC validation, retries and local caches are disabled.
 package domainverification
 
 import (
@@ -34,7 +34,7 @@ const (
 // Clock supplies read-start time; the configured clock must be concurrency-safe.
 type Clock = clock.Clock
 
-// ProfileConfig explicitly selects DNS only. MaximumDuration is 1ms..30s;
+// ProfileConfig sets bounded observation policy. MaximumDuration is 1ms..30s;
 // ObservationTTL is 1s..24h and cannot extend DNS remaining TTL or challenge
 // expiry. MaxConcurrent is 1..1024, with immediate rejection rather than a queue.
 type ProfileConfig struct {
@@ -201,6 +201,7 @@ type Engine struct {
 	profile  Profile
 	resolver *DNSResolver
 	active   chan struct{}
+	https    *HTTPSFetcher
 }
 
 func (Engine) Format(s fmt.State, _ rune) {
@@ -251,7 +252,13 @@ func canonicalDomain(input string) (string, error) {
 }
 
 func (e *Engine) Observe(ctx context.Context, request sso.DomainProofRequest) (sso.DomainProofObservation, error) {
-	if e == nil || ctx == nil || request.Validate() != nil || request.Method() != sso.DomainProofDNS {
+	if e == nil || ctx == nil || request.Validate() != nil {
+		return sso.DomainProofObservation{}, ErrInvalidInput
+	}
+	if e.https != nil {
+		return e.observeHTTPS(ctx, request)
+	}
+	if request.Method() != sso.DomainProofDNS {
 		return sso.DomainProofObservation{}, ErrInvalidInput
 	}
 	domain, err := canonicalDomain(request.Claim().Domain)

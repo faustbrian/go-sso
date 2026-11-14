@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/faustbrian/go-clock v1.2.0
-	github.com/faustbrian/go-sso v0.0.0-20261113214608-10fcf2a4da2d
+	github.com/faustbrian/go-sso v0.0.0-20261114033432-ed1db895fe45
 	github.com/miekg/dns v1.1.73
 	golang.org/x/net v0.60.0
 )

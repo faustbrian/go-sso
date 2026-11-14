@@ -1,8 +1,9 @@
-# DNS domain verification
+# Domain verification
 
 Experimental optional implementation of `sso.DomainProofEngine`. The root SSO
-package does not import this module. Only DNS TXT is selected; HTTPS, aliases,
-DNSSEC validation, quorum, retries and local result caching are unsupported.
+package does not import this module. `NewEngine` retains DNS TXT;
+`NewHTTPSEngine` explicitly selects HTTPS well-known. Aliases, DNSSEC validation,
+quorum, retries and local result caching are unsupported.
 
 Construct an immutable `Profile` with an explicit clock, total duration
 (1ms..30s), observation TTL (1s..24h) and process concurrency bound (1..1024).
@@ -48,3 +49,44 @@ not a claim of live external verification or complete unit/release qualification
 Dependency: `github.com/miekg/dns v1.1.73`, BSD-3-Clause, immutable upstream
 source `d854399da1ee385b432e8b07f79e53bbfc1ab1b0`. Its bounded UDP reader and
 non-preallocating RR parser are used rather than a home-grown DNS protocol.
+
+## Explicit HTTPS well-known profile
+
+Pass the same immutable `Profile` duration, TTL, clock and process concurrency
+policy to `NewHTTPSEngine(profile, fetcher)`. Construct `fetcher` with
+`NewHTTPSFetcher(HTTPSFetcherConfig{Timeout: time.Second})`. Startup policy may
+provide standard-library resolver/dialer seams and a private trust-root pool;
+these are trusted network configuration, never request input or proof authority.
+There is no general HTTP client, request URL, TLS bypass or transport override.
+The root SSO service must explicitly issue HTTPS challenges first.
+
+The only request is GET `https://<exact canonical claim host>/.well-known/golib-sso`
+on port 443, with that same TLS SNI and verified certificate hostname/chain,
+TLS 1.2 or later. The response must be status 200 and exactly `text/plain`
+without media parameters or content encoding. Its entire body must be exactly
+`golib-sso=<64 lowercase hex issued commitment>`, with no whitespace or newline.
+Full commitment comparison is constant-time; the capability commits the exact
+tenant, organization, claim/version, method, purpose and original lifetime.
+
+DNS resolves the exact absolute hostname once. Every result must be public;
+mixed private/public answers, more than 16 addresses, mapped/scoped addresses,
+loopback, private/link-local, shared, documentation, transition and reserved
+targets fail closed. One vetted address is pinned to the TCP peer at port 443;
+there is no second resolution, proxy/environment proxy, redirect, alternate
+port, fallback address, retry, connection reuse or ambient cookie state.
+Headers are limited to 4096 bytes and the decoded body to 128 bytes; compression
+is disabled. A total bounded context covers resolution, connect, verified TLS,
+headers and body. Calls close their connection and honor active cancellation.
+
+404 is no-data, a nonexact bounded body is mismatch, and TLS/network/redirect/
+oversize/format ambiguity is unavailable evidence. None automatically withdraws
+current ownership. Freshness starts before resolution and ends at the earlier
+configured observation TTL or original challenge expiry; HTTP cache headers
+cannot extend it. No success is cached. Current routing authority still requires
+the organization's primary current-proof read; this profile adds no routing.
+
+Tests use independent DNS wire and HTTPS servers with trusted test certificates
+while retaining production certificate verification. The network-only fixture
+maps a vetted public peer to the owned local server; it does not fake claim,
+identity, proof, audit or transaction stores. This is local interoperability,
+not a claim of live Internet verification or complete release qualification.

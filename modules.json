@@ -172,7 +172,7 @@
           "build_tags": []
         }
       ],
-      "purpose": "Experimental bounded DNS TXT observation for an SSO-issued exact domain challenge; observations confer no domain ownership and HTTPS remains unimplemented.",
+      "purpose": "Experimental bounded DNS TXT or opt-in verified-TLS HTTPS observation for an exact SSO-issued domain challenge; observations confer no domain ownership.",
       "lifecycle": "experimental",
       "kind": "optional adapter",
       "releasable": true,
@@ -212,17 +212,17 @@
           "protocols-and-schemas",
           "scheduling-and-orchestration"
         ],
-        "responsibility": "Retrieve and classify bounded DNS TXT evidence for an immutable SSO-issued request without committing domain proof.",
+        "responsibility": "Retrieve and classify bounded DNS TXT or verified-TLS HTTPS evidence for an immutable SSO-issued request without committing domain proof.",
         "non_goals": [
           "Own challenge issuance, organization proof authority, persistence, HTTP handlers or federation routing.",
-          "Claim HTTPS verification, DNSSEC authentication or complete DNS interoperability from the selected profile."
+          "Claim DNSSEC authentication, live Internet verification or complete interoperability from selected local profiles."
         ],
         "public_package_identifier": "domainverification",
         "primary_entry_packages": [
           "github.com/faustbrian/go-sso/domain-verification"
         ],
         "package_selection": {
-          "github.com/faustbrian/go-sso/domain-verification": "Experimental bounded DNS TXT observation for an SSO-issued exact domain challenge; observations confer no domain ownership and HTTPS remains unimplemented."
+          "github.com/faustbrian/go-sso/domain-verification": "Experimental bounded DNS TXT or opt-in verified-TLS HTTPS observation for an exact SSO-issued domain challenge; observations confer no domain ownership."
         },
         "lifecycle_status": "active",
         "maturity": "experimental",
