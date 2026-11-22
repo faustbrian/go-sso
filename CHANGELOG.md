@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add the closed non-secret static-OIDC `ProviderUpdateRequest` and result
+  contracts, preserving provider identity and subject-mapping compatibility
+  without credentials, enablement, discovery requests or routing semantics.
+
 - Add explicit opt-in HTTPS well-known domain challenges and method-bound
   observations through the existing organization-owned proof transition.
   Existing DNS constructors and request/config literal shapes remain unchanged;

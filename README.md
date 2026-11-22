@@ -30,6 +30,16 @@ coordinator. `ProviderGetRequest` and bounded `ProviderListRequest` select safe
 metadata only. Registered providers remain disabled with empty `VerifiedDomains`;
 requested domains do not become ownership evidence or routes.
 
+`ProviderUpdateRequest` carries the catalog command, provider ID, expected
+version, closed `TypedProviderConfiguration`, complete mapping and original
+idempotency key. `NewStaticOIDCProviderConfiguration` selects only explicit
+metadata: there is no credential, enablement, discovery-fetch or routing input.
+The selected update preserves issuer, subject claim and pending domains; mapping
+versions advance by exactly one. The native service binds the organization
+separately before invocation and checks current organization authority, rather
+than resolving ownership globally from the provider ID. See the PostgreSQL
+schema and protected-counter prerequisites before enabling this profile.
+
 ## Composition
 
 The root package defines immutable `DomainProofRequest`,
