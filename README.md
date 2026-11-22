@@ -10,8 +10,10 @@ commits and reads authoritative proof. A separate native profile registers
 **disabled, metadata-only static OIDC providers** and reads safe organization
 metadata. A separate opt-in native credential profile initializes or replaces
 an encrypted client secret while preserving disabled state. These profiles are
-not a release-qualified SSO platform. Provider enable, active-use credential
-overlap, routing, login, JIT, protocol adapters and HTTP
+not a release-qualified SSO platform. The separate opt-in enablement profile
+changes disabled static-OIDC provider state only after current native domain,
+credential and organization checks. Active-use credential overlap, routing,
+login, JIT, protocol adapters and HTTP
 routes are not implemented or advertised.
 
 ## Disabled static OIDC provider values
@@ -67,8 +69,31 @@ authorize a write. Native composition uses the separately configured
 in. Initial/replacement commands advance the shared provider version without
 changing metadata or mapping; only one current encrypted generation is retained.
 Original command retries return their exact historical result, never credential
-bytes or a renewed lifetime. Provider enabling, active-use overlap,
-drain, SAML keys/certificates and provider-network calls remain unsupported.
+bytes or a renewed lifetime. Active-use overlap, drain, SAML keys/certificates
+and provider-network calls remain unsupported.
+
+### Enablement-checkpoint boundary
+
+`ProviderEnableRequest` is distinct from registration, metadata updates and
+credential rotation. It carries the provider ID, exact expected version, an
+organization-owned `DomainProofCheckpoint`, an immutable `CredentialCheckpoint`
+and the original idempotency key. It has no caller-selected command ID.
+
+`NewCredentialCheckpoint` snapshots a `CredentialCheckpointBinding` for the
+exact tenant, organization, static-OIDC provider, provider version and active
+client-secret generation. Its original observation and expiry must be UTC
+microseconds with a positive lifetime of at most 20 seconds. `Bindings()`
+explicitly returns a detached non-authoritative copy; neither construction nor
+`ProviderEnableRequest.Validate()` checks current readiness or renews a lifetime.
+The checkpoint type is specific to enablement and cannot select another
+credential purpose or operation. Checkpoints and requests redact diagnostics
+and reject implicit JSON/text serialization.
+
+The native enablement transition must read the exact current organization proof
+and active encrypted credential, reject expiry, revocation, owner/version or
+generation changes, and obtain fresh `org:sso-write` authorization before a
+write. Domain checkpoints never replace `organization.DomainProofReader`.
+Enabling provider state alone establishes no route, enforcement or login flow.
 
 ## Composition
 

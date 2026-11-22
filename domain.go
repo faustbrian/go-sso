@@ -1,7 +1,8 @@
 // Package sso implements explicitly selected enterprise federation workflows.
 // Selected profiles issue DNS or opt-in HTTPS challenges with organization-owned
-// proof authority and register disabled static-OIDC metadata through the native adapter. Provider
-// enable, routing, protocol login and JIT provisioning are not implemented.
+// proof authority. Native provider administration includes static-OIDC
+// registration and explicitly selected enablement contracts. None of these
+// contracts selects routing, protocol login, enforcement, or JIT provisioning.
 package sso
 
 import (

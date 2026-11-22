@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add a separate storage-neutral `ProviderEnableRequest` and result, exact
+  organization-owned domain-proof checkpoint and immutable enablement-only
+  credential checkpoint. Shape validation binds owners, versions and original
+  UTC-microsecond credential lifetimes of at most 20 seconds without granting
+  current authority; implicit request/checkpoint disclosure fails closed.
+
 - Add a separate storage-neutral disabled-OIDC credential-rotation request and
   result, explicit no-overlap policy and redacting encrypted-reference value.
   References authenticate exact context-bound envelope custody without exposing
