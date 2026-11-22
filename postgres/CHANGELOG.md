@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add `SigninProtocolProfile` for exact organization/provider selection of
+  detached, secret-free validated protocol metadata and effective parser limits.
+  This read-only construction snapshot grants no callback or session authority.
+
 - Add read-only callback quota attribution through `SigninCallbackRateSource`.
   Authenticate the original tenant, pending state and browser cookie before
   returning the original provider, flow, callback command and stored lifetime.

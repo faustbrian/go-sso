@@ -95,6 +95,14 @@ again. None of these failures creates a session.
 This API installs no public HTTP route and does not implement JIT provisioning,
 new account linking, or non-OIDC federation.
 
+For transport-owned callback parsing, `SigninProtocolProfile` selects the exact
+configured organization/provider pair and returns detached, secret-free public
+metadata with the effective protocol parser limits. Native IDs remain
+case-sensitive; the returned protocol ID is the existing scoped lowercase
+alias, not the stored provider ID. This construction-time snapshot performs no
+I/O and supplies no freshness or admission authority. `SigninCallback` retains
+all current provider, browser, linked-member and session checks.
+
 ### Static OIDC provider enablement
 
 Install `ProviderEnableMigrationSource` after the metadata and credential

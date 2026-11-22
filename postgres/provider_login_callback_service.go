@@ -97,12 +97,13 @@ func (ProviderLoginCallbackResult) MarshalText() ([]byte, error) {
 // owner and its primary. It owns no HTTP route, worker, provider registry or pool
 // lifecycle. Independent requests have independent command and bearer custody.
 type ProviderLoginCompletionService struct {
-	start    *ProviderLoginService
-	profiles map[providerLoginProfileKey]providerLoginCallbackTransport
-	policy   sessionpg.IdentifierAdmissionConfig
-	effect   *sessionpg.SSOOIDCSigninEffect
-	issuer   session.IssuerConfig
-	csrfKey  session.CSRFKey
+	start            *ProviderLoginService
+	profiles         map[providerLoginProfileKey]providerLoginCallbackTransport
+	protocolProfiles map[providerLoginProfileKey]oauth.ProviderProfile
+	policy           sessionpg.IdentifierAdmissionConfig
+	effect           *sessionpg.SSOOIDCSigninEffect
+	issuer           session.IssuerConfig
+	csrfKey          session.CSRFKey
 }
 
 // NewProviderLoginCompletionService validates trusted composition without
@@ -124,6 +125,7 @@ func NewProviderLoginCompletionService(start *ProviderLoginService, config Provi
 		return nil, sso.ErrInvalidInput
 	}
 	owners := make(map[providerLoginProfileKey]providerLoginCallbackTransport, len(config.Profiles))
+	protocolProfiles := make(map[providerLoginProfileKey]oauth.ProviderProfile, len(config.Profiles))
 	for _, profile := range config.Profiles {
 		key := providerLoginProfileKey{organization: profile.OrganizationID, provider: profile.ProviderID}
 		selected, available := start.profiles[key]
@@ -144,10 +146,11 @@ func NewProviderLoginCompletionService(start *ProviderLoginService, config Provi
 		if err != nil {
 			return nil, sso.ErrInvalidInput
 		}
+		protocolProfiles[key] = validator.Profile()
 		validator.Close()
 		owners[key] = transport
 	}
-	return &ProviderLoginCompletionService{start: start, profiles: owners, policy: policy, effect: effect, issuer: config.Issuer, csrfKey: config.CSRFKey}, nil
+	return &ProviderLoginCompletionService{start: start, profiles: owners, protocolProfiles: protocolProfiles, policy: policy, effect: effect, issuer: config.Issuer, csrfKey: config.CSRFKey}, nil
 }
 
 // SigninCallback processes the original query authorization code natively.
