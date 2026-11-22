@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Define the shared enterprise protocol adapter and its original-transaction
+  projection. Validate exact provider and credential generation, preserve the
+  resolved session policy and enforce original redirect expiry without giving
+  protocol modules reservation, storage or session authority.
+
 - Retain the exact OIDC or OAuth 2.0 protocol in bounded domain-route
   evidence. Existing OIDC constructors and bindings remain compatible;
   one selection cannot mix evidence from different protocols.

@@ -97,12 +97,16 @@ func (r SigninStartRequest) Validate() error {
 }
 
 func signinStartCallback(callback url.URL) bool {
+	return boundedSSOHTTPSURL(callback, 2048)
+}
+
+func boundedSSOHTTPSURL(callback url.URL, maximum int) bool {
 	if callback.Scheme != "https" || callback.Opaque != "" || callback.User != nil || callback.OmitHost || callback.Fragment != "" || callback.RawFragment != "" {
 		return false
 	}
 	// Bound caller-owned components before String or parsing can allocate.
 	for _, component := range []string{callback.Host, callback.Path, callback.RawPath, callback.RawQuery} {
-		if len(component) > 2048 {
+		if len(component) > maximum {
 			return false
 		}
 	}
@@ -110,7 +114,7 @@ func signinStartCallback(callback url.URL) bool {
 		return false
 	}
 	raw := callback.String()
-	if len(raw) == 0 || len(raw) > 2048 {
+	if len(raw) == 0 || len(raw) > maximum {
 		return false
 	}
 	parsed, err := url.Parse(raw)
