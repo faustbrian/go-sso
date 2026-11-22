@@ -7,6 +7,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	identity "github.com/faustbrian/go-identity"
 	migrations "github.com/faustbrian/go-migrations/v3"
@@ -123,6 +124,11 @@ func verifyNativeOAuth2ProviderActivationAndDisable(t *testing.T, failDisable bo
 	}
 	assertRoute(t, x, router, x.proof.Domain, "", oidc, nil)
 	assertRoute(t, x, router, x.proof.Domain, sso.ProviderID(provider), "", sso.ErrForbidden)
+	assertActivatedOAuth2Route(t, x, router, x.proof.TenantID, sso.ProviderID(provider), true)
+	assertActivatedOAuth2Route(t, x, router, x.proof.TenantID, oidc, false)
+	assertActivatedOAuth2Route(t, x, router, x.proof.TenantID, "", false)
+	assertActivatedOAuth2Route(t, x, router, "org-test-other", sso.ProviderID(provider), false)
+	assertActivatedOAuth2Route(t, x, newProviderRouter(t, x, 4), x.proof.TenantID, sso.ProviderID(provider), false)
 	disposition, err := sso.NewActiveTransactionDisposition(sso.ProviderID(provider), 3, sso.ActiveTransactionRevoke)
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +174,8 @@ func verifyNativeOAuth2ProviderActivationAndDisable(t *testing.T, failDisable bo
 	if err != nil || current.Provider.Enabled || current.Provider.Protocol != "oauth2" || current.Provider.Version != 4 || len(current.Provider.VerifiedDomains) != 0 {
 		t.Fatal("OAuth disable left authoritative provider enabled or reclassified", err)
 	}
+	assertActivatedOAuth2Route(t, x, router, x.proof.TenantID, sso.ProviderID(provider), false)
+	assertRoute(t, x, router, x.proof.Domain, "", oidc, nil)
 	var enableCount, disableCount, dispositions int
 	err = x.f.pool.Raw().QueryRow(x.f.ctx, `SELECT
  (SELECT count(*) FROM audit.records WHERE action='identity.sso.provider.enable' AND outcome=1),
@@ -175,6 +183,30 @@ func verifyNativeOAuth2ProviderActivationAndDisable(t *testing.T, failDisable bo
  (SELECT count(*) FROM sso_providers.provider_login_dispositions WHERE provider_id=$1)`, provider).Scan(&enableCount, &disableCount, &dispositions)
 	if err != nil || enableCount != 2 || disableCount != 1 || dispositions != 1 {
 		t.Fatal("OAuth lifecycle duplicated or omitted native effects", enableCount, disableCount, dispositions, err)
+	}
+}
+
+func assertActivatedOAuth2Route(t *testing.T, x providerEnableFixture, router *ssopg.ProviderRouter, tenant identity.TenantID, provider sso.ProviderID, selected bool) {
+	t.Helper()
+	request, err := sso.NewDomainRouteRequest(tenant, x.proof.Domain, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := router.RouteOAuth2(x.f.ctx, request)
+	if !selected {
+		if !errors.Is(err, sso.ErrForbidden) || route.Value != "" || route.Protocol() != "" {
+			t.Fatal("unavailable or cross-protocol OAuth provider returned evidence", err)
+		}
+		return
+	}
+	if err != nil || route.Protocol() != "oauth2" {
+		t.Fatal("activated OAuth provider was not routed as OAuth", err)
+	}
+	binding, err := route.Bindings()
+	if err != nil || binding.ProviderID != provider || binding.ProviderVersion != 3 || binding.CredentialGeneration != 1 ||
+		binding.Proof.Key != organization.DomainProofKey(x.proof) || binding.PolicyVersion != 1 ||
+		binding.ValidUntil.After(x.proof.ExpiresAt) || binding.ValidUntil.Sub(binding.ObservedAt) > 8*time.Second {
+		t.Fatal("OAuth route lost original provider, credential, proof or expiry", err)
 	}
 }
 

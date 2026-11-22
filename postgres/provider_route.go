@@ -47,7 +47,7 @@ type providerRouteScope struct {
 }
 
 // ProviderRouter is the explicitly composed, concurrent-safe trusted native
-// static-OIDC read boundary. It owns no pool lifecycle or background retries.
+// static-provider read boundary. It owns no pool lifecycle or background retries.
 // It is not an HTTP endpoint, an authentication grant or public discovery.
 type ProviderRouter struct {
 	pool             *database.Pool
@@ -87,9 +87,10 @@ func NewProviderRouter(pool *database.Pool, config ProviderRouterConfig) (*Provi
 
 // WithProtocolRegistry returns an immutable opt-in copy for a primary with both
 // ProviderProtocolMigrationSource migrations installed. It performs no I/O and
-// leaves the original router's schema requirements unchanged. Selection remains
-// OIDC-only: OAuth providers are ineligible, but count toward MaximumProviders;
-// unsupported protocol values and malformed OIDC state fail closed. Explicit
+// leaves the original router's schema requirements unchanged. Route selection
+// remains OIDC-only: OAuth providers count toward MaximumProviders but are
+// ineligible; use RouteOAuth2 for an exact OAuth route. Unsupported protocol
+// values and malformed OIDC state fail closed. Explicit
 // and configured-default foreign-protocol choices never fall back to OIDC.
 func (r *ProviderRouter) WithProtocolRegistry() (*ProviderRouter, error) {
 	if r == nil || r.pool == nil || r.pool.Raw() == nil {
@@ -108,14 +109,30 @@ func (ProviderRouter) MarshalText() ([]byte, error) { return nil, sso.ErrSensiti
 
 // Route resolves current organization proof in the supplied tenant, then
 // selects the exact explicit provider, verified configured default, or sole
-// eligible automatic choice. It never falls back after a negative preferred
+// eligible automatic OIDC choice. It never falls back after a negative preferred
 // choice. The selected provider's current credential is authenticated without
 // disclosure. Callers cannot use the result to skip fresh transactional login
 // admission, and a retained result never renews its original bounded lifetime.
 func (r *ProviderRouter) Route(ctx context.Context, request sso.DomainRouteRequest) (sso.DomainRoute, error) {
+	return r.route(ctx, request, providerProtocolOIDC)
+}
+
+// RouteOAuth2 reads one exact activated OAuth 2.0 provider on the migrated
+// protocol registry. The request must name the provider and domain; there is
+// no default, automatic choice or OIDC fallback. Positive evidence carries
+// only the original credential generation, exact current proof and bounded
+// deadline. It grants no transaction or session authority.
+func (r *ProviderRouter) RouteOAuth2(ctx context.Context, request sso.DomainRouteRequest) (sso.DomainRoute, error) {
+	return r.route(ctx, request, providerProtocolOAuth2)
+}
+
+func (r *ProviderRouter) route(ctx context.Context, request sso.DomainRouteRequest, protocol string) (sso.DomainRoute, error) {
 	lookup, err := request.Bindings()
 	if r == nil || r.pool == nil || ctx == nil || err != nil {
 		return sso.DomainRoute{}, sso.ErrInvalidInput
+	}
+	if protocol == providerProtocolOAuth2 && (!r.protocolRegistry || lookup.ProviderID == "") {
+		return sso.DomainRoute{}, sso.ErrForbidden
 	}
 	ctx, cancel := context.WithTimeout(ctx, min(r.config.MaximumDuration, r.config.Lifetime))
 	defer cancel()
@@ -140,21 +157,26 @@ func (r *ProviderRouter) Route(ctx context.Context, request sso.DomainRouteReque
 	if err != nil {
 		return sso.DomainRoute{}, err
 	}
+	newRoute := sso.NewDomainRoute
+	if protocol == providerProtocolOAuth2 {
+		newRoute = sso.NewOAuth2DomainRoute
+	}
 	choices := make([]sso.DomainRoute, 0, len(stored))
 	for _, candidate := range stored {
 		if r.protocolRegistry {
 			switch candidate.protocol {
-			case providerProtocolOIDC:
-			case providerProtocolOAuth2:
-				continue
+			case providerProtocolOIDC, providerProtocolOAuth2:
 			default:
 				return sso.DomainRoute{}, sso.ErrUnavailable
+			}
+			if candidate.protocol != protocol {
+				continue
 			}
 		}
 		if !candidate.enabled {
 			continue
 		}
-		b, err := r.routeBinding(ctx, candidate, proof)
+		b, err := r.routeBinding(ctx, candidate, proof, protocol)
 		if err != nil {
 			return sso.DomainRoute{}, err
 		}
@@ -162,7 +184,7 @@ func (r *ProviderRouter) Route(ctx context.Context, request sso.DomainRouteReque
 			continue
 		}
 		b.PolicyVersion, b.ObservedAt, b.ValidUntil = r.config.PolicyVersion, started, deadline
-		choice, err := sso.NewDomainRoute(b)
+		choice, err := newRoute(b)
 		if err != nil {
 			return sso.DomainRoute{}, sso.ErrUnavailable
 		}
@@ -173,7 +195,7 @@ func (r *ProviderRouter) Route(ctx context.Context, request sso.DomainRouteReque
 		return sso.DomainRoute{}, err
 	}
 	b, _ := route.Bindings()
-	if err = r.authenticateRouteCredential(ctx, b); err != nil {
+	if err = r.authenticateRouteCredential(ctx, b, route.Protocol()); err != nil {
 		return sso.DomainRoute{}, err
 	}
 	current, err := r.organizations.GetDomainProof(ctx, b.Proof.Key)
@@ -254,13 +276,13 @@ func (r *ProviderRouter) readRouteCandidates(ctx context.Context, proof organiza
 	return result, nil
 }
 
-func (r *ProviderRouter) routeBinding(ctx context.Context, row routeProviderRecord, proof organization.DomainProof) (sso.DomainRouteBinding, error) {
+func (r *ProviderRouter) routeBinding(ctx context.Context, row routeProviderRecord, proof organization.DomainProof, protocol string) (sso.DomainRouteBinding, error) {
 	version, versionErr := strconv.ParseUint(row.version, 10, 64)
 	generation, generationErr := strconv.ParseUint(row.generation, 10, 64)
 	if versionErr != nil || generationErr != nil || version == 0 || generation == 0 || !providerID(row.id) || len(row.proof) == 0 || len(row.proof) > providerEnableProofMaximumBytes {
 		return sso.DomainRouteBinding{}, sso.ErrUnavailable
 	}
-	aad, err := providerEnableProofContext(string(proof.TenantID), string(proof.OrganizationID), row.id, version)
+	aad, err := providerProofContext(protocol, string(proof.TenantID), string(proof.OrganizationID), row.id, version)
 	if err != nil {
 		return sso.DomainRouteBinding{}, sso.ErrUnavailable
 	}
@@ -293,7 +315,7 @@ const routeCurrentCredentialWhere = ` FROM sso_providers.providers p JOIN sso_pr
 const routeReadCredentialSQL = `SELECT c.provider_version::text,c.envelope,c.credential_context` + routeCurrentCredentialWhere
 const routeCurrentCredentialSQL = `SELECT EXISTS(SELECT 1` + routeCurrentCredentialWhere + `)`
 
-func (r *ProviderRouter) authenticateRouteCredential(ctx context.Context, b sso.DomainRouteBinding) error {
+func (r *ProviderRouter) authenticateRouteCredential(ctx context.Context, b sso.DomainRouteBinding, protocol string) error {
 	var installed string
 	var wire, contextWire []byte
 	proof := b.Proof.Key
@@ -304,7 +326,7 @@ func (r *ProviderRouter) authenticateRouteCredential(ctx context.Context, b sso.
 	if err != nil || version > b.ProviderVersion {
 		return sso.ErrUnavailable
 	}
-	return authenticateStoredProviderCredential(ctx, r.config.Envelope, string(proof.TenantID), string(proof.OrganizationID), string(b.ProviderID), wire, contextWire, b.CredentialGeneration, version)
+	return authenticateProtocolProviderCredential(ctx, r.config.Envelope, protocol, string(proof.TenantID), string(proof.OrganizationID), string(b.ProviderID), wire, contextWire, b.CredentialGeneration, version)
 }
 
 func (r *ProviderRouter) requireCurrentRoute(ctx context.Context, b sso.DomainRouteBinding) error {

@@ -99,10 +99,6 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 	return providerEnablePredecessor{configuration: plain, domain: canonical, mappingVersion: mapping, credentialGeneration: generation, credentialVersion: installed, configurationHash: sha256.Sum256(row.configuration), credentialHash: sha256.Sum256(row.credential), contextHash: sha256.Sum256(row.credentialContext)}, nil
 }
 
-func authenticateStoredProviderCredential(ctx context.Context, crypto *envelope.Service, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64) error {
-	return authenticateProtocolProviderCredential(ctx, crypto, providerProtocolOIDC, tenant, organization, provider, wire, contextWire, generation, installed)
-}
-
 func authenticateProtocolProviderCredential(ctx context.Context, crypto *envelope.Service, protocol, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64) error {
 	return withAuthenticatedProtocolProviderCredential(ctx, crypto, protocol, tenant, organization, provider, wire, contextWire, generation, installed, func(ctx context.Context, _ []byte) error {
 		return ctx.Err()
@@ -185,10 +181,6 @@ func (p *ProviderContributor) prepareEnable(ctx context.Context) error {
 	}
 	p.configuration = e.predecessor.configuration
 	return nil
-}
-
-func providerEnableProofContext(tenant, organization, provider string, version uint64) (envelope.Context, error) {
-	return providerProofContext(providerProtocolOIDC, tenant, organization, provider, version)
 }
 
 func providerProofContext(protocol, tenant, organization, provider string, version uint64) (envelope.Context, error) {

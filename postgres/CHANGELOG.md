@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Resolve one exact activated OAuth 2.0 route from the explicit protocol
+  registry. Authenticate its protocol-bound domain proof and installed
+  encrypted credential without falling back to OIDC.
+- Provide additive login-transaction protocol expansion and separate
+  validation migrations. Existing encrypted OIDC custody and indexes remain
+  unchanged; no OAuth login writer is activated by the schema.
+
 - Enable and disable explicitly selected static OAuth 2.0 providers using
   exact encrypted credential and current domain proof. Both operations
   preserve historical retry semantics, with separate protocol bindings.

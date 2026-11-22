@@ -594,6 +594,21 @@ The older OIDC methods cannot consume OAuth credentials, proofs or recovery
 anchors. These are native administrative operations; activation alone does
 not register an OAuth start/callback, reach the provider or issue a session.
 
+`RouteOAuth2` is available only on the protocol registry copy. Pass the exact
+tenant, verified domain and provider ID. The bounded native read authenticates
+the current proof and installed credential under the OAuth protocol; it does
+not fall back to OIDC or select an automatic/default OAuth provider. A route
+is not a login transaction, and copying it does not renew the proof or expiry.
+
+Install both `LoginTransactionProtocolMigrationSource` versions after the
+existing login-transaction and provider-registry migrations, before any OAuth
+start writer. The expansion atomically replaces the OIDC-only check with a
+closed OIDC/OAuth check without scanning the populated table under its short
+exclusive lock. The second version validates the new check under a weaker lock.
+Neither rewrites ciphertext, PKCE custody or indexes. Leave the expanded schema
+in place during code rollback; an OIDC-only constraint cannot be restored while
+OAuth rows exist.
+
 ## Domain recovery
 
 The exact original safe organization `CommandBinding` is compare-and-set before
