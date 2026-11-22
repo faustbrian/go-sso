@@ -616,18 +616,23 @@ func (c providerLoginPayloadConfig) restore(ctx context.Context, input providerL
 // provider/directory authority and the original exclusive expiry. Decryption
 // authenticates original state; it does not refresh that live authority.
 func (c providerLoginPayloadConfig) redirectState(ctx context.Context, input providerLoginPayloadInput, persistedBindingEnvelope []byte) (providerLoginPublicState, error) {
+	binding, err := c.redirectBinding(ctx, input, persistedBindingEnvelope)
+	return binding.Public, err
+}
+
+func (c providerLoginPayloadConfig) redirectBinding(ctx context.Context, input providerLoginPayloadInput, persistedBindingEnvelope []byte) (providerLoginBindingMetadata, error) {
 	if err := providerLoginPayloadContext(ctx); err != nil {
-		return providerLoginPublicState{}, err
+		return providerLoginBindingMetadata{}, err
 	}
 	if !c.ready() {
-		return providerLoginPublicState{}, identity.ForbiddenError{}
+		return providerLoginBindingMetadata{}, identity.ForbiddenError{}
 	}
 	stored, err := c.openBinding(ctx, input, persistedBindingEnvelope)
 	if err != nil {
-		return providerLoginPublicState{}, err
+		return providerLoginBindingMetadata{}, err
 	}
 	defer clear(stored.Proof)
-	return stored.Metadata.Public, nil
+	return stored.Metadata, nil
 }
 
 func (c providerLoginPayloadConfig) seal(ctx context.Context, aad envelope.Context, plain []byte, maximum int) ([]byte, error) {

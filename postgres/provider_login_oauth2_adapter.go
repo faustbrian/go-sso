@@ -20,10 +20,10 @@ import (
 	"github.com/faustbrian/go-sso"
 )
 
-// OAuth2ProtocolAdapterFactory constructs a trusted adapter for one locally
-// reserved callback. The adapter must invoke its collaborators synchronously
-// during Complete and must not reuse them after Complete returns. Factory
-// configuration is selected by the application, never by a callback request.
+// OAuth2ProtocolAdapterFactory constructs a trusted adapter for one committed
+// start or locally reserved callback. Start receives no callback collaborators.
+// The adapter must invoke its collaborators synchronously during Complete and
+// must not retain them. Configuration is selected by the application.
 type OAuth2ProtocolAdapterFactory func(OAuth2ProtocolAdapterConfig) (sso.ProtocolAdapter, error)
 
 // OAuth2ProtocolEvidence is the adapter's identity evidence and original
@@ -36,7 +36,8 @@ type OAuth2ProtocolEvidence struct {
 
 // OAuth2ProtocolAdapterConfig binds the adapter to authenticated native
 // custody. Authorization contains retained browser state; do not disclose it
-// outside protocol wire processing. UseSecrets may borrow each secret once.
+// outside protocol wire processing. Both callback hooks and observation fields
+// are unset at Start. UseSecrets may borrow each secret once during Complete.
 // AcceptTokens only prepares encrypted output. It returns no durable reference
 // before the native coordinator's final commit.
 type OAuth2ProtocolAdapterConfig struct {
@@ -129,14 +130,19 @@ func (p *providerLoginCallbackPhase) generateOAuth2AdapterAccepted(ctx context.C
 	if err != nil {
 		return nil, sso.ErrForbidden
 	}
-	profile := p.oauth2.Profile
-	profile.Profile.Scopes = slices.Clone(profile.Profile.Scopes)
-	config := OAuth2ProtocolAdapterConfig{
-		Transaction: tx, CredentialGeneration: selected.CredentialGeneration, Profile: profile, IdentityProof: proof, Mapping: mapping,
-		Authorization:       oauth.AuthorizationParameters{State: binding.Public.State, PKCEChallenge: binding.Public.Challenge},
-		CapabilityExpiresAt: input.ExpiresAt, Clock: clock, HTTPClient: p.oauth2.HTTPClient, ObservedAt: p.found.ObservedAt, ValidUntil: p.authority.deadline,
-	}
+	config := newOAuth2ProtocolAdapterConfig(tx, binding.Public, selected.CredentialGeneration, *p.oauth2, clock, proof, mapping)
+	config.ObservedAt, config.ValidUntil = p.found.ObservedAt, p.authority.deadline
 	return p.completeOAuth2WithAdapter(ctx, config, material, generation, admission, aad)
+}
+
+func newOAuth2ProtocolAdapterConfig(tx sso.LoginTransaction, state providerLoginPublicState, generation uint64, transport StaticOAuth2CompletionProfile, clock oauth.Clock, proof sso.IdentityProofPolicy, mapping sso.AttributeMapping) OAuth2ProtocolAdapterConfig {
+	profile := transport.Profile
+	profile.Profile.Scopes = slices.Clone(profile.Profile.Scopes)
+	return OAuth2ProtocolAdapterConfig{
+		Transaction: tx, CredentialGeneration: generation, Profile: profile, IdentityProof: proof, Mapping: mapping,
+		Authorization:       oauth.AuthorizationParameters{State: state.State, PKCEChallenge: state.Challenge},
+		CapabilityExpiresAt: tx.ExpiresAt, Clock: clock, HTTPClient: transport.HTTPClient,
+	}
 }
 
 func (p *providerLoginCallbackPhase) completeOAuth2WithAdapter(ctx context.Context, config OAuth2ProtocolAdapterConfig, material providerOAuth2CallbackMaterial, generation uint64, admission risk.AuthenticationAdmission, aad envelope.Context) ([]byte, error) {

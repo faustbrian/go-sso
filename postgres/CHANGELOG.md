@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Select one standalone adapter for original OAuth2 redirect rendering and
+  reserved callback completion. Start discloses only the committed state and
+  S256 challenge against the exact current provider, with no callback custody.
+
 - Allow a trusted standalone OAuth2 adapter to complete the already reserved
   native callback. The original coordinator retains credential custody, linked
   recipient checks, encrypted token staging and atomic session issuance.

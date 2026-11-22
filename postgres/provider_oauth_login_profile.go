@@ -26,6 +26,7 @@ type StaticOAuth2LoginProfile StaticOIDCLoginProfile
 type providerOAuth2LoginProfile struct {
 	configured                    StaticOAuth2LoginProfile
 	issuer, authorizationEndpoint string
+	installed                     providerOAuthConfiguration
 }
 
 func normalizeStaticOAuth2LoginProfile(p StaticOAuth2LoginProfile) (StaticOAuth2LoginProfile, error) {
@@ -124,7 +125,7 @@ func (r *ProviderRouter) readProviderOAuth2LoginProfile(ctx context.Context, rou
 	if !r.config.Clock.Now().Before(binding.ValidUntil) {
 		return providerOAuth2LoginProfile{}, sso.ErrForbidden
 	}
-	return providerOAuth2LoginProfile{configured: configured, issuer: stored.Proof.Issuer, authorizationEndpoint: stored.AuthorizationEndpoint}, nil
+	return providerOAuth2LoginProfile{configured: configured, issuer: stored.Proof.Issuer, authorizationEndpoint: stored.AuthorizationEndpoint, installed: stored}, nil
 }
 
 func validateProviderOAuth2LoginConfiguration(stored providerOAuthConfiguration) error {

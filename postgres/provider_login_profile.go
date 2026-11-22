@@ -37,6 +37,7 @@ type providerLoginProfile struct {
 	configured                    StaticOIDCLoginProfile
 	issuer, authorizationEndpoint string
 	protocol                      string
+	oauthConfiguration            providerOAuthConfiguration
 }
 
 func normalizeStaticOIDCLoginProfile(p StaticOIDCLoginProfile) (StaticOIDCLoginProfile, error) {

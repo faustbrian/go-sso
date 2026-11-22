@@ -69,21 +69,22 @@ type ProviderLoginConfig struct {
 // ProviderLoginService owns native anonymous enterprise sign-in initiation. It
 // borrows the router's primary; it does not issue sessions or own HTTP routes.
 type ProviderLoginService struct {
-	router           *ProviderRouter
-	directory        *kernel.Repository
-	config           ProviderLoginConfig
-	policyVersion    uint64
-	profiles         map[providerLoginProfileKey]StaticOIDCLoginProfile
-	providerDomains  map[sso.ProviderID]string
-	callbacks        map[string]struct{}
-	profileDigest    [32]byte
-	oauthProfiles    map[providerLoginProfileKey]StaticOAuth2LoginProfile
-	oauthDigest      [32]byte
-	payload          providerLoginPayloadConfig
-	callbackVerifier capability.Service
-	callbackLimits   capability.Limits
-	custody          risk.AuthenticationAdmissionCustody
-	link             *ProviderLinkConfig
+	router            *ProviderRouter
+	directory         *kernel.Repository
+	config            ProviderLoginConfig
+	policyVersion     uint64
+	profiles          map[providerLoginProfileKey]StaticOIDCLoginProfile
+	providerDomains   map[sso.ProviderID]string
+	callbacks         map[string]struct{}
+	profileDigest     [32]byte
+	oauthProfiles     map[providerLoginProfileKey]StaticOAuth2LoginProfile
+	oauthDigest       [32]byte
+	oauthStartAdapter *providerOAuth2StartAdapter
+	payload           providerLoginPayloadConfig
+	callbackVerifier  capability.Service
+	callbackLimits    capability.Limits
+	custody           risk.AuthenticationAdmissionCustody
+	link              *ProviderLinkConfig
 }
 
 type providerLoginProfileKey struct {
@@ -435,7 +436,7 @@ func (p *providerLoginPhase) selectRoute(ctx context.Context) (sso.DomainRoute, 
 		return sso.DomainRoute{}, providerLoginProfile{}, err
 	}
 	return route, providerLoginProfile{configured: StaticOIDCLoginProfile(profile.configured), protocol: providerProtocolOAuth2,
-		issuer: profile.issuer, authorizationEndpoint: profile.authorizationEndpoint}, nil
+		issuer: profile.issuer, authorizationEndpoint: profile.authorizationEndpoint, oauthConfiguration: profile.installed}, nil
 }
 
 func (s *ProviderLoginService) coordinator(p *providerLoginPhase) (*kernel.Coordinator, *kernel.ContributorRegistry, error) {

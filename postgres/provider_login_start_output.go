@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"net/url"
 	"strconv"
 
 	identity "github.com/faustbrian/go-identity"
@@ -53,7 +54,7 @@ func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.Sign
 		return out, providerError(ctx, err)
 	}
 	defer clear(wire)
-	state, err := s.payload.redirectState(ctx, input.payload(), wire)
+	binding, err := s.payload.redirectBinding(ctx, input.payload(), wire)
 	if err != nil {
 		return out, providerError(ctx, err)
 	}
@@ -92,7 +93,12 @@ func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.Sign
 		}
 		deadline = earlierLoginTime(deadline, earlierLoginTime(authority.ValidUntil, fresh.member.observed.ValidUntil()))
 	}
-	redirect, err := profile.authorizationRedirect(state)
+	var redirect url.URL
+	if input.Protocol == providerProtocolOAuth2 && s.oauthStartAdapter != nil {
+		redirect, err = s.oauthStartAdapter.redirect(ctx, *input, binding, profile, s.router.config.Clock, deadline)
+	} else {
+		redirect, err = profile.authorizationRedirect(binding.Public)
+	}
 	if err != nil {
 		return out, providerError(ctx, err)
 	}
