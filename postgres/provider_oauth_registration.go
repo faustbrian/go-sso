@@ -26,7 +26,8 @@ func providerOAuthRegistrationOperation() identity.FeatureOperation {
 
 // WithOAuthRegistration returns an opt-in copy after the operator applies
 // both provider protocol migrations. Its safe reads project both installed
-// protocols. It installs no routes and enables no OAuth providers. All
+// protocols and the credential service can install OAuth client secrets.
+// It installs no routes and enables no OAuth providers. All
 // registry consumers for the primary must support this profile before the
 // first OAuth registration; legacy binaries assume only OIDC records exist.
 // The method performs no I/O and does not change the original service.

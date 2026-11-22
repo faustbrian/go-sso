@@ -363,7 +363,7 @@ base64-encoded encrypted configuration (itself capped at 64KiB) and scalar frame
 the matching encrypted outer-wire limit is 96KiB plus 4096 bytes of envelope
 overhead. Original registration's 64KiB preparation profile stays unchanged.
 
-### Disabled OIDC client-secret initialization and replacement
+### Disabled OIDC and OAuth 2.0 client-secret initialization and replacement
 
 Install `ProviderCredentialsMigrationSource` at a later unique version after
 the provider/update migrations and **before opting into credential service code**.
@@ -387,11 +387,18 @@ Trusted ingress encrypts one client secret under the exact root-owned
 `CredentialReferenceContext.EncryptionContext()`. The public reference factory
 authenticates bounded ciphertext but conveys no native trust. The credential
 service reauthenticates with its own configured service/key and requires exact
-tenant, organization, provider, OIDC protocol, client-secret purpose, operation
+tenant, organization, provider, protocol, client-secret purpose, operation
 audience, current provider version, next credential generation and original
 lifetime. Expired/future ingress, a different factory key or a renewed original
 request cannot authorize a write. No raw secret is accepted or returned by this
 service; temporary decrypt output is cleared by the root reference factory.
+
+For OAuth 2.0, use the protocol-aware base from `WithOAuthRegistration` after
+the provider protocol migrations, and set `CredentialReferenceContext.Protocol`
+to `oauth2` before sealing. The stored configuration independently authenticates
+the same protocol; an OIDC envelope for the same provider cannot substitute.
+Installing an OAuth secret leaves the provider disabled and does not opt it into
+OIDC enablement or routing.
 
 The separate policy owner observes the exact primary-time action/resource,
 policy revision, current actor authorization epoch and earliest absolute decision

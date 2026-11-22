@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Install and replace protocol-bound OAuth 2.0 client secrets for disabled
+  providers through the existing credential command. Exact retries retain one
+  encrypted generation, audit and outbox effect. OIDC enablement and credential
+  use cannot substitute OAuth custody; OAuth routing remains inactive.
+
 - Add a selected native registration path for disabled static OAuth2
   providers. The provider registry retains existing OIDC metadata, encrypts
   the OAuth configuration with its own protocol binding, and recovers exact

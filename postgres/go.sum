@@ -157,8 +157,8 @@ github.com/faustbrian/go-service v1.1.2 h1:8gKlxhILZzn1gQg5edVzRomlqLLaa07e2nC9d
 github.com/faustbrian/go-service v1.1.2/go.mod h1:ivGR4lBgV5wiUS/06bI806R+LUZkoknk53VPn5Tn6pw=
 github.com/faustbrian/go-service/v2 v2.0.0 h1:ZKMUXJJfNUqweyJrGz4dzkP0d2l5A15n+wcrGDO42lw=
 github.com/faustbrian/go-service/v2 v2.0.0/go.mod h1:lYYYHYYYMyi4zr9GQBKb/1aVWWciFS/k35UwfCThbOY=
-github.com/faustbrian/go-sso v0.0.0-20261122180709-aa28132b4b69 h1:L7hysSoqOpWs4/scDpKfykA2VKZbEiWvwzsjELx8gXk=
-github.com/faustbrian/go-sso v0.0.0-20261122180709-aa28132b4b69/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
+github.com/faustbrian/go-sso v0.0.0-20261122184125-2aa6ca9e9c6a h1:5obx8Rz0hRA0lTlYv1CFT68FNwhxQS4JvnxOmrYKg94=
+github.com/faustbrian/go-sso v0.0.0-20261122184125-2aa6ca9e9c6a/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734 h1:wi/Fl8h5KagSJogEvLMKRfY2dkNGRTC1HNcndrUL45o=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734/go.mod h1:WI4BJ4aQ1ki49oDREV0ORq21xMfxr+CvP+fshGTPEkQ=
 github.com/faustbrian/go-transactional-outbox/postgres/identity v0.0.0-20261020135213-493107bf82af h1:KPP2asGRm5OtY28qv4wzMCoH43jzhcjkmwAPzXQvNOA=

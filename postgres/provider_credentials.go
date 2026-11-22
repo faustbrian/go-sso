@@ -285,7 +285,9 @@ func (p *ProviderCredentialsContributor) loadConfiguration(ctx context.Context) 
 	if err != nil || p.mappingVersion == 0 {
 		return sso.ErrUnavailable
 	}
-	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(s.authentication.TenantID), "organization": s.updateOrganization, "provider": p.request.ProviderID, "protocol": "oidc", "purpose": "static-configuration", "version": versionText})
+	// The independent encrypted metadata authenticates the selected protocol;
+	// a reference minted for the same IDs cannot reclassify an existing row.
+	aad, err := p.configurationContext(versionText)
 	if err != nil {
 		return sso.ErrUnavailable
 	}
@@ -293,13 +295,45 @@ func (p *ProviderCredentialsContributor) loadConfiguration(ctx context.Context) 
 	if err != nil {
 		return err
 	}
-	var current providerConfiguration
-	if json.Unmarshal(p.metadata, &current) != nil {
+	if pending < 1 || pending > 128 {
 		return sso.ErrUnavailable
 	}
-	canonical, err := json.Marshal(current)
+	return requireCredentialConfiguration(p.request.CredentialReference.Context().Protocol, p.metadata, p.mappingVersion, int(pending))
+}
+
+func (p *ProviderCredentialsContributor) configurationContext(version string) (envelope.Context, error) {
+	s := p.service.base
+	return envelope.NewContext(map[string]string{
+		"owner": "sso/provider", "tenant": string(s.authentication.TenantID),
+		"organization": s.updateOrganization, "provider": p.request.ProviderID,
+		"protocol": p.request.CredentialReference.Context().Protocol,
+		"purpose":  "static-configuration", "version": version,
+	})
+}
+
+func requireCredentialConfiguration(protocol string, plain []byte, version uint64, pending int) error {
+	switch protocol {
+	case providerProtocolOIDC:
+		var current providerConfiguration
+		if json.Unmarshal(plain, &current) != nil || current.Mapping.Version != version || len(current.Domains) != pending {
+			return sso.ErrUnavailable
+		}
+		return requireCanonicalCredentialConfiguration(plain, current)
+	case providerProtocolOAuth2:
+		var current providerOAuthConfiguration
+		if json.Unmarshal(plain, &current) != nil || current.Mapping.Version != version || len(current.Domains) != pending {
+			return sso.ErrUnavailable
+		}
+		return requireCanonicalCredentialConfiguration(plain, current)
+	default:
+		return sso.ErrUnavailable
+	}
+}
+
+func requireCanonicalCredentialConfiguration(plain []byte, configuration any) error {
+	canonical, err := json.Marshal(configuration)
 	defer clear(canonical)
-	if err != nil || !bytes.Equal(canonical, p.metadata) || current.Mapping.Version != p.mappingVersion || len(current.Domains) != int(pending) || pending < 1 || pending > 128 {
+	if err != nil || !bytes.Equal(canonical, plain) {
 		return sso.ErrUnavailable
 	}
 	return nil
@@ -485,7 +519,7 @@ func (p *ProviderCredentialsContributor) GenerateFeaturePreparation(ctx context.
 	if p == nil || p.service == nil || ctx == nil || c != p.command || generation == 0 || p.generation != 0 {
 		return nil, sso.ErrInvalidInput
 	}
-	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(p.binding.TenantID), "organization": p.service.base.updateOrganization, "provider": p.binding.RecordID, "protocol": "oidc", "purpose": "static-configuration", "version": strconv.FormatUint(p.request.ExpectedVersion+1, 10)})
+	aad, err := p.configurationContext(strconv.FormatUint(p.request.ExpectedVersion+1, 10))
 	if err != nil {
 		return nil, err
 	}

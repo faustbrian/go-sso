@@ -48,8 +48,9 @@ type ProviderCredentialsConfig struct {
 	MaximumReferenceLifetime time.Duration
 }
 
-// ProviderCredentialsService owns only disabled static-OIDC client-secret
-// initialization/replacement. Configure an organization-bound ProviderService
+// ProviderCredentialsService initializes or replaces a disabled static
+// provider's client secret. OAuth 2.0 requires WithOAuthRegistration on the
+// organization-bound ProviderService. Configure that base service
 // first and install ProviderCredentialsMigrationSource. No constructor performs
 // I/O, grants current authorization or bypasses canonical native risk policy.
 // Concurrent calls use independent native contributors; the caller owns all
@@ -149,6 +150,7 @@ func (s *ProviderCredentialsService) admit(ctx context.Context) (a providerAdmis
 // Initial and replacement writes advance the shared provider version, replace
 // only the current encrypted generation, and atomically retain audit/outbox.
 // Original retries disclose historical results, not current credential access.
+// The ingress protocol must match the authenticated provider metadata.
 func (s *ProviderCredentialsService) ProviderCredentialsRotate(ctx context.Context, r sso.ProviderCredentialsRotateRequest) (out sso.ProviderCredentialsRotateResult, err error) {
 	_, commandErr := identity.ParseCommandID(string(r.CommandID))
 	if s == nil || s.base == nil || ctx == nil || !providerID(r.ProviderID) || commandErr != nil || r.ExpectedVersion == 0 || r.ExpectedVersion == math.MaxUint64 || r.OverlapPolicy.Validate() != nil {
@@ -156,6 +158,9 @@ func (s *ProviderCredentialsService) ProviderCredentialsRotate(ctx context.Conte
 	}
 	reference := r.CredentialReference.Context()
 	if _, contextErr := reference.EncryptionContext(); contextErr != nil || reference.ProviderID != r.ProviderID || reference.ProviderVersion != r.ExpectedVersion || reference.TenantID != string(s.base.authentication.TenantID) || reference.OrganizationID != s.base.updateOrganization || reference.EnvelopeKeyID != s.profile.IngressKeyID || reference.ExpiresAt.Sub(reference.IssuedAt) > s.profile.MaximumReferenceLifetime {
+		return out, sso.ErrForbidden
+	}
+	if reference.Protocol == providerProtocolOAuth2 && !s.base.oauthRegistration {
 		return out, sso.ErrForbidden
 	}
 	wire, err := r.CredentialReference.EncryptedEnvelope().MarshalBinary()

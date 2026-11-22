@@ -142,6 +142,11 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 	if s == nil || s.pool == nil || ctx == nil || !providerID(s.updateOrganization) || r.Validate() != nil {
 		return out, sso.ErrInvalidInput
 	}
+	// OAuth credential custody does not opt this OIDC-only transition into
+	// routing a new protocol. Keep historical OIDC request commitments intact.
+	if r.CredentialCheckpoint.Protocol() != providerProtocolOIDC {
+		return out, sso.ErrForbidden
+	}
 	checkpoint, _ := r.CredentialCheckpoint.Bindings()
 	proof := organization.DomainProof(r.DomainProofCheckpoint.Key)
 	if checkpoint.TenantID != s.authentication.TenantID || string(checkpoint.OrganizationID) != s.updateOrganization {

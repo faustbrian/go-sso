@@ -117,7 +117,7 @@ func withAuthenticatedStoredProviderCredential(ctx context.Context, crypto *enve
 		return err
 	}
 	var binding sso.CredentialReferenceContext
-	if json.Unmarshal(contextWire, &binding) != nil || binding.TenantID != tenant || binding.OrganizationID != organization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
+	if json.Unmarshal(contextWire, &binding) != nil || binding.Protocol != providerProtocolOIDC || binding.TenantID != tenant || binding.OrganizationID != organization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
 		return sso.ErrUnavailable
 	}
 	canonical, err := json.Marshal(binding)
