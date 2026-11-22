@@ -95,6 +95,31 @@ generation changes, and obtain fresh `org:sso-write` authorization before a
 write. Domain checkpoints never replace `organization.DomainProofReader`.
 Enabling provider state alone establishes no route, enforcement or login flow.
 
+### Disablement-disposition boundary
+
+The storage-neutral `ProviderDisableRequest` carries the provider ID, current
+optimistic version, a bounded reason and an explicit immutable
+`ActiveTransactionDisposition`. It has no caller-selected command ID or
+idempotency key; callers preserve the complete original request for canonical
+repeat handling by a native implementation.
+
+`NewActiveTransactionDisposition` selects `ActiveTransactionDrain` or
+`ActiveTransactionRevoke` for the exact `ProviderID` and current provider
+version. `Bindings()` explicitly projects a detached copy. Construction and
+`ProviderDisableRequest.Validate()` check only bounded shape and exact binding
+agreement: versions must allow a successor, and reasons must contain 1..1024
+valid UTF-8 bytes, be nonblank and contain no control characters. Requests and
+opaque dispositions redact diagnostics and reject implicit JSON/text
+serialization.
+
+A disposition selects policy; it is not evidence of active transactions,
+completed draining or revocation, current ownership or authorization. The root
+package adds no callable disable operation. `ProviderDisableResult` reserves
+the native completion and reported active-transaction count; its fields do not
+manufacture a count or establish cleanup. A committed terminal result has
+exactly one of `Deleted` or `Disabled` true; an unknown or reconciliation result
+has neither, and must not be presented as a completed transition.
+
 ### Verified domain route contract
 
 Public discovery is a separate opt-in `Service.Discover` workflow. It accepts

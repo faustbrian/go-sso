@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add separate storage-neutral provider-disable request/result values and an
+  immutable, provider/version-bound drain-or-revoke selector. Shape validation
+  rejects inconsistent bindings, exhausted versions and malformed bounded
+  reasons; implicit request/disposition disclosure fails closed. These values
+  add no callable disable operation or transaction-cleanup evidence.
+
 - Add a typed opt-in SSO discovery service that accepts exact DNS or plain
   email input and projects only the safe provider choice. The trusted owner
   receives only the DNS domain and must establish abuse and route authority.
