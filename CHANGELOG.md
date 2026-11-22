@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add bounded native domain-route input, deterministic provider selection, and
+  redacted snapshots tied to the original organization proof and expiry.
+
 - Add a separate storage-neutral `ProviderEnableRequest` and result, exact
   organization-owned domain-proof checkpoint and immutable enablement-only
   credential checkpoint. Shape validation binds owners, versions and original

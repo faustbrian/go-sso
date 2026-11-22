@@ -95,6 +95,20 @@ generation changes, and obtain fresh `org:sso-write` authorization before a
 write. Domain checkpoints never replace `organization.DomainProofReader`.
 Enabling provider state alone establishes no route, enforcement or login flow.
 
+### Verified domain route contract
+
+`NewDomainRouteRequest` takes an exact tenant, a DNS name, and optionally a
+provider ID. It uses the organization owner's ASCII domain grammar and never
+infers a tenant or organization from an email. `SelectDomainRoute` chooses an
+eligible explicit provider, configured default, or the unique remaining
+candidate; it denies missing choices and reports ambiguity rather than picking
+by insertion or row order.
+
+`DomainRoute.Bindings()` gives trusted native code the provider, credential
+generation, policy version, organization proof and original deadline. The
+snapshot is not a login grant and is never implicitly serialized. Any later
+login transaction must recheck its current provider and organization authority.
+
 ## Composition
 
 The root package defines immutable `DomainProofRequest`,

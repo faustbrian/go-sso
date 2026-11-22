@@ -120,8 +120,15 @@ func (r ProviderEnableRequest) Validate() error {
 	}
 
 	checkpoint := r.DomainProofCheckpoint
+	if checkpoint.Key.TenantID != credential.TenantID || checkpoint.Key.OrganizationID != credential.OrganizationID {
+		return ErrInvalidInput
+	}
+	return checkpoint.validate()
+}
+
+func (checkpoint DomainProofCheckpoint) validate() error {
 	proof := checkpoint.Key
-	if proof.TenantID != credential.TenantID || proof.OrganizationID != credential.OrganizationID || !providerClaimName(string(proof.ClaimID)) {
+	if !providerClaimName(string(proof.TenantID)) || !providerClaimName(string(proof.OrganizationID)) || !providerClaimName(string(proof.ClaimID)) {
 		return ErrInvalidInput
 	}
 	if proof.ClaimVersion == 0 || checkpoint.ProofVersion == 0 || checkpoint.ProofVersion != proof.ProofVersion || proof.Revoked {
