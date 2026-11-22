@@ -98,15 +98,16 @@ func (ProviderLoginCallbackResult) MarshalText() ([]byte, error) {
 // owner and its primary. It owns no HTTP route, worker, provider registry or pool
 // lifecycle. Independent requests have independent command and bearer custody.
 type ProviderLoginCompletionService struct {
-	start            *ProviderLoginService
-	profiles         map[providerLoginProfileKey]providerLoginCallbackTransport
-	protocolProfiles map[providerLoginProfileKey]oauth.ProviderProfile
-	roleMappings     map[providerLoginProfileKey]providerLoginRoleMapping
-	jitPolicies      map[providerLoginProfileKey]providerLoginJITPolicy
-	policy           sessionpg.IdentifierAdmissionConfig
-	effect           *sessionpg.SSOOIDCSigninEffect
-	issuer           session.IssuerConfig
-	csrfKey          session.CSRFKey
+	start               *ProviderLoginService
+	profiles            map[providerLoginProfileKey]providerLoginCallbackTransport
+	protocolProfiles    map[providerLoginProfileKey]oauth.ProviderProfile
+	roleMappings        map[providerLoginProfileKey]providerLoginRoleMapping
+	jitPolicies         map[providerLoginProfileKey]providerLoginJITPolicy
+	policy              sessionpg.IdentifierAdmissionConfig
+	effect              *sessionpg.SSOOIDCSigninEffect
+	issuer              session.IssuerConfig
+	csrfKey             session.CSRFKey
+	oidcCallbackFactory OIDCCallbackAdapterFactory
 }
 
 // NewProviderLoginCompletionService validates trusted composition without
@@ -191,7 +192,11 @@ func NewProviderLoginCompletionServiceWithRoleSync(start *ProviderLoginService, 
 // one-use reservation, generation, final Work and acknowledgment to the owning
 // coordinator. It never retries an ambiguous exchange or returns its provider
 // tokens. It only signs in an already linked, active organization member.
-func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, request ProviderLoginCallbackRequest) (out ProviderLoginCallbackResult, err error) {
+func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, request ProviderLoginCallbackRequest) (ProviderLoginCallbackResult, error) {
+	return s.signinCallback(ctx, request, nil)
+}
+
+func (s *ProviderLoginCompletionService) signinCallback(ctx context.Context, request ProviderLoginCallbackRequest, parsed *oauth.QueryCallback) (out ProviderLoginCallbackResult, err error) {
 	if s == nil || s.start == nil || s.effect == nil || ctx == nil || request.ReceivedRedirectURI == "" {
 		return out, sso.ErrInvalidInput
 	}
@@ -224,6 +229,10 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 	transport, available := s.profiles[key]
 	if !available || transport.metadata.Issuer != found.Binding.Metadata.Input.Issuer {
 		return out, sso.ErrForbidden
+	}
+	selection, err := s.selectOIDCCallback(key, parsed, request.ReceivedRedirectURI)
+	if err != nil {
+		return out, err
 	}
 	var assignedRoles *providerLoginRoleMapping
 	if mapping, selected := s.roleMappings[key]; selected {
@@ -261,7 +270,7 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 	}
 	phase := &providerLoginCallbackPhase{
 		providerLoginCallbackInvocation: providerLoginCallbackInvocation{service: s.start, found: found, original: original, authority: authority, flow: flow, browser: request.Browser, command: command},
-		grant:                           grant, transport: transport, input: request.Input, effect: s.effect, policy: s.policy, roleMapping: assignedRoles, jitPolicy: assignedJIT,
+		grant:                           grant, transport: transport, oidc: selection, input: request.Input, effect: s.effect, policy: s.policy, roleMapping: assignedRoles, jitPolicy: assignedJIT,
 	}
 	defer func() {
 		if phase.refusal != nil {

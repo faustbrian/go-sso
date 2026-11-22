@@ -104,6 +104,9 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 	if err != nil {
 		return nil, err
 	}
+	if p.oidc != nil {
+		return p.generateOIDCAdapterAccepted(ctx, generation, admission, aad, p.prepareSigninAccepted)
+	}
 	var result providerLoginCallbackExchange
 	if p.oauth2 != nil {
 		if p.oauthInputRefused || p.oauthCallback.Denied() {
@@ -123,6 +126,10 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 		}
 		return nil, err
 	}
+	return p.prepareSigninAccepted(ctx, generation, admission, aad, result)
+}
+
+func (p *providerLoginCallbackPhase) prepareSigninAccepted(ctx context.Context, generation uint64, admission risk.AuthenticationAdmission, aad envelope.Context, result providerLoginCallbackExchange) ([]byte, error) {
 	recipient, jitWire, err := p.callbackRecipient(ctx, result)
 	if err != nil {
 		if terminalProviderRecipientRefusal(ctx, err, p.oauth2 != nil) {

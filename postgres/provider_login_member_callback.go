@@ -17,6 +17,7 @@ import (
 	"github.com/faustbrian/go-identity/session"
 	sessionpg "github.com/faustbrian/go-identity/session/postgres"
 	organization "github.com/faustbrian/go-organization"
+	envelope "github.com/faustbrian/go-secret-envelope/v2"
 	"github.com/faustbrian/go-sso"
 )
 
@@ -74,7 +75,11 @@ func (ProviderLinkCallbackResult) MarshalText() ([]byte, error) {
 // LinkCallback finishes the exact transaction created by LinkStart using the
 // original browser cookie. The one-use reservation, account link, encrypted
 // token custody, audit, and lifecycle event share the native coordinator.
-func (s *ProviderLoginCompletionService) LinkCallback(ctx context.Context, request ProviderLinkCallbackRequest) (out ProviderLinkCallbackResult, err error) {
+func (s *ProviderLoginCompletionService) LinkCallback(ctx context.Context, request ProviderLinkCallbackRequest) (ProviderLinkCallbackResult, error) {
+	return s.linkCallback(ctx, request, nil)
+}
+
+func (s *ProviderLoginCompletionService) linkCallback(ctx context.Context, request ProviderLinkCallbackRequest, parsed *oauth.QueryCallback) (out ProviderLinkCallbackResult, err error) {
 	if s == nil || s.start == nil || s.start.link == nil || ctx == nil || request.ReceivedRedirectURI == "" {
 		return out, sso.ErrInvalidInput
 	}
@@ -103,6 +108,10 @@ func (s *ProviderLoginCompletionService) LinkCallback(ctx context.Context, reque
 	if found.CompletedAt != nil || !supported || transport.metadata.Issuer != found.Binding.Metadata.Input.Issuer {
 		return out, sso.ErrForbidden
 	}
+	selection, err := s.selectOIDCCallback(key, parsed, request.ReceivedRedirectURI)
+	if err != nil {
+		return out, err
+	}
 	invocation, err := s.start.memberCallbackInvocation(ctx, found, request)
 	if err != nil {
 		return out, err
@@ -112,7 +121,7 @@ func (s *ProviderLoginCompletionService) LinkCallback(ctx context.Context, reque
 		return out, err
 	}
 	p := &providerLoginCallbackPhase{providerLoginCallbackInvocation: invocation, grant: grant,
-		transport: transport, input: request.Input, policy: s.policy}
+		transport: transport, oidc: selection, input: request.Input, policy: s.policy}
 	defer func() {
 		if p.refusal != nil {
 			clear(p.refusal.Terminal)
@@ -289,6 +298,9 @@ func (p *providerLoginCallbackPhase) generateMemberAccepted(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	if p.oidc != nil {
+		return p.generateOIDCAdapterAccepted(ctx, generation, admission, aad, p.prepareMemberAccepted)
+	}
 	result, err := p.exchangeAcknowledged(ctx, p.input, p.transport, admission)
 	defer result.Tokens.Destroy()
 	if err != nil {
@@ -298,6 +310,10 @@ func (p *providerLoginCallbackPhase) generateMemberAccepted(ctx context.Context,
 		}
 		return nil, err
 	}
+	return p.prepareMemberAccepted(ctx, generation, admission, aad, result)
+}
+
+func (p *providerLoginCallbackPhase) prepareMemberAccepted(ctx context.Context, generation uint64, admission risk.AuthenticationAdmission, aad envelope.Context, result providerLoginCallbackExchange) ([]byte, error) {
 	now := p.service.router.config.Clock.Now().UTC()
 	until := earlierLoginTime(p.authority.deadline, result.Identity.EvidenceExpiresAt()).Truncate(time.Microsecond)
 	if err := p.checkOriginal(now); err != nil {

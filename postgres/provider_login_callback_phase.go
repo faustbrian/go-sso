@@ -25,6 +25,7 @@ type providerLoginCallbackPhase struct {
 	registry          *kernel.ContributorRegistry
 	grant             kernel.CapabilityPlan
 	transport         providerLoginCallbackTransport
+	oidc              *oidcCallbackSelection
 	oauth2            *StaticOAuth2CompletionProfile
 	oauthCallback     oauth.QueryCallback
 	oauthInputRefused bool

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Allow selected OIDC sign-in and explicit-link completion to use the original
+  parsed callback with a protocol adapter inside the native acknowledged
+  reservation. Keep token-vault and account/session effects native.
+
 - Allow configured static OIDC login profiles to use an optional protocol
   adapter for committed start redirects without changing native state,
   callback ownership, or existing unselected profiles.
