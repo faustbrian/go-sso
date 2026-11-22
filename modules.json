@@ -47,6 +47,7 @@
       ],
       "reverse_owned_dependencies": [
         "github.com/faustbrian/go-sso/domain-verification",
+        "github.com/faustbrian/go-sso/oauth2",
         "github.com/faustbrian/go-sso/postgres"
       ],
       "external_runtime_dependencies": [
@@ -105,6 +106,7 @@
         "optional_owned_dependencies": [],
         "adapters": [
           "github.com/faustbrian/go-sso/domain-verification",
+          "github.com/faustbrian/go-sso/oauth2",
           "github.com/faustbrian/go-sso/postgres"
         ],
         "companions": [],
@@ -284,6 +286,109 @@
         "coverage": false,
         "documentation": true,
         "fuzz": true,
+        "interoperability": false,
+        "lint": true,
+        "mutation": false,
+        "race": true,
+        "security": true,
+        "tests": true
+      }
+    },
+    {
+      "directory": "oauth2",
+      "module_path": "github.com/faustbrian/go-sso/oauth2",
+      "go_version": "1.27.0",
+      "packages": [
+        {
+          "module_directory": "oauth2",
+          "directory": "oauth2",
+          "name": "oauth2",
+          "import_path": "github.com/faustbrian/go-sso/oauth2",
+          "kind": "public",
+          "production": true,
+          "executable": true,
+          "coverage_required": true,
+          "build_required": true,
+          "build_tags": []
+        }
+      ],
+      "purpose": "Experimental shared-redirect enterprise OAuth 2.0 login for a coordinator-selected provider and original transaction.",
+      "lifecycle": "experimental",
+      "kind": "optional adapter",
+      "releasable": true,
+      "family": "service-edge",
+      "family_label": "Service Edge",
+      "family_description": "Request-edge policy, identity, access decisions, routing, middleware, and process lifecycle.",
+      "family_order": 2,
+      "version": "0.0.0",
+      "tag_prefix": "oauth2/v",
+      "owned_dependencies": [
+        "github.com/faustbrian/go-identity/oauth",
+        "github.com/faustbrian/go-identity/session",
+        "github.com/faustbrian/go-sso"
+      ],
+      "reverse_owned_dependencies": [],
+      "external_runtime_dependencies": [],
+      "required_services": [],
+      "build_tags": [],
+      "test_tags": [],
+      "interoperability_tools": [],
+      "specifications": [],
+      "conformance_corpora": [],
+      "provenance": [],
+      "goal_files": ["oauth2/README.md"],
+      "goal_status": "in-progress",
+      "goal_evidence": [],
+      "cohesion": {
+        "family": "service-edge",
+        "secondary_capabilities": ["identity-and-access", "protocols-and-schemas"],
+        "responsibility": "Execute the selected OAuth code flow and project bounded provider evidence into the SSO coordinator's original transaction.",
+        "non_goals": ["Own durable replay, routing, token-vault policy, membership or session issuance.", "Claim generic vendor interoperability or implement provider refresh and revocation in the selected sign-in profile."],
+        "public_package_identifier": "oauth2",
+        "primary_entry_packages": ["github.com/faustbrian/go-sso/oauth2"],
+        "package_selection": {
+          "github.com/faustbrian/go-sso/oauth2": "Optional enterprise OAuth 2.0 sign-in using exact shared redirects and a separate authenticated identity endpoint."
+        },
+        "lifecycle_status": "active",
+        "maturity": "experimental",
+        "construction_styles": ["new-config"],
+        "lifecycle_styles": ["start"],
+        "ownership": {
+          "configuration": "caller",
+          "mutable_inputs": ["borrow", "copy", "transfer"],
+          "runtime_resources": "shared",
+          "background_work": "none"
+        },
+        "optional_owned_dependencies": [],
+        "adapters": [],
+        "companions": [],
+        "supported_go": {"minimum": "1.27.0", "tested": ["1.27.4"]},
+        "supported_platforms": ["portable-go"],
+        "supported_backends": [],
+        "supported_protocols": ["oauth2"],
+        "documentation": {
+          "readme": "README.md",
+          "api": "README.md",
+          "adoption": "README.md",
+          "security": "README.md",
+          "compatibility": null,
+          "performance": null,
+          "examples": "README.md",
+          "faq": null,
+          "changelog": "CHANGELOG.md",
+          "pkg_go_dev": "https://pkg.go.dev/github.com/faustbrian/go-sso/oauth2",
+          "ecosystem_index": "https://github.com/faustbrian/go-library-tools/blob/v1.8.4/docs/ecosystem/README.md"
+        },
+        "known_good_compatibility_sets": [],
+        "delivery": {"implementation": "in-progress", "hardening": "in-progress", "release": "blocked"}
+      },
+      "gates": {
+        "api_compatibility": false,
+        "benchmarks": false,
+        "conformance": false,
+        "coverage": false,
+        "documentation": true,
+        "fuzz": false,
         "interoperability": false,
         "lint": true,
         "mutation": false,

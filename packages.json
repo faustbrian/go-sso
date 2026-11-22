@@ -27,6 +27,18 @@
       "build_tags": []
     },
     {
+      "module_directory": "oauth2",
+      "directory": "oauth2",
+      "name": "oauth2",
+      "import_path": "github.com/faustbrian/go-sso/oauth2",
+      "kind": "public",
+      "production": true,
+      "executable": true,
+      "coverage_required": true,
+      "build_required": true,
+      "build_tags": []
+    },
+    {
       "module_directory": "postgres",
       "directory": "postgres",
       "name": "postgres",
