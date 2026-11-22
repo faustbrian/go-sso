@@ -69,9 +69,12 @@ in the durable counter coordinator, and the existing required audit owner.
 Install the selected counter storage migration before serving requests.
 Construct `NewProviderDiscovery` with the native router, evaluator, and a
 startup allowlist of exact tenant/organization/domain/provider choices.
-From trusted transport, call `ForBrowser` with the resolved peer IP and verified
-browser-device ID, then call `Service.Discover` with the untrusted email or
-domain. Never use a query field or unchecked cookie as browser-device proof.
+From trusted transport, call `ForTenantBrowser` with the resolved tenant, peer
+IP and verified browser-device ID, then call `Service.Discover` with the
+untrusted email or domain. An empty or foreign tenant returns `sso.ErrForbidden`
+without creating a service or starting I/O; it never falls back to the configured
+tenant. Direct single-tenant callers may continue to use `ForBrowser`. Never use
+a query field or unchecked cookie as browser-device proof.
 
 The adapter counts and audits before lookup and rechecks the original decision
 before disclosure. A verified, enabled, ready provider is visible only if the

@@ -86,9 +86,27 @@ func NewProviderDiscovery(router *ProviderRouter, evaluation risk.Evaluator, con
 	return &ProviderDiscovery{router: router, admission: admission, tenant: config.TenantID, advertisements: entries}, nil
 }
 
-// ForBrowser binds server-resolved peer and browser identity. These inputs
-// must come from trusted transport/protected browser custody, not query
-// fields, untrusted forwarding headers or caller-selected device IDs.
+// ForTenantBrowser binds a trusted transport-resolved tenant, peer and browser
+// identity. An empty or different tenant returns sso.ErrForbidden before a
+// service is created or any I/O starts; there is no tenant fallback. A nil or
+// unconfigured owner and invalid browser inputs return sso.ErrInvalidInput.
+// All inputs must come from trusted transport/protected browser custody, not
+// query fields, untrusted forwarding headers or caller-selected device IDs.
+func (p *ProviderDiscovery) ForTenantBrowser(tenant identity.TenantID, peer netip.Addr, trustedDevice string) (*sso.Service, error) {
+	if p == nil || p.router == nil {
+		return nil, sso.ErrInvalidInput
+	}
+	if tenant == "" || tenant != p.tenant {
+		return nil, sso.ErrForbidden
+	}
+	return p.ForBrowser(peer, trustedDevice)
+}
+
+// ForBrowser binds server-resolved peer and browser identity for direct callers
+// already bound to the configured tenant. Transports resolving a tenant per
+// request must use ForTenantBrowser. Browser inputs must come from trusted
+// transport/protected browser custody, not query fields, untrusted forwarding
+// headers or caller-selected device IDs.
 func (p *ProviderDiscovery) ForBrowser(peer netip.Addr, trustedDevice string) (*sso.Service, error) {
 	if p == nil || p.router == nil || !peer.IsValid() || peer.Zone() != "" || !providerID(trustedDevice) {
 		return nil, sso.ErrInvalidInput

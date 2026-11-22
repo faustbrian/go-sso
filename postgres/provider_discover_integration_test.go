@@ -21,6 +21,57 @@ import (
 
 const discoveryFixtureTenant = identity.TenantID("01ARZ3NDEKTSV4RRFFQ69G5FAW")
 
+func TestNativeProviderDiscoveryBindsResolvedTenant(t *testing.T) {
+	const schema = "organization_discovery_risk"
+	x := newProviderEnableFixtureForTenant(t, discoveryFixtureTenant, riskpg.DurableCounterMigrationSource{Schema: schema, Version: 318})
+	provider := enableRouteFixture(t, x, false)
+	discovery, err := ssopg.NewProviderDiscovery(newProviderRouter(t, x, 4), providerDiscoveryEvaluator(t, x, schema), ssopg.ProviderDiscoveryConfig{
+		TenantID:       x.proof.TenantID,
+		Advertisements: []ssopg.ProviderDiscoveryAdvertisement{{OrganizationID: x.proof.OrganizationID, Domain: x.proof.Domain, ProviderID: provider}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := netip.MustParseAddr("192.0.2.83")
+	for _, tenant := range []identity.TenantID{"", "01ARZ3NDEKTSV4RRFFQ69G5FAX"} {
+		for _, address := range []netip.Addr{peer, {}} {
+			service, err := discovery.ForTenantBrowser(tenant, address, "verified-test-browser")
+			if !errors.Is(err, sso.ErrForbidden) || service != nil {
+				t.Fatal("unmatched tenant received discovery authority", err)
+			}
+		}
+	}
+	if service, err := discovery.ForTenantBrowser(x.proof.TenantID, netip.Addr{}, "verified-test-browser"); !errors.Is(err, sso.ErrInvalidInput) || service != nil {
+		t.Fatal("matching tenant bypassed browser validation", err)
+	}
+	service, err := discovery.ForTenantBrowser(x.proof.TenantID, peer, "verified-test-browser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := discovery.ForBrowser(peer, "verified-test-browser")
+	if err != nil {
+		t.Fatal("single-tenant browser binding failed", err)
+	}
+	want := sso.DiscoverResult{Matched: true, ProviderID: string(provider), Protocol: "oidc"}
+	for _, browser := range []*sso.Service{service, legacy} {
+		got, err := browser.Discover(x.f.ctx, sso.DiscoverRequest{EmailOrDomain: x.proof.Domain})
+		if err != nil || got != want {
+			t.Fatal("matching tenant did not discover its advertised provider", err)
+		}
+	}
+}
+
+func TestNativeProviderDiscoveryRejectsUnconfiguredTenantBinding(t *testing.T) {
+	for _, discovery := range []*ssopg.ProviderDiscovery{nil, {}} {
+		for _, tenant := range []identity.TenantID{"", discoveryFixtureTenant} {
+			service, err := discovery.ForTenantBrowser(tenant, netip.MustParseAddr("192.0.2.83"), "verified-test-browser")
+			if !errors.Is(err, sso.ErrInvalidInput) || service != nil {
+				t.Fatal("unconfigured discovery did not preserve invalid input", err)
+			}
+		}
+	}
+}
+
 func TestNativeProviderDiscoveryDisclosesOnlyAnAdvertisedCurrentRoute(t *testing.T) {
 	const tenant = discoveryFixtureTenant
 	const schema = "organization_discovery_risk"

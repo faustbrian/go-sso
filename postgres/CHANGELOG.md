@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add native `ProviderDiscovery.ForTenantBrowser` to reject an empty or foreign
+  trusted transport tenant before creating discovery authority. Existing direct
+  single-tenant `ForBrowser` callers remain compatible.
+
 - Compose opt-in anonymous static OIDC discovery from native verified-domain
   routing, counted risk and canonical audit. Publish only explicitly advertised
   provider choices; this does not authorize enterprise sign-in.
