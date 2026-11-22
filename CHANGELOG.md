@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Retain the exact OIDC or OAuth 2.0 protocol in bounded domain-route
+  evidence. Existing OIDC constructors and bindings remain compatible;
+  one selection cannot mix evidence from different protocols.
+
 - Bind static OAuth 2.0 client-secret ingress and enablement checkpoints to
   the exact `oauth2` protocol. Existing OIDC envelope bindings and the OIDC
   checkpoint constructor are unchanged. Native adapters still own admission.

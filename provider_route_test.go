@@ -116,6 +116,30 @@ func TestDomainRouteSnapshotNeverRenewsOrDisclosesRawProof(t *testing.T) {
 	}
 }
 
+func TestDomainRouteRetainsProtocolAndRejectsMixedChoices(t *testing.T) {
+	binding := routeBinding("oauth-provider")
+	oauth, err := sso.NewOAuth2DomainRoute(binding)
+	if err != nil || oauth.Protocol() != "oauth2" {
+		t.Fatal("OAuth route lost its explicit protocol", err)
+	}
+	got, err := oauth.Bindings()
+	if err != nil || got != binding {
+		t.Fatal("OAuth route changed the exact original evidence", err)
+	}
+	oidc := makeRoute(t, "oidc-provider")
+	request, _ := sso.NewDomainRouteRequest("tenant-a", "example.test", binding.ProviderID)
+	if selected, err := sso.SelectDomainRoute(request, "", []sso.DomainRoute{oauth}, routeTime); err != nil || selected != oauth || oidc.Protocol() != "oidc" {
+		t.Fatal("selection reclassified a protocol", err)
+	}
+	if selected, err := sso.SelectDomainRoute(request, "", []sso.DomainRoute{oauth, oidc}, routeTime); !errors.Is(err, sso.ErrForbidden) || selected.Protocol() != "" {
+		t.Fatal("mixed evidence entered a single protocol selection", err)
+	}
+	oauth.Value = "oidc-provider"
+	if oauth.Protocol() != "" {
+		t.Fatal("modified route exposed apparently valid protocol evidence")
+	}
+}
+
 func FuzzDomainRouteRequest(f *testing.F) {
 	for _, domain := range []string{"EXAMPLE.Test.", "*.example.test", "user@example.test", "127.0.0.1", "a.test"} {
 		f.Add(domain)
