@@ -4,5 +4,6 @@ use (
 	.
 	./domain-verification
 	./oauth2
+	./oidc
 	./postgres
 )
