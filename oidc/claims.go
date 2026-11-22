@@ -26,6 +26,41 @@ func selectedClaims(mapping sso.AttributeMappingSpec) ([]string, error) {
 	return names, nil
 }
 
+func mergeClaimNames(mapped, additional []string) ([]string, error) {
+	// oauth.OIDCClaimProjectionConfig caps the full wire selection at the
+	// validator's 128-member bound, including observations used only by policy.
+	const maximumClaims = 128
+	if len(mapped) > maximumClaims || len(additional) > maximumClaims {
+		return nil, sso.ErrInvalidInput
+	}
+
+	names := make([]string, 0, min(len(mapped)+len(additional), maximumClaims))
+	mappedNames := make(map[string]bool, len(mapped))
+	for _, name := range mapped {
+		if !validClaimName(name) || mappedNames[name] {
+			return nil, sso.ErrInvalidInput
+		}
+		mappedNames[name] = true
+		names = append(names, name)
+	}
+
+	additionalNames := make(map[string]bool, len(additional))
+	for _, name := range additional {
+		if !validClaimName(name) || additionalNames[name] {
+			return nil, sso.ErrInvalidInput
+		}
+		additionalNames[name] = true
+		if mappedNames[name] {
+			continue
+		}
+		if len(names) == maximumClaims {
+			return nil, sso.ErrInvalidInput
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 func validClaimName(name string) bool {
 	switch name {
 	case "sub", "iss", "aud", "azp", "iat", "exp", "nbf", "auth_time", "nonce", "at_hash", "c_hash", "access_token", "refresh_token", "id_token":
@@ -54,9 +89,17 @@ func (s *Service) projectAssertion(exchange oauth.ExchangeResult) (sso.ProtocolA
 		return sso.ProtocolAssertion{}, sso.ErrInvalidInput
 	}
 	claims := exchange.VerifiedOIDCClaims()
-	if len(claims) != len(s.claims) {
+	if len(claims) != len(s.claims) || s.mappedClaimCount < 0 || s.mappedClaimCount > len(claims) {
 		return sso.ProtocolAssertion{}, sso.ErrInvalidInput
 	}
+	for i, claim := range claims {
+		if claim.Name() != s.claims[i] {
+			return sso.ProtocolAssertion{}, sso.ErrInvalidInput
+		}
+	}
+	// Policy-only observations remain on the original ProviderIdentity; they
+	// must not acquire attribute-mapping authority in the protocol assertion.
+	claims = claims[:s.mappedClaimCount]
 	provenance := sso.AttributeProvenance{
 		ProviderID: sso.ProviderID(tx.ProviderID), ProviderProfileVersion: tx.ProviderVersion,
 		Issuer: id.Issuer(), Source: sso.AttributeSourceOIDCIDToken,
@@ -69,9 +112,6 @@ func (s *Service) projectAssertion(exchange oauth.ExchangeResult) (sso.ProtocolA
 	}
 	attributes := make([]sso.VerifiedAttribute, len(claims))
 	for i, claim := range claims {
-		if claim.Name() != s.claims[i] {
-			return sso.ProtocolAssertion{}, sso.ErrInvalidInput
-		}
 		spec := sso.VerifiedAttributeSpec{Name: claim.Name(), Provenance: provenance}
 		switch claim.Kind() {
 		case oauth.OIDCClaimAbsent:

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -31,8 +32,11 @@ var (
 // signed exp and the reservation's validity. The signed iat is not an
 // authentication time. AuthenticatedAt is set only for validated auth_time.
 type CallbackEvidence struct {
-	Transaction                       sso.LoginTransaction
-	Assertion                         sso.ProtocolAssertion
+	Transaction sso.LoginTransaction
+	Assertion   sso.ProtocolAssertion
+	// Identity is the original validated wire identity and selected claim
+	// observations, without tokens. Application authority remains native.
+	Identity                          oauth.ProviderIdentity
 	ExpiresAt                         time.Time
 	IDTokenIssuedAt, IDTokenExpiresAt time.Time
 	AuthenticatedAt                   time.Time
@@ -66,22 +70,26 @@ type Config struct {
 	CredentialGeneration uint64
 	Profile              oauth.ProviderProfile
 	Mapping              sso.AttributeMapping
-	Authorization        oauth.AuthorizationParameters
-	CapabilityExpiresAt  time.Time
-	Clock                oauth.Clock
-	HTTPClient           *http.Client
-	KeySet               oauth.SigningKeySet
-	Callback             *CallbackCustody
+	// AdditionalClaims selects trusted, exact, scalar names for native policy.
+	// They are retained in Identity but not added to the mapped assertion.
+	AdditionalClaims    []string
+	Authorization       oauth.AuthorizationParameters
+	CapabilityExpiresAt time.Time
+	Clock               oauth.Clock
+	HTTPClient          *http.Client
+	KeySet              oauth.SigningKeySet
+	Callback            *CallbackCustody
 }
 
 // Service implements the selected command-scoped OIDC protocol. It neither
 // stores tokens nor applies directory or session policy. Value copies share
 // an in-process guard; durable one-use and retry authority stay with SSO.
 type Service struct {
-	cfg     Config
-	mapping sso.AttributeMappingSpec
-	claims  []string
-	attempt *atomic.Bool
+	cfg              Config
+	mapping          sso.AttributeMappingSpec
+	claims           []string
+	mappedClaimCount int
+	attempt          *atomic.Bool
 }
 
 var _ sso.ProtocolAdapter = (*Service)(nil)
@@ -106,6 +114,12 @@ func New(cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	claims, err := mergeClaimNames(names, cfg.AdditionalClaims)
+	if err != nil {
+		return nil, err
+	}
+	// The service consumes only its validated, detached selection.
+	cfg.AdditionalClaims = nil
 	if _, err := oauth.OIDCAuthorization(context.Background(), profile, cfg.Authorization); err != nil {
 		return nil, err
 	}
@@ -122,7 +136,7 @@ func New(cfg Config) (*Service, error) {
 		cfg.Callback = &c
 		attempt = new(atomic.Bool)
 	}
-	return &Service{cfg: cfg, mapping: mapping, claims: names, attempt: attempt}, nil
+	return &Service{cfg: cfg, mapping: mapping, claims: claims, mappedClaimCount: len(names), attempt: attempt}, nil
 }
 
 // Start renders the exact original state, nonce, S256 challenge and callback.
@@ -158,35 +172,67 @@ func (s *Service) Complete(ctx context.Context, callback sso.ProtocolCallback) (
 		return sso.ProtocolAssertion{}, sso.ErrInvalidInput
 	}
 	defer callback.Payload.Close()
-	if ctx == nil || s == nil || s.attempt == nil || callback.Transaction != s.cfg.Transaction {
-		return sso.ProtocolAssertion{}, sso.ErrInvalidInput
-	}
-	if err := ctx.Err(); err != nil {
+	work, cancel, err := s.beginCompletion(ctx, callback.Transaction)
+	if err != nil {
 		return sso.ProtocolAssertion{}, err
 	}
-	now := s.cfg.Clock.Now()
-	if !s.admittedAt(now) {
-		return sso.ProtocolAssertion{}, sso.ErrForbidden
-	}
-	if !s.attempt.CompareAndSwap(false, true) {
-		return sso.ProtocolAssertion{}, sso.ErrConflict
-	}
-	work, cancel := context.WithTimeout(ctx, s.cfg.Callback.ValidUntil.Sub(now))
 	defer cancel()
 	parsed, err := s.readCallback(work, callback)
 	if err != nil {
 		return sso.ProtocolAssertion{}, err
 	}
 	defer parsed.Destroy()
+	return s.completeParsed(work, parsed)
+}
+
+// CompleteParsed borrows an OIDC query already parsed by the transport under
+// the exact selected profile. It authenticates original state again and
+// shares Complete's attempt and deadline. The caller owns Destroy and must
+// retain the parsed custody for the synchronous call. As with Complete, the
+// caller must authenticate the route and acknowledge the original reservation.
+func (s *Service) CompleteParsed(ctx context.Context, transaction sso.LoginTransaction, parsed oauth.QueryCallback) (sso.ProtocolAssertion, error) {
+	work, cancel, err := s.beginCompletion(ctx, transaction)
+	if err != nil {
+		return sso.ProtocolAssertion{}, err
+	}
+	defer cancel()
+	if !reflect.DeepEqual(parsed.Profile(), s.cfg.Profile) {
+		return sso.ProtocolAssertion{}, sso.ErrForbidden
+	}
+	return s.completeParsed(work, parsed)
+}
+
+func (s *Service) beginCompletion(ctx context.Context, transaction sso.LoginTransaction) (context.Context, context.CancelFunc, error) {
+	if ctx == nil || s == nil || s.attempt == nil || transaction != s.cfg.Transaction {
+		return nil, nil, sso.ErrInvalidInput
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	now := s.cfg.Clock.Now()
+	if !s.admittedAt(now) {
+		return nil, nil, sso.ErrForbidden
+	}
+	if !s.attempt.CompareAndSwap(false, true) {
+		return nil, nil, sso.ErrConflict
+	}
+	work, cancel := context.WithTimeout(ctx, s.cfg.Callback.ValidUntil.Sub(now))
+	return work, cancel, nil
+}
+
+func (s *Service) completeParsed(ctx context.Context, parsed oauth.QueryCallback) (sso.ProtocolAssertion, error) {
+	if err := s.checkState(ctx, parsed); err != nil {
+		return sso.ProtocolAssertion{}, err
+	}
 	if parsed.Denied() {
 		return sso.ProtocolAssertion{}, ErrProviderDenied
 	}
-	result, err := s.exchange(work, parsed)
+	result, err := s.exchange(ctx, parsed)
 	defer result.Tokens.Destroy()
 	if err != nil {
 		return sso.ProtocolAssertion{}, err
 	}
-	return s.handoff(work, result)
+	return s.handoff(ctx, result)
 }
 
 func (s *Service) admittedAt(now time.Time) bool {
@@ -208,10 +254,10 @@ func (s *Service) readCallback(ctx context.Context, callback sso.ProtocolCallbac
 	if err != nil || uint64(len(raw)) == max {
 		return oauth.QueryCallback{}, sso.ErrInvalidInput
 	}
-	parsed, err := oauth.ParseQueryCallback(ctx, string(raw), s.cfg.Profile)
-	if err != nil {
-		return oauth.QueryCallback{}, err
-	}
+	return oauth.ParseQueryCallback(ctx, string(raw), s.cfg.Profile)
+}
+
+func (s *Service) checkState(ctx context.Context, parsed oauth.QueryCallback) error {
 	check := func(_ context.Context, state []byte) error {
 		if subtle.ConstantTimeCompare(state, []byte(s.cfg.Authorization.State)) != 1 {
 			return sso.ErrForbidden
@@ -219,17 +265,13 @@ func (s *Service) readCallback(ctx context.Context, callback sso.ProtocolCallbac
 		return nil
 	}
 	if parsed.Denied() {
-		err = parsed.UseDeniedState(ctx, check)
-	} else if input, ok := parsed.Input(); ok {
-		err = input.Use(ctx, func(ctx context.Context, _ []byte, state []byte) error { return check(ctx, state) })
-	} else {
-		err = sso.ErrInvalidInput
+		return parsed.UseDeniedState(ctx, check)
 	}
-	if err != nil {
-		parsed.Destroy()
-		return oauth.QueryCallback{}, err
+	input, ok := parsed.Input()
+	if !ok {
+		return sso.ErrInvalidInput
 	}
-	return parsed, nil
+	return input.Use(ctx, func(ctx context.Context, _ []byte, state []byte) error { return check(ctx, state) })
 }
 
 func (s *Service) exchange(ctx context.Context, parsed oauth.QueryCallback) (result oauth.ExchangeResult, err error) {
@@ -330,7 +372,7 @@ func (s *Service) handoff(ctx context.Context, result oauth.ExchangeResult) (sso
 	}
 	authenticatedAt, hasAuthenticationTime := id.AuthenticationTime()
 	evidence := CallbackEvidence{
-		Transaction: s.cfg.Transaction, Assertion: assertion, ExpiresAt: expires,
+		Transaction: s.cfg.Transaction, Assertion: assertion, Identity: id, ExpiresAt: expires,
 		IDTokenIssuedAt: id.IDTokenIssuedAt(), IDTokenExpiresAt: id.IDTokenExpiresAt(),
 		AuthenticatedAt: authenticatedAt, HasAuthenticationTime: hasAuthenticationTime,
 	}
