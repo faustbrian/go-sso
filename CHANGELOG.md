@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add storage-neutral enterprise OAuth registration intent and identity proof
+  policy. Add bounded OIDC/OAuth assertion observations and opaque enterprise
+  token correlation without exposing provider tokens. These values do not
+  enable OAuth registration, callback exchange or vault access by themselves.
+
 - Add storage-neutral `SigninStartRequest`, `SigninStartResult` and opaque
   immutable `LoginIntent` values. Shape validation preserves exact HTTPS
   callbacks, the original command/key and a resolved session remember policy;

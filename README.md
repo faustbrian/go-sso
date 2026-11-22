@@ -165,6 +165,24 @@ logging and reject implicit JSON/text serialization. These values add no
 callable sign-in workflow, protocol exchange, transaction persistence or login
 authority; a native sign-in-start command is not shipped by this boundary.
 
+## Enterprise OAuth configuration and evidence
+
+`ProviderRegisterOauthRequest.Validate` checks the storage-neutral
+registration intent for a provider that supplies no ID token. Configure a
+separate HTTPS identity endpoint and an `IdentityProofPolicy` with the exact
+issuer, a positive policy version, the stable-subject representation, and an
+explicit email-verification rule. The selected static profile rejects endpoint
+queries, fragments and embedded credentials. A verified-email mapping requires
+a separate boolean claim; an unverified mapping cannot borrow that authority.
+
+`ProtocolAssertion` keeps exact provider and mapping versions, and selected
+attributes distinguish absent, null and scalar values. OAuth identity-endpoint
+provenance is separate from OIDC ID-token provenance. An optional opaque
+`TokenVersion` correlates a provider subject with an original callback; it
+contains no provider tokens and grants no vault access. These values neither
+register nor authenticate an OAuth provider. Native callback, vault and session
+composition must independently establish the actual authority.
+
 ## Composition
 
 The root package defines immutable `DomainProofRequest`,
