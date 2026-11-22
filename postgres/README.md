@@ -5,7 +5,8 @@ provider metadata registration.
 `Store` persists only immutable challenge binding, envelope-encrypted capability
 and original safe organization recovery scope. It has no proof/result table,
 transaction coordinator or alternative ownership truth. The separate provider
-service persists disabled metadata only; provider enable, protocol login, JIT
+service persists disabled metadata; a separate opt-in credential service stores
+only configured-envelope client-secret custody. Provider enable, protocol login, JIT
 and every optional wire-protocol module remain unselected.
 
 ### Disabled provider metadata updates
@@ -78,6 +79,69 @@ stored-configuration decoding. Update preparation allows 96KiB JSON to hold the
 base64-encoded encrypted configuration (itself capped at 64KiB) and scalar frame;
 the matching encrypted outer-wire limit is 96KiB plus 4096 bytes of envelope
 overhead. Original registration's 64KiB preparation profile stays unchanged.
+
+### Disabled OIDC client-secret initialization and replacement
+
+Install `ProviderCredentialsMigrationSource` at a later unique version after
+the provider/update migrations and **before opting into credential service code**.
+It creates only current-ciphertext and atomic-effect tables. Existing providers
+are not rewritten, backfilled or enrolled; new primary/check constraints apply
+before traffic. A five-second lock timeout bounds foreign-key acquisition on the
+existing provider table. Code rollback retains encrypted custody and evidence;
+there is no destructive down migration. Original registration readers/writers
+continue to use unchanged legacy v1 columns on the expanded schema.
+
+Bind `ProviderService.ForOrganization`, then construct the separate
+`NewProviderCredentialsService(base, ProviderCredentialsConfig{...})`. Supply a
+credentials-only `ProviderCredentialsAuthorization`, the deployment-configured
+`IngressKeyID` and explicit `MaximumReferenceLifetime`. The configured native
+envelope service and clock come from the existing base service, never the
+request or reference factory. The actual canonical risk owner must select
+`identity.sso.provider.credentials-rotate` as privileged; unsupported pins deny.
+Generic metadata authorization cannot substitute for fresh `org:sso-credentials`.
+
+Trusted ingress encrypts one client secret under the exact root-owned
+`CredentialReferenceContext.EncryptionContext()`. The public reference factory
+authenticates bounded ciphertext but conveys no native trust. The credential
+service reauthenticates with its own configured service/key and requires exact
+tenant, organization, provider, OIDC protocol, client-secret purpose, operation
+audience, current provider version, next credential generation and original
+lifetime. Expired/future ingress, a different factory key or a renewed original
+request cannot authorize a write. No raw secret is accepted or returned by this
+service; temporary decrypt output is cleared by the root reference factory.
+
+The separate policy owner observes the exact primary-time action/resource,
+policy revision, current actor authorization epoch and earliest absolute decision
+deadline. Original native session freshness, policy/organization authority and
+ingress expiry cap the admitted deadline. Work rechecks these same facts after
+waits and immediately before commit, without policy callbacks under locks or
+renewing authentication. A failed postcommit disclosure check preserves the
+known native completion but returns no active credential result.
+
+`ProviderCredentialsRotate` accepts only the explicit no-overlap policy. Both
+initialization and replacement lock the exact provider, advance its shared
+optimistic version, re-envelope identical non-secret metadata under that version,
+and replace only the current encrypted client-secret generation. Mapping, issuer,
+pending domains, legacy v1 projection, disabled state and routing are unchanged.
+Competing metadata updates at the same provider version cannot both commit.
+The same native transaction commits credential custody, effect evidence, required
+audit and `sso.provider_credentials_rotated.v1` outbox; any failure rolls them back.
+
+There is no external idempotency key. The existing native key/preparation owner
+correlates the original command within authenticated tenant/actor/operation scope
+and binds its complete immutable intent. Changed input conflicts. Original
+retries recover only the exact native historical receipt, including after later
+generations; they never decrypt/reveal a current secret or repeat effects.
+`Active` describes the originally configured credential successor, not current
+provider enablement or present-day credential authority. Unknown exposes no
+active result and requires original reconciliation; missing preparation cannot
+become a fresh mutation. Native preparation retains only re-enveloped non-secret
+metadata, not predecessor client-secret ciphertext. No active-use overlap,
+drain, SAML keys/certificates, provider calls, login, HTTP or app is selected.
+
+The executable boundary is in
+[provider_credentials_integration_test.go](provider_credentials_integration_test.go)
+and its credentials-policy and query-scale companions.
 
 ## Setup and ownership
 

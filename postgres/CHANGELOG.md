@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add separately composed disabled-OIDC client-secret initialization/replacement
+  with exact configured-envelope ingress, fresh credentials-only authorization,
+  shared provider-version fencing and explicit no overlap. Original commands
+  retain native key/preparation/recovery ownership; audit/outbox and credential
+  replacement commit atomically without enabling the provider or changing policy.
+- Add forward-only `ProviderCredentialsMigrationSource` with bounded new-table
+  custody and effect evidence; install before the credentials-only opt-in.
+  Legacy provider projection and existing registration/update readers coexist.
+
 - Require update-only owner evidence binding the exact policy context, native
   actor authorization epoch and earliest absolute decision expiry; retain the
   original capped deadline through preparation and final commit.
