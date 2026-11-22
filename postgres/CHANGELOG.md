@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Attribute native OAuth2 browser callbacks to their authenticated original
+  provider, flow, callback command and immutable lifetime for transport quotas.
+  Attribution leaves custody untouched, including definitive issuer refusals;
+  native callback completion still performs every protected check.
+
 - Complete native enterprise OAuth2 sign-in for already linked members.
   Reserve the original OAuth state before exchange, confirm identity through
   the installed TLS endpoint, and commit the session, encrypted token vault,
