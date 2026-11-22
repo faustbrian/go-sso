@@ -8,8 +8,10 @@ an SSO-issued capability-bound challenge, the selected adapter observes its
 exact public commitment, and the organization owner alone
 commits and reads authoritative proof. A separate native profile registers
 **disabled, metadata-only static OIDC providers** and reads safe organization
-metadata. Neither profile is a release-qualified SSO platform. Provider enable,
-credentials, routing, login, JIT, protocol adapters and HTTP
+metadata. A separate opt-in native credential profile initializes or replaces
+an encrypted client secret while preserving disabled state. These profiles are
+not a release-qualified SSO platform. Provider enable, active-use credential
+overlap, routing, login, JIT, protocol adapters and HTTP
 routes are not implemented or advertised.
 
 ## Disabled static OIDC provider values
@@ -39,6 +41,34 @@ versions advance by exactly one. The native service binds the organization
 separately before invocation and checks current organization authority, rather
 than resolving ownership globally from the provider ID. See the PostgreSQL
 schema and protected-counter prerequisites before enabling this profile.
+
+### Credential-reference boundary
+
+The storage-neutral `ProviderCredentialsRotateRequest` is a separate contract
+with an original command, provider ID, optimistic version, an authenticated
+`EncryptedCredentialReference` and an explicit `NewNoCredentialOverlapPolicy()`.
+It has no external idempotency key and is not a generic metadata update.
+
+Trusted ingress encrypts the client secret with the configured envelope owner
+and the exact `CredentialReferenceContext.EncryptionContext()`: tenant,
+organization, provider, OIDC protocol, client-secret purpose, credential
+generation, current provider version, operation audience, configured key identity
+and the original UTC-microsecond lifetime. `NewEncryptedCredentialReference`
+authenticates bounded envelope bytes and immediately clears temporary plaintext;
+it accepts and returns no raw secret. The reference is immutable and redacted.
+
+Construction does not establish native trust or current authorization. A native
+consumer must authenticate it again with its own configured envelope service,
+immutable key/lifetime profile and clock, and compare current owner, provider
+version and generation. Caller-selected keys or a renewed lifetime cannot
+authorize a write. Native composition uses the separately configured
+`postgres.NewProviderCredentialsService` and a current fresh
+`org:sso-credentials` policy owner. Install its additive migration before opting
+in. Initial/replacement commands advance the shared provider version without
+changing metadata or mapping; only one current encrypted generation is retained.
+Original command retries return their exact historical result, never credential
+bytes or a renewed lifetime. Provider enabling, active-use overlap,
+drain, SAML keys/certificates and provider-network calls remain unsupported.
 
 ## Composition
 

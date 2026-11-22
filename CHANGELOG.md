@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add a separate storage-neutral disabled-OIDC credential-rotation request and
+  result, explicit no-overlap policy and redacting encrypted-reference value.
+  References authenticate exact context-bound envelope custody without exposing
+  plaintext; native credential writes require their own current trusted
+  ingress and fresh credentials-policy admission.
+
 - Add the closed non-secret static-OIDC `ProviderUpdateRequest` and result
   contracts, preserving provider identity and subject-mapping compatibility
   without credentials, enablement, discovery requests or routing semantics.
