@@ -63,12 +63,28 @@ type ProviderOAuth2LoginCompletionService struct {
 	effect   *sessionpg.SSOOAuth2SigninEffect
 	issuer   session.IssuerConfig
 	csrfKey  session.CSRFKey
+	adapter  OAuth2ProtocolAdapterFactory
 }
 
 // NewProviderOAuth2LoginCompletionService selects static enterprise OAuth2
 // sign-in without I/O. Install the OAuth callback, vault, session and original
 // preparation migrations before use. OIDC configuration remains separate.
 func NewProviderOAuth2LoginCompletionService(start *ProviderLoginService, config ProviderLoginCompletionConfig, profiles []StaticOAuth2CompletionProfile) (*ProviderOAuth2LoginCompletionService, error) {
+	return newProviderOAuth2LoginCompletionService(start, config, profiles, nil)
+}
+
+// NewProviderOAuth2LoginCompletionServiceWithAdapter selects a trusted
+// standalone protocol adapter for the existing reserved OAuth2 callback. There
+// is no fallback after selection. Reservation, recipient policy and final
+// persistence remain owned by the native coordinator.
+func NewProviderOAuth2LoginCompletionServiceWithAdapter(start *ProviderLoginService, config ProviderLoginCompletionConfig, profiles []StaticOAuth2CompletionProfile, factory OAuth2ProtocolAdapterFactory) (*ProviderOAuth2LoginCompletionService, error) {
+	if factory == nil {
+		return nil, sso.ErrInvalidInput
+	}
+	return newProviderOAuth2LoginCompletionService(start, config, profiles, factory)
+}
+
+func newProviderOAuth2LoginCompletionService(start *ProviderLoginService, config ProviderLoginCompletionConfig, profiles []StaticOAuth2CompletionProfile, factory OAuth2ProtocolAdapterFactory) (*ProviderOAuth2LoginCompletionService, error) {
 	if start == nil || start.router == nil || start.router.organizations == nil || len(config.Profiles) != 0 ||
 		len(profiles) == 0 || len(profiles) > len(start.oauthProfiles) || config.Issuer.MaximumDuration > start.config.Coordinator.MaximumDuration {
 		return nil, sso.ErrInvalidInput
@@ -110,7 +126,7 @@ func NewProviderOAuth2LoginCompletionService(start *ProviderLoginService, config
 		}
 		selected[key] = p
 	}
-	return &ProviderOAuth2LoginCompletionService{start: start, profiles: selected, policy: policy, effect: effect, issuer: config.Issuer, csrfKey: config.CSRFKey}, nil
+	return &ProviderOAuth2LoginCompletionService{start: start, profiles: selected, policy: policy, effect: effect, issuer: config.Issuer, csrfKey: config.CSRFKey, adapter: factory}, nil
 }
 
 func ssoOAuth2TransportProviderID(organizationID organization.ID, provider sso.ProviderID) (string, error) {
@@ -215,6 +231,9 @@ func (s *ProviderOAuth2LoginCompletionService) SigninCallbackOAuth2(ctx context.
 	phase := &providerLoginCallbackPhase{
 		providerLoginCallbackInvocation: providerLoginCallbackInvocation{service: s.start, found: found, original: original, authority: authority, flow: flow, browser: request.Browser, command: command},
 		grant:                           grant, oauth2: &transport, oauthCallback: callback, oauthInputRefused: parseErr != nil, oauthEffect: s.effect, policy: s.policy,
+	}
+	if s.adapter != nil && parseErr == nil && !callback.Denied() {
+		phase.oauthAdapter, phase.oauthRawQuery = s.adapter, request.RawQuery
 	}
 	defer func() {
 		if phase.refusal != nil {

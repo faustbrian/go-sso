@@ -74,6 +74,11 @@ type nativeOAuth2JourneyFixture struct {
 
 func newNativeOAuth2JourneyFixture(t *testing.T, mode string, traces ...*providerTrace) nativeOAuth2JourneyFixture {
 	t.Helper()
+	return newNativeOAuth2JourneyFixtureWithAdapter(t, mode, nil, traces...)
+}
+
+func newNativeOAuth2JourneyFixtureWithAdapter(t *testing.T, mode string, factory ssopg.OAuth2ProtocolAdapterFactory, traces ...*providerTrace) nativeOAuth2JourneyFixture {
+	t.Helper()
 	x := newProviderOAuthLoginStartFixture(t)
 	installNativeOAuth2JourneyMigrations(t, x.enable.f)
 	policy := kernel.CommandQueryPolicy{Authorization: nativeOAuth2JourneyPolicy{}, Clock: clock.System{}, PolicyVersion: 1}
@@ -188,10 +193,17 @@ sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issu
 		ClientAuthentication: oauth.ClientSecretPost, Scopes: x.profile.Scopes, ResponseMode: "query", PKCEMethod: "S256", StateBytes: 32,
 		Timeout: time.Second, ClockSkew: time.Minute, MaxResponseBytes: 64 << 10, MaxTokenBytes: 16 << 10, MaxCodeBytes: 4096,
 	}, Details: oauth.OAuth2UserInfoDetails{UserInfoEndpoint: "https://provider.example.com/identity", SubjectClaim: "stable_id", SubjectEncoding: oauth.OAuth2StringSubject, ProofLifetime: 20 * time.Second}}
-	completion, err := ssopg.NewProviderOAuth2LoginCompletionService(x.service, ssopg.ProviderLoginCompletionConfig{
+	completionConfig := ssopg.ProviderLoginCompletionConfig{
 		Audience: "native-enterprise-oauth2-app", PolicyNamespace: "users", CSRFKey: csrf,
 		Issuer: session.IssuerConfig{Clock: clock.System{}, MaximumDuration: 3 * time.Second, LookupKey: lookup, TokenSize: 32, Cookie: cookie},
-	}, []ssopg.StaticOAuth2CompletionProfile{{OrganizationID: x.profile.OrganizationID, ProviderID: x.profile.ProviderID, Profile: profile, HTTPClient: &http.Client{Transport: transport}}})
+	}
+	completionProfiles := []ssopg.StaticOAuth2CompletionProfile{{OrganizationID: x.profile.OrganizationID, ProviderID: x.profile.ProviderID, Profile: profile, HTTPClient: &http.Client{Transport: transport}}}
+	var completion *ssopg.ProviderOAuth2LoginCompletionService
+	if factory == nil {
+		completion, err = ssopg.NewProviderOAuth2LoginCompletionService(x.service, completionConfig, completionProfiles)
+	} else {
+		completion, err = ssopg.NewProviderOAuth2LoginCompletionServiceWithAdapter(x.service, completionConfig, completionProfiles, factory)
+	}
 	if err != nil {
 		t.Fatal("compose explicit installed OAuth2 linked-member completion", err)
 	}

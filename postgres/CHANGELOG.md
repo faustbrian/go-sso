@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Allow a trusted standalone OAuth2 adapter to complete the already reserved
+  native callback. The original coordinator retains credential custody, linked
+  recipient checks, encrypted token staging and atomic session issuance.
+
 - Before provider exchange, bind the shared adapter transaction to the original
   enterprise OAuth2 command, exact redirect, credential generation, expiry and
   resolved remember policy. Substituted custody fails before provider I/O.

@@ -76,41 +76,51 @@ func ssoAccountProviderNamespace(organizationID organization.ID, provider sso.Pr
 // must fence every returned owner/version, including the callback's separately
 // observed organization version, before commit.
 func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context.Context, original providerLoginStartInput, verified oauth.ProviderIdentity, policyNamespace string) (providerLoginCallbackRecipient, error) {
-	if s == nil || s.router == nil || s.router.pool == nil || s.router.pool.Raw() == nil ||
-		s.router.organizations == nil || s.router.config.Clock == nil || s.directory == nil || ctx == nil {
+	if err := s.checkLinkedProviderRecipientContext(ctx); err != nil {
+		return providerLoginCallbackRecipient{}, err
+	}
+	protocolID, protocolErr := ssoOIDCTransportProviderID(original.Proof.OrganizationID, original.ProviderID)
+	validEvidence := !verified.IDTokenIssuedAt().IsZero() && !verified.IDTokenExpiresAt().IsZero()
+	if original.Protocol == providerProtocolOAuth2 {
+		protocolID, protocolErr = ssoOAuth2TransportProviderID(original.Proof.OrganizationID, original.ProviderID)
+		_, hasAuthenticationTime := verified.AuthenticationTime()
+		validEvidence = verified.IDTokenIssuedAt().IsZero() && verified.IDTokenExpiresAt().IsZero() && !hasAuthenticationTime
+	}
+	if protocolErr != nil || verified.ProviderID() != protocolID || verified.Issuer() != original.Issuer || !validEvidence {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	if err := ctx.Err(); err != nil {
+	return s.readLinkedProviderRecipient(ctx, original, verified.Subject(), verified.EvidenceExpiresAt(), policyNamespace)
+}
+
+// The caller must first authenticate protocol evidence for the exact original
+// installation. The lookup, authority reads, and final Work fences are shared
+// by the existing provider path and a selected protocol adapter.
+func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, original providerLoginStartInput, subject string, proofExpires time.Time, policyNamespace string) (providerLoginCallbackRecipient, error) {
+	if err := s.checkLinkedProviderRecipientContext(ctx); err != nil {
 		return providerLoginCallbackRecipient{}, err
 	}
 	now := s.router.config.Clock.Now().UTC()
 	observedAt := now
-	protocolID, protocolErr := ssoOIDCTransportProviderID(original.Proof.OrganizationID, original.ProviderID)
 	accountNamespace := SSOOIDCAccountProviderNamespace
 	accountFields := kernel.SSOOIDCSigninAccountFields
 	readFactors := mfapg.ReadSSOOIDCSigninFactors
-	validEvidence := !verified.IDTokenIssuedAt().IsZero() && !verified.IDTokenExpiresAt().IsZero()
 	if original.Protocol == providerProtocolOAuth2 {
-		protocolID, protocolErr = ssoOAuth2TransportProviderID(original.Proof.OrganizationID, original.ProviderID)
 		accountNamespace = SSOOAuth2AccountProviderNamespace
 		accountFields = kernel.SSOOAuth2SigninAccountFields
 		readFactors = mfapg.ReadSSOOAuth2SigninFactors
-		_, hasAuthenticationTime := verified.AuthenticationTime()
-		validEvidence = verified.IDTokenIssuedAt().IsZero() && verified.IDTokenExpiresAt().IsZero() && !hasAuthenticationTime
 	}
 	if original.Command.TenantID != s.config.TenantID || original.Proof.TenantID != s.config.TenantID ||
 		original.Organization.TenantID != s.config.TenantID || original.Organization.OrganizationID != original.Proof.OrganizationID ||
 		original.Organization.Version == 0 || original.Organization.CredentialVersion == 0 ||
 		original.Issued.IsZero() || now.Before(original.Issued) || !now.Before(original.Expires) ||
-		protocolErr != nil || verified.ProviderID() != protocolID || verified.Issuer() != original.Issuer || verified.Subject() == "" ||
-		!validEvidence || !now.Before(verified.EvidenceExpiresAt()) {
+		subject == "" || !now.Before(proofExpires) {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
 	provider, err := accountNamespace(original.Proof.OrganizationID, original.ProviderID)
 	if err != nil {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	query := kernel.ProviderSigninAccountQuery{TenantID: s.config.TenantID, Provider: provider, Issuer: verified.Issuer(), Subject: verified.Subject()}
+	query := kernel.ProviderSigninAccountQuery{TenantID: s.config.TenantID, Provider: provider, Issuer: original.Issuer, Subject: subject}
 	policyScope := authoritypg.AuthorityScope{TenantID: authorization.TenantID(query.TenantID), SubjectID: "scope-validation", PolicyNamespace: policyNamespace}
 	if query.Validate() != nil || policyScope.Validate() != nil {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
@@ -119,7 +129,7 @@ func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context
 	if maximumDuration < time.Millisecond {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	deadline := earlierLoginTime(original.Expires, verified.EvidenceExpiresAt())
+	deadline := earlierLoginTime(original.Expires, proofExpires)
 	ctx, cancel := context.WithTimeout(ctx, min(maximumDuration, deadline.Sub(now)))
 	defer cancel()
 
@@ -173,4 +183,12 @@ func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
 	return providerLoginCallbackRecipient{account: account, member: member, factorVersion: factors.Version(), policyVersion: currentPolicy.Version}, nil
+}
+
+func (s *ProviderLoginService) checkLinkedProviderRecipientContext(ctx context.Context) error {
+	if s == nil || s.router == nil || s.router.pool == nil || s.router.pool.Raw() == nil ||
+		s.router.organizations == nil || s.router.config.Clock == nil || s.directory == nil || ctx == nil {
+		return sso.ErrForbidden
+	}
+	return ctx.Err()
 }

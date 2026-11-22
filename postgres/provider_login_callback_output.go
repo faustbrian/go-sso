@@ -109,26 +109,41 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 		if p.oauthInputRefused || p.oauthCallback.Denied() {
 			return p.sealProviderLoginCallbackRefusal(ctx, generation)
 		}
+		if p.oauthAdapter != nil {
+			return p.generateOAuth2AdapterAccepted(ctx, generation, admission, aad)
+		}
 		result, err = p.exchangeOAuth2Acknowledged(ctx, p.oauthCallback, *p.oauth2, admission)
 	} else {
 		result, err = p.exchangeAcknowledged(ctx, p.input, p.transport, admission)
 	}
 	defer result.Tokens.Destroy()
 	if err != nil {
-		var disposition *oauth.Error
-		if ctx.Err() == nil && errors.As(err, &disposition) && (disposition.Kind() == oauth.Refused || p.oauth2 != nil && disposition.Kind() == oauth.InvalidProof) {
+		if terminalProviderExchangeRefusal(ctx, err, p.oauth2 != nil) {
 			return p.sealProviderLoginCallbackRefusal(ctx, generation)
 		}
 		return nil, err
 	}
 	recipient, jitWire, err := p.callbackRecipient(ctx, result)
 	if err != nil {
-		var forbidden identity.ForbiddenError
-		if ctx.Err() == nil && (errors.Is(err, errProviderLoginRecipientIneligible) || p.oauth2 != nil && (errors.Is(err, sso.ErrForbidden) || errors.As(err, &forbidden))) {
+		if terminalProviderRecipientRefusal(ctx, err, p.oauth2 != nil) {
 			return p.sealProviderLoginCallbackRefusal(ctx, generation)
 		}
 		return nil, err
 	}
+	return p.sealAcceptedOutput(ctx, generation, admission, aad, recipient, jitWire, result.Identity.EvidenceExpiresAt(), result.ExchangeResult)
+}
+
+func terminalProviderExchangeRefusal(ctx context.Context, err error, oauth2 bool) bool {
+	var disposition *oauth.Error
+	return ctx.Err() == nil && errors.As(err, &disposition) && (disposition.Kind() == oauth.Refused || oauth2 && disposition.Kind() == oauth.InvalidProof)
+}
+
+func terminalProviderRecipientRefusal(ctx context.Context, err error, oauth2 bool) bool {
+	var forbidden identity.ForbiddenError
+	return ctx.Err() == nil && (errors.Is(err, errProviderLoginRecipientIneligible) || oauth2 && (errors.Is(err, sso.ErrForbidden) || errors.As(err, &forbidden)))
+}
+
+func (p *providerLoginCallbackPhase) sealAcceptedOutput(ctx context.Context, generation uint64, admission risk.AuthenticationAdmission, aad envelope.Context, recipient providerLoginCallbackRecipient, jitWire *providerLoginJITWire, proofExpires time.Time, result oauth.ExchangeResult) ([]byte, error) {
 	now := p.service.router.config.Clock.Now().UTC().Truncate(time.Microsecond)
 	if err := p.checkOriginal(now); err != nil {
 		return nil, err
@@ -140,7 +155,7 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 	if err != nil || recipient.member.Version != p.authority.organization.Version {
 		return nil, identity.ForbiddenError{}
 	}
-	until := earliestProviderLoginCallbackTime(p.authority.deadline, flow.Binding.ExpiresAt, recipient.member.ValidUntil, result.Identity.EvidenceExpiresAt()).UTC().Truncate(time.Microsecond)
+	until := earliestProviderLoginCallbackTime(p.authority.deadline, flow.Binding.ExpiresAt, recipient.member.ValidUntil, proofExpires).UTC().Truncate(time.Microsecond)
 	if !now.Before(until) {
 		return nil, identity.ForbiddenError{}
 	}
@@ -155,7 +170,7 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 		organizationVersion, effectFields = jit.membership.ExpectedOrganizationVersion(), fields
 	} else {
 		var roleField *identity.FeatureField
-		roleUpdate, roleField, err = p.prepareProviderLoginRoleUpdate(ctx, result.ExchangeResult, recipient)
+		roleUpdate, roleField, err = p.prepareProviderLoginRoleUpdate(ctx, result, recipient)
 		if errors.Is(err, sso.ErrForbidden) {
 			return p.sealProviderLoginCallbackRefusal(ctx, generation)
 		}

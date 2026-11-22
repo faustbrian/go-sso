@@ -28,6 +28,8 @@ type providerLoginCallbackPhase struct {
 	oauth2            *StaticOAuth2CompletionProfile
 	oauthCallback     oauth.QueryCallback
 	oauthInputRefused bool
+	oauthAdapter      OAuth2ProtocolAdapterFactory
+	oauthRawQuery     string
 	input             identity.OAuthCallbackInput
 	issuer            *session.SessionIssuer
 	effect            *sessionpg.SSOOIDCSigninEffect
