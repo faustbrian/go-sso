@@ -84,6 +84,18 @@ selector. Its callback command and immutable stored lifetime provide quota
 correlation only; it neither reserves the callback nor opens provider secrets.
 Pass its `FlowID` with the same original cookie to `SigninCallback`, which
 repeats every protected gate after quota admission.
+
+For a shared sign-in/member-link callback route, use `SharedCallbackRateSource`
+with that same trusted request and the local member-session cookie. Its single
+authenticated pending lookup selects the stored mode, not whichever cookies
+are present. Anonymous mode authenticates the original flow cookie and returns
+its `FlowID`; member-link mode requires the exact original fresh password
+cookie and returns `MemberLink=true` with an empty `FlowID`. Neither missing
+nor invalid custody falls back to the other mode. Both return the original
+callback command and immutable lifetime without reservation, writes or provider
+I/O; `SigninCallback` or `LinkCallback` must still repeat protected admission.
+The existing `SigninCallbackRateSource` remains anonymous-only.
+
 Only an acknowledged first commit discloses the session cookie, CSRF token and
 configured return URL. Configure the session PostgreSQL service's explicit
 enterprise OIDC cookie profile for authenticated session reads and strict

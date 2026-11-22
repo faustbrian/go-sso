@@ -165,31 +165,9 @@ type providerLoginCallbackMember struct {
 func (s *ProviderLoginService) memberCallbackInvocation(ctx context.Context, found providerLoginCallbackLookup, req ProviderLinkCallbackRequest) (providerLoginCallbackInvocation, error) {
 	metadata := found.Binding.Metadata
 	input, link := metadata.Input, metadata.Input.Link
-	if s == nil || s.link == nil || link == nil || found.CompletedAt != nil || req.ReceivedRedirectURI != input.RedirectURI ||
-		req.Origin != s.config.Origin || req.Origin != input.BrowserOrigin || !req.Network.IsValid() || req.Network.Is4In6() ||
-		req.Network.Zone() != "" || !providerID(req.Device) {
-		return providerLoginCallbackInvocation{}, sso.ErrForbidden
-	}
-	token, err := session.ParseToken(req.Session.Token())
+	got, frozen, err := s.authenticateProviderLoginMemberCallbackCookie(ctx, found, req)
 	if err != nil {
-		return providerLoginCallbackInvocation{}, sso.ErrForbidden
-	}
-	credential, err := session.NewCredential(session.CredentialCookie, token)
-	if err != nil {
-		return providerLoginCallbackInvocation{}, sso.ErrForbidden
-	}
-	got, err := s.link.Sessions.Get(ctx, session.GetRequest{TenantID: input.Command.TenantID, Credential: credential})
-	if err != nil {
-		return providerLoginCallbackInvocation{}, providerError(ctx, err)
-	}
-	now := s.router.config.Clock.Now().UTC()
-	frozen, err := sessionpg.OriginalSessionFromFields(input.Command.TenantID, input.Command.UserID, link.OriginalSession)
-	if err != nil || got.ValidateAt(now) != nil || !s.link.possesses(req.Session, frozen, now) {
-		return providerLoginCallbackInvocation{}, sso.ErrForbidden
-	}
-	fields, err := sessionpg.OriginalSessionFields(got.Session)
-	if err != nil || !reflect.DeepEqual(fields, link.OriginalSession) {
-		return providerLoginCallbackInvocation{}, sso.ErrForbidden
+		return providerLoginCallbackInvocation{}, err
 	}
 	browser := ProviderLoginBrowser{Origin: req.Origin, Network: req.Network, Device: req.Device}
 	startPhase := &providerLoginPhase{service: s, browser: browser, member: &providerLoginMemberAdmission{user: input.Command.UserID}}
@@ -232,6 +210,40 @@ func (s *ProviderLoginService) memberCallbackInvocation(ctx context.Context, fou
 		return providerLoginCallbackInvocation{}, providerError(ctx, err)
 	}
 	return p, nil
+}
+
+// Quota attribution and protected completion must authenticate the same original
+// fresh local cookie. This read grants neither link authority nor a reservation;
+// memberCallbackInvocation separately observes and fences every protected owner.
+func (s *ProviderLoginService) authenticateProviderLoginMemberCallbackCookie(ctx context.Context, found providerLoginCallbackLookup, req ProviderLinkCallbackRequest) (session.GetResult, session.Session, error) {
+	input, link := found.Binding.Metadata.Input, found.Binding.Metadata.Input.Link
+	if s == nil || s.link == nil || link == nil || found.CompletedAt != nil || req.ReceivedRedirectURI != input.RedirectURI ||
+		req.Origin != s.config.Origin || req.Origin != input.BrowserOrigin || !req.Network.IsValid() || req.Network.Is4In6() ||
+		req.Network.Zone() != "" || !providerID(req.Device) {
+		return session.GetResult{}, session.Session{}, sso.ErrForbidden
+	}
+	token, err := session.ParseToken(req.Session.Token())
+	if err != nil {
+		return session.GetResult{}, session.Session{}, sso.ErrForbidden
+	}
+	credential, err := session.NewCredential(session.CredentialCookie, token)
+	if err != nil {
+		return session.GetResult{}, session.Session{}, sso.ErrForbidden
+	}
+	got, err := s.link.Sessions.Get(ctx, session.GetRequest{TenantID: input.Command.TenantID, Credential: credential})
+	if err != nil {
+		return session.GetResult{}, session.Session{}, providerError(ctx, err)
+	}
+	now := s.router.config.Clock.Now().UTC()
+	frozen, err := sessionpg.OriginalSessionFromFields(input.Command.TenantID, input.Command.UserID, link.OriginalSession)
+	if err != nil || got.ValidateAt(now) != nil || !s.link.possesses(req.Session, frozen, now) {
+		return session.GetResult{}, session.Session{}, sso.ErrForbidden
+	}
+	fields, err := sessionpg.OriginalSessionFields(got.Session)
+	if err != nil || !reflect.DeepEqual(fields, link.OriginalSession) {
+		return session.GetResult{}, session.Session{}, sso.ErrForbidden
+	}
+	return got, frozen, nil
 }
 
 func (p *providerLoginCallbackInvocation) checkOriginalMember(now time.Time) error {

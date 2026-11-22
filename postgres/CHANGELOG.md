@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add native `SharedCallbackRateSource` attribution for a shared enterprise
+  sign-in/member-link callback. Authenticated stored mode selects only its
+  original flow or fresh local password cookie, with no cross-mode fallback,
+  callback reservation, provider exchange, writes or renewed lifetime. The
+  existing anonymous-only rate source retains its behavior.
+
 - Add opt-in static enterprise OIDC linking for an existing active member
   using the original fresh password cookie and same-origin consent. Commit
   the new provider credential, encrypted token deposit and lifecycle once;
