@@ -137,10 +137,7 @@ func validProviderLoginCallbackMaterialInput(found providerLoginCallbackLookup, 
 		found.ObservedAt.Before(found.Row.IssuedAt) || now.Before(found.ObservedAt) || !now.Before(authority.deadline) {
 		return false
 	}
-	got := original.payload()
-	got.IssuedAt, got.ExpiresAt = got.IssuedAt.UTC(), got.ExpiresAt.UTC()
-	input.IssuedAt, input.ExpiresAt = input.IssuedAt.UTC(), input.ExpiresAt.UTC()
-	if got != input || original.Proof.TenantID != found.Row.TenantID || original.Proof.Domain == "" || original.AuthorizationEndpoint == "" {
+	if !equalProviderLoginPayloadInput(original.payload(), input) || original.Proof.TenantID != found.Row.TenantID || original.Proof.Domain == "" || original.AuthorizationEndpoint == "" {
 		return false
 	}
 	if authority.deadline.After(found.ObservedAt.Add(20*time.Second)) || authority.deadline.After(original.Expires) || authority.deadline.After(original.Proof.ExpiresAt) || authority.deadline.After(authority.organization.ValidUntil) {

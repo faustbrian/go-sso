@@ -55,7 +55,7 @@ func (s *ProviderLoginCompletionService) SigninCallbackRateSource(ctx context.Co
 		return out, err
 	}
 	defer clear(found.Binding.Proof)
-	if found.CompletedAt != nil || request.ReceivedRedirectURI != found.Binding.Metadata.Input.RedirectURI {
+	if found.CompletedAt != nil || found.Binding.Metadata.Input.Link != nil || request.ReceivedRedirectURI != found.Binding.Metadata.Input.RedirectURI {
 		return out, sso.ErrForbidden
 	}
 	key := providerLoginProfileKey{organization: organization.ID(found.Row.OrganizationID), provider: sso.ProviderID(found.Row.ProviderID)}

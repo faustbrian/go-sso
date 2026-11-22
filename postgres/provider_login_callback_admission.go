@@ -26,9 +26,17 @@ type providerLoginCallbackInvocation struct {
 	original        providerLoginStartInput
 	authority       providerLoginCallbackAuthority
 	flow            session.PreAuthTransaction
+	member          *providerLoginCallbackMember
 	browser         ProviderLoginBrowser
 	command         identity.Command
 	authenticatedAt time.Time
+}
+
+func (p *providerLoginCallbackInvocation) operation() identity.FeatureOperation {
+	if p.member != nil {
+		return kernel.SSOOIDCExplicitLinkCallbackOperation()
+	}
+	return providerOIDCCallbackOperation()
 }
 
 // This is trusted callback deployment configuration, not a request projection.
@@ -48,6 +56,8 @@ func (p *providerLoginCallbackInvocation) riskScope() (risk.Context, risk.Subjec
 	// Before identity resolution, bound identifier velocity to the selected
 	// tenant/organization/provider, never to a user or a claim from the reply.
 	bucket := sha256.Sum256([]byte("sso-oidc-callback-provider\x00" + string(row.TenantID) + "\x00" + row.OrganizationID + "\x00" + row.ProviderID))
+	// Use the same closed authentication counter dimensions for both modes.
+	// The authenticated member is attributed separately in the decision audit.
 	return risk.Context{Tenant: string(row.TenantID), Operation: risk.Action(providerOIDCCallback), Attempt: string(p.found.Binding.Metadata.CallbackCommand)},
 		risk.Subject{Network: p.browser.Network.String(), Device: p.browser.Device, IdentifierDigest: hex.EncodeToString(bucket[:])}
 }
@@ -55,6 +65,9 @@ func (p *providerLoginCallbackInvocation) riskScope() (risk.Context, risk.Subjec
 func (p *providerLoginCallbackInvocation) checkOriginal(now time.Time) error {
 	if p == nil || p.service == nil || !validProviderLoginCallbackMaterialInput(p.found, p.original, p.authority, now) {
 		return identity.ForbiddenError{}
+	}
+	if p.member != nil {
+		return p.checkOriginalMember(now)
 	}
 	remember, err := session.NewRememberPolicy(p.found.Binding.Metadata.Input.Remember)
 	if err != nil {
@@ -71,23 +84,15 @@ func (p *providerLoginCallbackInvocation) admitPrimary(ctx context.Context, w ke
 	}
 	binding, feature, _, err := w.FeatureScope(owner)
 	original, ok := p.command.Feature()
-	if err != nil || !ok || binding != original.Binding || feature.Operation != providerOIDCCallbackOperation() ||
+	if err != nil || !ok || binding != original.Binding || feature.Operation != p.operation() ||
 		!validProviderLoginCallbackDispositionScope(binding, p.found, p.authority.deadline) {
 		return identity.ForbiddenError{}
 	}
-	s := p.service
-	if err := w.RequireActiveDirectoryAuthority(ctx, owner, kernel.DirectoryAuthorityAdmission{
-		Query: s.directoryQuery(), GlobalVersion: p.original.GlobalVersion, TenantVersion: p.original.TenantVersion,
-	}); err != nil {
-		return err
-	}
-	if err := sessionpg.RequirePreAuth(ctx, w, s.config.Session, p.flow); err != nil {
-		return err
-	}
-	if err := s.router.organizations.RequireCredentialAuthority(ctx, w, owner, p.authority.organization); err != nil {
-		return err
-	}
-	if err := requireProviderLoginCallbackDisposition(ctx, w, p.found, p.authority.deadline); err != nil {
+	if p.member != nil {
+		if err := p.requireMemberCallbackAuthority(ctx, w, owner, command, true); err != nil {
+			return err
+		}
+	} else if err := p.requireAnonymousCallbackAuthority(ctx, w, owner); err != nil {
 		return err
 	}
 	now, err := w.DatabaseTime(ctx)
@@ -101,6 +106,22 @@ func (p *providerLoginCallbackInvocation) admitPrimary(ctx context.Context, w ke
 	return nil
 }
 
+func (p *providerLoginCallbackInvocation) requireAnonymousCallbackAuthority(ctx context.Context, w kernel.Work, owner kernel.FeatureExecutionContributor) error {
+	s := p.service
+	if err := w.RequireActiveDirectoryAuthority(ctx, owner, kernel.DirectoryAuthorityAdmission{
+		Query: s.directoryQuery(), GlobalVersion: p.original.GlobalVersion, TenantVersion: p.original.TenantVersion,
+	}); err != nil {
+		return err
+	}
+	if err := sessionpg.RequirePreAuth(ctx, w, s.config.Session, p.flow); err != nil {
+		return err
+	}
+	if err := s.router.organizations.RequireCredentialAuthority(ctx, w, owner, p.authority.organization); err != nil {
+		return err
+	}
+	return requireProviderLoginCallbackDisposition(ctx, w, p.found, p.authority.deadline)
+}
+
 func (p *providerLoginCallbackInvocation) prepareRisk(ctx context.Context, command identity.Command) (risk.AuthenticationAdmission, error) {
 	if p == nil || p.service == nil || ctx == nil || p.authenticatedAt.IsZero() || command == (identity.Command{}) || command != p.command {
 		return risk.AuthenticationAdmission{}, identity.ForbiddenError{}
@@ -111,9 +132,13 @@ func (p *providerLoginCallbackInvocation) prepareRisk(ctx context.Context, comma
 	}
 	scope, subject := p.riskScope()
 	callback := p.found.Binding.Metadata.CallbackCommand
+	actor := audit.ActorInput{Kind: audit.ActorAnonymous}
+	if p.member != nil {
+		actor = audit.ActorInput{Kind: audit.ActorHuman, ID: string(p.original.Command.UserID)}
+	}
 	result, err := s.config.Risk.Evaluation.Evaluate(ctx, risk.EvaluateRequest{Context: scope, Phase: risk.NonIssuing,
 		Subject: subject, Attribution: &risk.DecisionAttribution{CommandID: callback, CorrelationID: callback,
-			Actor: audit.ActorInput{Kind: audit.ActorAnonymous}, Subject: identity.SecurityAuthenticationAttempt, SubjectID: string(callback)}})
+			Actor: actor, Subject: identity.SecurityAuthenticationAttempt, SubjectID: string(callback)}})
 	if err != nil {
 		return risk.AuthenticationAdmission{}, providerError(ctx, err)
 	}
@@ -153,6 +178,9 @@ func (p *providerLoginCallbackInvocation) exchangeAcknowledged(ctx context.Conte
 	defer clear(material.credential)
 	defer clear(material.credentialContext)
 	defer clear(material.verifier)
+	if p.member != nil && !material.enabled {
+		return providerLoginCallbackExchange{}, identity.ForbiddenError{}
+	}
 	now = clock.Now().UTC()
 	if err := p.checkOriginal(now); err != nil {
 		return providerLoginCallbackExchange{}, err

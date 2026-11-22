@@ -217,7 +217,7 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 		return out, err
 	}
 	defer clear(found.Binding.Proof)
-	if found.CompletedAt != nil {
+	if found.CompletedAt != nil || found.Binding.Metadata.Input.Link != nil {
 		return out, sso.ErrForbidden
 	}
 	key := providerLoginProfileKey{organization: organization.ID(found.Row.OrganizationID), provider: sso.ProviderID(found.Row.ProviderID)}

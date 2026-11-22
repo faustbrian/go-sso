@@ -79,6 +79,7 @@ type nativeCallbackJourneyFixture struct {
 	posts            *atomic.Int32
 	idToken          string
 	newAttempt       func(*testing.T, string, *bool, time.Time) ssopg.ProviderLoginCallbackRequest
+	linkBrowser      ssopg.ProviderLinkBrowser
 }
 
 func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJourneyFixture {
@@ -87,6 +88,7 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 	const roleGrant = "native-enterprise-reader"
 	rolesSelected := mode == "role-grant"
 	jitFixture := strings.HasPrefix(mode, "jit")
+	memberFixture := strings.HasPrefix(mode, "explicit-member")
 	if rolesSelected {
 		installNativeCallbackJourneyMigrations(t, x.enable.f)
 		installProviderRoleSourceProjection(t, x.enable.f)
@@ -98,6 +100,8 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 	}
 	if jitFixture {
 		installNativeCallbackJourneyJITMigrations(t, x.enable.f)
+	} else if memberFixture {
+		prepareNativeMemberJourneyIdentity(t, x)
 	} else {
 		seedNativeCallbackJourneyRecipient(t, x)
 	}
@@ -108,7 +112,14 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 	if err != nil {
 		t.Fatal("compose native start with the exact callback service actor", err)
 	}
-	started, err := x.service.SigninStart(x.enable.f.ctx, x.request, x.browser)
+	var linkBrowser ssopg.ProviderLinkBrowser
+	var started sso.SigninStartResult
+	if memberFixture {
+		linkBrowser = prepareNativeMemberJourneyStart(t, &x)
+		started, err = x.service.LinkStart(x.enable.f.ctx, x.request, linkBrowser)
+	} else {
+		started, err = x.service.SigninStart(x.enable.f.ctx, x.request, x.browser)
+	}
 	if err != nil || started.Completion.Outcome != identity.CommitOutcomeCommitted {
 		t.Fatal("native start did not commit the original browser-bound transaction", err)
 	}
@@ -186,6 +197,13 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 			if err != nil || updated.RowsAffected() != 1 {
 				t.Error("the fixture did not advance the observed organization revision")
 				http.Error(w, "fixture could not advance authority", http.StatusInternalServerError)
+				return
+			}
+		}
+		if mode == "explicit-member-removed" {
+			if err := removeNativeLinkMember(r.Context(), x); err != nil {
+				t.Error("fixture could not withdraw the original member during the provider response", err)
+				http.Error(w, "fixture could not withdraw membership", http.StatusInternalServerError)
 				return
 			}
 		}
@@ -284,7 +302,7 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 		t.Cleanup(input.Destroy)
 		return ssopg.ProviderLoginCallbackRequest{Input: input, Browser: browser, ReceivedRedirectURI: profile.ProtocolRedirectURI}
 	}
-	return nativeCallbackJourneyFixture{start: x, completion: completion, completionConfig: completionConfig, csrf: csrf, lookup: lookup, started: started, posts: posts, idToken: idToken, newAttempt: newAttempt,
+	return nativeCallbackJourneyFixture{start: x, completion: completion, completionConfig: completionConfig, csrf: csrf, lookup: lookup, started: started, posts: posts, idToken: idToken, newAttempt: newAttempt, linkBrowser: linkBrowser,
 		request: ssopg.ProviderLoginCallbackRequest{Input: input, Browser: x.browser, ReceivedRedirectURI: profile.ProtocolRedirectURI}}
 }
 
@@ -465,6 +483,12 @@ INSERT INTO identity.accounts(tenant_id,user_id,account_id,provider,issuer,subje
 SELECT $1,'owner','enterprise-linked-account',provider,issuer,subject,
 sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issuer)::text||':'||issuer||octet_length(subject)::text||':'||subject,'UTF8')),1,1,true FROM a`, tenant, provider, nativeCallbackJourneyIssuer, nativeCallbackJourneySubject)
 	nativeCallbackJourneyExec(t, x, `INSERT INTO identity.account_credentials(tenant_id,user_id,credential_id,account_id) VALUES($1,'owner','enterprise-provider-credential','enterprise-linked-account')`, tenant)
+	seedNativeCallbackJourneyFactors(t, x, "owner")
+}
+
+func seedNativeCallbackJourneyFactors(t *testing.T, x providerLoginStartFixture, member identity.UserID) {
+	t.Helper()
+	tenant := string(x.config.TenantID)
 	// These are preexisting fixture records, not a claim that this journey ran
 	// registration. The real factor table retains its original initializer FK.
 	initialization, err := base64.RawURLEncoding.DecodeString(string(commandID(t)))
@@ -473,7 +497,7 @@ sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issu
 	}
 	nativeCallbackJourneyExec(t, x, `INSERT INTO identity.identity_command_id_claims(command_id,tenant_id,purpose,fingerprint,fingerprint_key_version,safe_fields) VALUES($1,$2,'identity.password.signup',$3,1,$4)`, initialization, tenant, bytes.Repeat([]byte{0xc3}, 32), []byte{1})
 	nativeCallbackJourneyExec(t, x, `INSERT INTO identity.commands(command_id,tenant_id,purpose) VALUES($1,$2,'identity.password.signup')`, initialization, tenant)
-	nativeCallbackJourneyExec(t, x, `INSERT INTO identity_mfa.factor_authorities(tenant_id,user_id,version,active_factors,initialized_command_id,initialized_purpose) VALUES($1,'owner',1,0,$2,'identity.password.signup')`, tenant, initialization)
+	nativeCallbackJourneyExec(t, x, `INSERT INTO identity_mfa.factor_authorities(tenant_id,user_id,version,active_factors,initialized_command_id,initialized_purpose) VALUES($1,$3,1,0,$2,'identity.password.signup')`, tenant, initialization, string(member))
 }
 
 func nativeCallbackJourneyInstalledSecret(t *testing.T, x providerLoginStartFixture) []byte {

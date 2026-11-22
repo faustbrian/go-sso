@@ -45,6 +45,9 @@ type providerLoginStartInput struct {
 	BrowserOrigin, SuccessCallback, ErrorCallback string
 	Remember                                      session.RememberPolicySpec
 	Started, Issued, Expires                      time.Time
+	Link                                          *providerLoginMemberIntent                   `json:",omitempty"`
+	MemberAuthority                               *organization.CredentialAuthorityObservation `json:",omitempty"`
+	MemberReadUntil                               time.Time                                    `json:",omitzero"`
 }
 
 func (i providerLoginStartInput) authority() (providerLoginAuthority, error) {
@@ -65,7 +68,7 @@ func (i providerLoginStartInput) payload() providerLoginPayloadInput {
 		ProviderID: string(i.ProviderID), ProviderVersion: i.ProviderVersion, CredentialGeneration: i.Generation, MappingVersion: i.MappingVersion,
 		Issuer: i.Issuer, ClientID: i.ClientID, RedirectURI: i.ProtocolRedirectURI,
 		BrowserOrigin: i.BrowserOrigin, SuccessCallback: i.SuccessCallback, ErrorCallback: i.ErrorCallback, Remember: i.Remember,
-		InputFingerprint: i.Intent, IssuedAt: i.Issued, ExpiresAt: i.Expires,
+		InputFingerprint: i.Intent, IssuedAt: i.Issued, ExpiresAt: i.Expires, Link: i.Link,
 	}
 }
 
@@ -73,6 +76,7 @@ type providerLoginPhase struct {
 	service  *ProviderLoginService
 	request  sso.SigninStartRequest
 	browser  ProviderLoginBrowser
+	member   *providerLoginMemberAdmission
 	flow     session.PreAuthTransaction
 	intent   [32]byte
 	input    *providerLoginStartInput
@@ -138,6 +142,9 @@ func (s *ProviderLoginService) requireProviderLoginBrowser(flow session.PreAuthT
 }
 
 func (p *providerLoginPhase) requestIntent() (identity.RequestIntent, error) {
+	if p.member != nil {
+		return p.linkRequestIntent()
+	}
 	flow, err := p.flow.Bindings()
 	if err != nil {
 		return identity.RequestIntent{}, err
@@ -173,17 +180,22 @@ func (p *providerLoginPhase) requestIntent() (identity.RequestIntent, error) {
 }
 
 func (p *providerLoginPhase) commandBinding(command identity.CommandID) identity.CommandBinding {
-	op, c := providerSigninOperation(), p.service.config
-	return identity.CommandBinding{
+	op, c := p.operation(), p.service.config
+	binding := identity.CommandBinding{
 		CommandID: command, TenantID: c.TenantID, ActorID: c.ActorID, ActorKind: authorization.SubjectServiceAccount,
 		OperationID: op.OperationID, SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion,
 		RecordID: string(command), AnonymousFlowID: string(p.browser.FlowID), CorrelationID: string(command),
 		PolicyID: c.PolicyID, PolicyVersion: p.service.policyVersion,
 	}
+	if p.member != nil {
+		binding.ActorKind = authorization.SubjectUser
+		binding.ActorID, binding.UserID, binding.AnonymousFlowID = identity.ActorID(p.member.user), p.member.user, ""
+	}
+	return binding
 }
 
 func (p *providerLoginPhase) requestKeyContext(k kernel.RequestKeyPreparationBinding) (envelope.Context, error) {
-	if k.Feature != p.registration() || k.Namespace != p.service.config.RequestKeys.Namespace || k.Scope != p.service.requestScope() ||
+	if k.Feature != p.registration() || k.Namespace != p.service.config.RequestKeys.Namespace || k.Scope != p.startScope() ||
 		k.PolicyVersion != p.service.policyVersion || k.IntentDigest == ([32]byte{}) || k.Admission.FingerprintKeyVersion == 0 {
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
@@ -218,7 +230,7 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 		return nil, identity.UnavailableError{}
 	}
 	now = now.UTC()
-	if err := p.requireBrowser(p.flow, now); err != nil {
+	if err := p.requireStartBrowser(nil, now); err != nil {
 		return nil, err
 	}
 	directory, err := s.directory.GetDirectoryAuthority(ctx, s.directoryQuery())
@@ -246,18 +258,25 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 	if err != nil {
 		return nil, err
 	}
-	flow, err := p.flow.Bindings()
+	resolved, err := p.request.LoginIntent.RememberPolicy()
 	if err != nil {
 		return nil, err
 	}
-	remember, err := flow.Binding.Intent.Remember.Bindings()
+	remember, err := resolved.Bindings()
 	if err != nil {
 		return nil, err
 	}
 	issued := now.Truncate(time.Second)
-	expires := earlierLoginTime(issued.Add(s.config.StateLifetime), flow.Binding.ExpiresAt).Truncate(time.Second)
-	if !expires.After(now) {
-		return nil, identity.ForbiddenError{}
+	expires := issued.Add(s.config.StateLifetime)
+	if p.member == nil {
+		flow, err := p.flow.Bindings()
+		if err != nil {
+			return nil, err
+		}
+		expires = earlierLoginTime(expires, flow.Binding.ExpiresAt).Truncate(time.Second)
+		if !expires.After(now) {
+			return nil, identity.ForbiddenError{}
+		}
 	}
 	input := providerLoginStartInput{
 		Command: providerLoginStoredCommand(p.commandBinding(k.Admission.CommandID)), Intent: p.intent,
@@ -270,6 +289,11 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 		BrowserOrigin: p.browser.Origin, SuccessCallback: p.request.SuccessCallback.String(), ErrorCallback: p.request.ErrorCallback.String(),
 		Remember: remember,
 		Started:  now, Issued: issued, Expires: expires,
+	}
+	if p.member != nil {
+		if err := p.freezeMember(ctx, &input, now); err != nil {
+			return nil, err
+		}
 	}
 	if err := input.payload().validate(); err != nil {
 		return nil, err
@@ -331,7 +355,7 @@ func (p *providerLoginPhase) openOriginalInput(ctx context.Context, k kernel.Req
 		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
 	want := p.commandBinding(k.Admission.CommandID)
-	if identity.CommandBinding(input.Command) != want || want.ValidateFor(providerSigninOperation()) != nil ||
+	if identity.CommandBinding(input.Command) != want || want.ValidateFor(p.operation()) != nil ||
 		input.Proof.TenantID != want.TenantID || input.GlobalVersion == 0 || input.TenantVersion == 0 ||
 		!input.Issued.Equal(input.Started.Truncate(time.Second)) || !input.Expires.After(input.Started) ||
 		input.Expires.After(input.Issued.Add(p.service.config.StateLifetime)) {
@@ -345,6 +369,9 @@ func (p *providerLoginPhase) openOriginalInput(ctx context.Context, k kernel.Req
 	}
 	if _, err := input.authority(); err != nil {
 		return providerLoginStartInput{}, err
+	}
+	if (input.Link != nil) != (p.member != nil) || input.payload().validate() != nil {
+		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
 	return input, nil
 }

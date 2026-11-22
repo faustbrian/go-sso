@@ -131,6 +131,14 @@ func validProviderLoginCallbackDispositionScope(binding identity.CommandBinding,
 	if deadline.IsZero() || !deadline.After(found.ObservedAt) || deadline.After(found.Row.ExpiresAt) || deadline.After(found.ObservedAt.Add(20*time.Second)) {
 		return false
 	}
+	if input.Link != nil {
+		operation = kernel.SSOOIDCExplicitLinkCallbackOperation()
+		want := original
+		want.CommandID = found.Binding.Metadata.CallbackCommand
+		want.CorrelationID, want.RecordID = string(want.CommandID), string(original.CommandID)
+		want.OperationID, want.SchemaID, want.SchemaVersion = operation.OperationID, operation.SchemaID, operation.SchemaVersion
+		return binding == want && want.CommandID != original.CommandID && binding.ValidateFor(operation) == nil
+	}
 	return binding.ValidateFor(operation) == nil && binding.TenantID == original.TenantID &&
 		binding.CommandID == found.Binding.Metadata.CallbackCommand && binding.CommandID != original.CommandID &&
 		binding.RecordID == string(original.CommandID) && binding.AnonymousFlowID == original.AnonymousFlowID &&

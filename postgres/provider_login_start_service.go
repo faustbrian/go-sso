@@ -81,6 +81,7 @@ type ProviderLoginService struct {
 	callbackVerifier capability.Service
 	callbackLimits   capability.Limits
 	custody          risk.AuthenticationAdmissionCustody
+	link             *ProviderLinkConfig
 }
 
 type providerLoginProfileKey struct {
@@ -215,11 +216,15 @@ func NewProviderLoginService(router *ProviderRouter, config ProviderLoginConfig)
 // SigninStart authorizes the original browser and returns a redirect only
 // after a matching committed native login transaction has been acknowledged.
 func (s *ProviderLoginService) SigninStart(ctx context.Context, request sso.SigninStartRequest, browser ProviderLoginBrowser) (out sso.SigninStartResult, err error) {
+	return s.startProviderTransaction(ctx, request, browser, nil)
+}
+
+func (s *ProviderLoginService) startProviderTransaction(ctx context.Context, request sso.SigninStartRequest, browser ProviderLoginBrowser, member *providerLoginMemberAdmission) (out sso.SigninStartResult, err error) {
 	if s == nil || s.router == nil || ctx == nil || request.Validate() != nil {
 		return out, sso.ErrInvalidInput
 	}
 	if browser.Origin != s.config.Origin || !browser.Network.IsValid() || browser.Network.Is4In6() ||
-		browser.Network.Zone() != "" || !providerID(browser.Device) || browser.FlowID == "" {
+		browser.Network.Zone() != "" || !providerID(browser.Device) || member == nil && browser.FlowID == "" {
 		return out, sso.ErrForbidden
 	}
 	if _, ok := s.callbacks[request.SuccessCallback.String()]; !ok {
@@ -235,8 +240,8 @@ func (s *ProviderLoginService) SigninStart(ctx context.Context, request sso.Sign
 			out, err = sso.SigninStartResult{}, sso.ErrUnavailable
 		}
 	}()
-	p := &providerLoginPhase{service: s, request: request, browser: browser}
-	if err := p.readBrowser(ctx); err != nil {
+	p := &providerLoginPhase{service: s, request: request, browser: browser, member: member}
+	if err := p.readOriginalBrowser(ctx); err != nil {
 		return out, providerError(ctx, err)
 	}
 	intent, err := p.requestIntent()
@@ -248,7 +253,7 @@ func (s *ProviderLoginService) SigninStart(ctx context.Context, request sso.Sign
 		return out, providerError(ctx, err)
 	}
 	p.registry = registry
-	key, wire, err := coordinator.ResolvePreparedRequestKey(ctx, s.requestScope(), request.IdempotencyKey, intent, s.caller(), p.registration(), p)
+	key, wire, err := coordinator.ResolvePreparedRequestKey(ctx, p.startScope(), request.IdempotencyKey, intent, p.startCaller(), p.registration(), p)
 	if err != nil {
 		// The generic request mapper masks contributor errors. Preserve only a
 		// denial observed by this invocation, never a dependency or commit error.
@@ -278,7 +283,7 @@ func (s *ProviderLoginService) SigninStart(ctx context.Context, request sso.Sign
 		return out, providerError(ctx, err)
 	}
 	if out.Completion.Outcome != identity.CommitOutcomeCommitted || out.Completion.Feature == nil ||
-		out.Completion.Feature.Operation != providerSigninOperation() || out.Completion.Feature.AfterVersion != 1 {
+		out.Completion.Feature.Operation != p.operation() || out.Completion.Feature.AfterVersion != 1 {
 		return out, identity.UnknownCommitError{CommandID: key.Admission.CommandID}
 	}
 	return p.committedRedirect(ctx, out)

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add opt-in static enterprise OIDC linking for an existing active member
+  using the original fresh password cookie and same-origin consent. Commit
+  the new provider credential, encrypted token deposit and lifecycle once;
+  leave session issuance to later ordinary sign-in.
+
 - Add opt-in first-login provisioning for enabled enterprise OIDC profiles.
   An exact verified-domain mailbox and never-linked subject create an ordinary
   member and session in the original callback transaction. Existing-account

@@ -39,7 +39,7 @@ func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.Sign
 	// Read fresh authority for this disclosure, separately from the original
 	// execution evidence. None of these reads renews the stored state lifetime.
 	fresh := *p
-	if err := fresh.readBrowser(ctx); err != nil {
+	if err := fresh.readOriginalBrowser(ctx); err != nil {
 		return out, providerError(ctx, err)
 	}
 	if _, err := fresh.requestIntent(); err != nil || fresh.intent != input.Intent {
@@ -63,11 +63,19 @@ func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.Sign
 		profile.issuer != input.Issuer || profile.authorizationEndpoint != input.AuthorizationEndpoint {
 		return out, sso.ErrForbidden
 	}
+	deadline := earlierLoginTime(selected.ValidUntil, input.Expires)
+	if fresh.member != nil {
+		authority, err := s.checkRetainedMember(ctx, input.Proof.OrganizationID, fresh.member.user, input.Link)
+		if err != nil {
+			return out, providerError(ctx, err)
+		}
+		deadline = earlierLoginTime(deadline, earlierLoginTime(authority.ValidUntil, fresh.member.observed.ValidUntil()))
+	}
 	redirect, err := profile.authorizationRedirect(state)
 	if err != nil {
 		return out, providerError(ctx, err)
 	}
-	if now := s.router.config.Clock.Now(); !now.Before(earlierLoginTime(selected.ValidUntil, input.Expires)) {
+	if now := s.router.config.Clock.Now(); !now.Before(deadline) {
 		return out, sso.ErrForbidden
 	}
 	if err := ctx.Err(); err != nil {

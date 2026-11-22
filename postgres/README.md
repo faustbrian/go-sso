@@ -94,7 +94,8 @@ An uncertain provider response remains unresolved and must not be exchanged
 again. None of these failures creates a session.
 
 This API installs no public HTTP route. Explicit linking of an existing local
-account and non-OIDC federation are separate workflows.
+account is an opt-in workflow, separate from anonymous sign-in and non-OIDC
+federation.
 
 For transport-owned callback parsing, `SigninProtocolProfile` selects the exact
 configured organization/provider pair and returns detached, secret-free public
@@ -103,6 +104,28 @@ case-sensitive; the returned protocol ID is the existing scoped lowercase
 alias, not the stored provider ID. This construction-time snapshot performs no
 I/O and supplies no freshness or admission authority. `SigninCallback` retains
 all current provider, browser, linked-member and session checks.
+
+#### Optional explicit account linking
+
+Construct `NewProviderLoginServiceWithLink` with the real native password
+session service, local credential admission profile and its retained cookie
+and CSRF keys. Install the identity account and retired-subject index history
+even if JIT is disabled. The callback uses the same installed static profile,
+capability, token-vault and audit/lifecycle histories as native sign-in.
+
+Call `LinkStart` only for an authenticated same-origin POST with the original
+fresh local password cookie and its CSRF proof, using the browser-session
+intent. This profile requires active membership of the provider's organization
+and known-empty factors. Return only the provider redirect from the committed
+start. Handle the provider query with `LinkCallback` and the same original
+cookie; the trusted transport supplies the configured return URI and browser
+context. The anonymous callback cannot complete this member transaction.
+
+The verified OIDC subject identifies a new credential, never a target user.
+No role, user, membership or session is created. The link advances the
+member's credential epoch; do not assume the original password cookie remains
+usable. A subsequent normal enterprise sign-in can resolve the new account to
+the same member, subject to the usual current provider and user policy.
 
 #### Optional repeat-login role synchronization
 

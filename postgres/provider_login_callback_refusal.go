@@ -80,7 +80,7 @@ func (p *providerLoginCallbackPhase) RestoreSSOOIDCPreparationRefusal(ctx contex
 		return false, identity.ForbiddenError{}
 	}
 	terminal, err := p.service.payload.openProviderLoginCallbackTerminal(ctx, row, refused.Terminal)
-	if err != nil || terminal.Metadata != p.found.Binding.Metadata {
+	if err != nil || !equalProviderLoginBindingMetadata(terminal.Metadata, p.found.Binding.Metadata) {
 		clear(refused.Terminal)
 		return false, identity.ForbiddenError{}
 	}
@@ -93,7 +93,7 @@ func (p *providerLoginCallbackPhase) CleanupSSOOIDCPreparationRefusal(ctx contex
 		return identity.ForbiddenError{}
 	}
 	binding, feature, _, err := w.FeatureScope(p)
-	if err != nil || feature != providerLoginCallbackRegistration() || binding.TenantID != p.service.config.TenantID ||
+	if err != nil || feature.Contributor != p.Descriptor() || feature.Operation != p.operation() || binding.TenantID != p.service.config.TenantID ||
 		!validProviderLoginCallbackDispositionScope(binding, p.found, p.authority.deadline) || !p.service.payload.validProviderLoginPendingBinding(p.found.Row, p.found.Binding) {
 		return identity.ForbiddenError{}
 	}

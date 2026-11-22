@@ -37,6 +37,7 @@ type providerLoginCallbackOutput struct {
 	Tokens     providerLoginPreparedTokens
 	RoleUpdate *providerLoginRoleUpdateWire `json:",omitempty"`
 	JIT        *providerLoginJITWire        `json:",omitempty"`
+	Link       *identity.AccountLinkChange  `json:",omitempty"`
 }
 
 const providerLoginCallbackCipherLimit = 192 << 10
@@ -75,6 +76,9 @@ func (p *providerLoginCallbackPhase) callbackOutputContext(generation uint64, pu
 }
 
 func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, generation uint64, admission risk.AuthenticationAdmission) ([]byte, error) {
+	if p != nil && p.member != nil {
+		return p.generateMemberAccepted(ctx, generation, admission)
+	}
 	if p == nil || p.issuer == nil || p.prepared != (session.PreparedIssuance{}) || generation == 0 {
 		return nil, identity.ForbiddenError{}
 	}
@@ -301,6 +305,16 @@ func (p *providerLoginCallbackPhase) restoreAccepted(ctx context.Context, genera
 	if providerLoginPayloadDecode(plain, &saved) != nil || saved.Schema != 1 || saved.ObservedAt.Before(p.found.Row.IssuedAt) || saved.ObservedAt.After(p.found.ObservedAt) ||
 		!saved.ValidUntil.After(saved.ObservedAt) || saved.ValidUntil.After(saved.ObservedAt.Add(20*time.Second)) || saved.ValidUntil.After(p.found.Row.ExpiresAt) ||
 		saved.Tokens.CallbackGeneration != generation || saved.Tokens.BindingWireDigest != p.found.BindingWireDigest {
+		return identity.ForbiddenError{}
+	}
+	if p.member != nil {
+		if err := p.restoreMemberAccepted(ctx, generation, digest, saved); err != nil {
+			return err
+		}
+		owned = true
+		return nil
+	}
+	if saved.Link != nil {
 		return identity.ForbiddenError{}
 	}
 	command, err := p.callbackCommandWithOutput(saved.Fields)

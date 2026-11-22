@@ -35,12 +35,19 @@ func (*providerLoginPhase) Descriptor() kernel.ContributorDescriptor {
 	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oidc-login-start", Version: 1}
 }
 
-func (*providerLoginPhase) FeatureOperations() []identity.FeatureOperation {
-	return []identity.FeatureOperation{providerSigninOperation()}
+func (p *providerLoginPhase) operation() identity.FeatureOperation {
+	if p.member != nil {
+		return providerExplicitLinkStartOperation()
+	}
+	return providerSigninOperation()
+}
+
+func (p *providerLoginPhase) FeatureOperations() []identity.FeatureOperation {
+	return []identity.FeatureOperation{p.operation()}
 }
 
 func (p *providerLoginPhase) registration() kernel.FeatureRegistration {
-	return kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: providerSigninOperation()}
+	return kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}
 }
 
 func (p *providerLoginPhase) matchesIntent(field identity.FeatureField) bool {
@@ -57,8 +64,12 @@ func (p *providerLoginPhase) command() (identity.Command, error) {
 	}
 	defer clear(frame)
 	digest := sha256.Sum256(frame)
-	return identity.NewFeaturePreAuthCommand(identity.FeatureCommandSpec{Binding: identity.CommandBinding(p.input.Command), Operation: providerSigninOperation(),
-		Fields: []identity.FeatureField{{Name: "sso.signin.input", Value: identity.FeatureValue{Kind: identity.FeatureBytes, Bytes: digest[:]}}}}, p.browser.FlowCookie)
+	spec := identity.FeatureCommandSpec{Binding: identity.CommandBinding(p.input.Command), Operation: p.operation(),
+		Fields: []identity.FeatureField{{Name: "sso.signin.input", Value: identity.FeatureValue{Kind: identity.FeatureBytes, Bytes: digest[:]}}}}
+	if p.member != nil {
+		return identity.NewFeatureSessionCommand(spec, p.member.browser.Session)
+	}
+	return identity.NewFeaturePreAuthCommand(spec, p.browser.FlowCookie)
 }
 
 func (p *providerLoginPhase) ValidateFeatureCommand(command identity.Command, plan kernel.CommandPlan) error {
@@ -69,7 +80,12 @@ func (p *providerLoginPhase) ValidateFeatureCommand(command identity.Command, pl
 	wanted, _ := expected.Feature()
 	actual, ok := command.Feature()
 	cookie, hasCookie := command.PreAuthCookie()
-	if !ok || !hasCookie || cookie != p.browser.FlowCookie || actual.Binding != wanted.Binding || actual.Operation != wanted.Operation ||
+	bearer, hasBearer := command.SessionToken()
+	matchingCredential := hasCookie && !hasBearer && cookie == p.browser.FlowCookie
+	if p.member != nil {
+		matchingCredential = !hasCookie && hasBearer && bearer == p.member.browser.Session
+	}
+	if !ok || !matchingCredential || actual.Binding != wanted.Binding || actual.Operation != wanted.Operation ||
 		len(actual.Fields) != 1 || actual.Fields[0].Name != wanted.Fields[0].Name || actual.Fields[0].Value.Kind != identity.FeatureBytes ||
 		!bytes.Equal(actual.Fields[0].Value.Bytes, wanted.Fields[0].Value.Bytes) {
 		return identity.ForbiddenError{}
@@ -79,7 +95,7 @@ func (p *providerLoginPhase) ValidateFeatureCommand(command identity.Command, pl
 		plan.Delivery != nil || plan.Capability != nil) {
 		return identity.ForbiddenError{}
 	}
-	return p.requireBrowser(p.flow, p.input.Started)
+	return p.requireStartBrowser(p.input, p.input.Started)
 }
 
 func (p *providerLoginPhase) ValidateFeaturePreparation(command identity.Command, plan kernel.CommandPlan) error {
@@ -118,8 +134,12 @@ func (p *providerLoginPhase) auditPlan() (kernel.AuditPlan, error) {
 	if err != nil {
 		return kernel.AuditPlan{}, err
 	}
+	actor := audit.ActorInput{Kind: audit.ActorService, ID: string(b.ActorID)}
+	if p.member != nil {
+		actor.Kind = audit.ActorHuman
+	}
 	seed, err := builder.Build(audit.RecordInput{Action: action, OccurredAt: p.input.Started, Outcome: audit.OutcomeSucceeded,
-		ReasonCode: "completed", Actor: audit.ActorInput{Kind: audit.ActorService, ID: string(b.ActorID)},
+		ReasonCode: "completed", Actor: actor,
 		Subject: audit.SubjectInput{Type: providerLoginSubject, ID: b.RecordID},
 		Context: audit.ContextInput{TenantID: string(b.TenantID), CorrelationID: b.CorrelationID},
 		Policy:  audit.PolicyMetadata{PolicyID: b.PolicyID, Version: strconv.FormatUint(b.PolicyVersion, 10)},
@@ -130,7 +150,7 @@ func (p *providerLoginPhase) auditPlan() (kernel.AuditPlan, error) {
 	if err != nil {
 		return kernel.AuditPlan{}, err
 	}
-	digest, err := kernel.FeatureAuditBindingDigest(b, providerSigninOperation(), providerLoginSubject, seed)
+	digest, err := kernel.FeatureAuditBindingDigest(b, p.operation(), providerLoginSubject, seed)
 	if err != nil {
 		return kernel.AuditPlan{}, err
 	}
@@ -152,7 +172,11 @@ func (p *providerLoginPhase) checkPrimary(ctx context.Context, work kernel.Work,
 		GlobalVersion: p.input.GlobalVersion, TenantVersion: p.input.TenantVersion}); err != nil {
 		return err
 	}
-	if err := sessionpg.RequirePreAuth(ctx, work, p.service.config.Session, p.flow); err != nil {
+	if p.member != nil {
+		if err := p.requireLinkStartAuthority(ctx, work, command); err != nil {
+			return err
+		}
+	} else if err := sessionpg.RequirePreAuth(ctx, work, p.service.config.Session, p.flow); err != nil {
 		return err
 	}
 	authority, err := p.input.authority()
@@ -166,10 +190,10 @@ func (p *providerLoginPhase) checkPrimary(ctx context.Context, work kernel.Work,
 	if err != nil {
 		return err
 	}
-	if now.Before(p.input.Started) || !now.Before(p.input.Expires) {
+	if now.Before(p.input.Started) || !now.Before(p.input.Expires) || p.member != nil && !now.Before(p.input.MemberReadUntil) {
 		return identity.ForbiddenError{}
 	}
-	return p.requireBrowser(p.flow, now)
+	return p.requireStartBrowser(p.input, now)
 }
 
 func (p *providerLoginPhase) AdmitFeaturePreparation(ctx context.Context, work kernel.Work, command identity.Command) error {
@@ -203,7 +227,7 @@ func (p *providerLoginPhase) ApplyFeature(ctx context.Context, work kernel.Work,
 	if err := p.service.payload.Issuer.Stage(ctx, work, output.Issuance); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	return identity.FeatureReceipt{Operation: providerSigninOperation(), AfterVersion: 1}, nil
+	return identity.FeatureReceipt{Operation: p.operation(), AfterVersion: 1}, nil
 }
 
 // Restore runs before the coordinator enters the SQL transaction. Reconfirming
@@ -253,7 +277,7 @@ func (a providerLoginAdmission) Check(ctx context.Context) error {
 	now := a.phase.service.router.config.Clock.Now().UTC()
 	input := a.phase.input
 	if now.Before(input.Started) || !now.Before(input.Expires) ||
-		!now.Before(earlierLoginTime(input.RouteValidUntil, input.Organization.ValidUntil)) {
+		!now.Before(earlierLoginTime(input.RouteValidUntil, input.Organization.ValidUntil)) || a.phase.member != nil && !now.Before(input.MemberReadUntil) {
 		return identity.ForbiddenError{}
 	}
 	return a.admission.CheckAt(ctx, now)
@@ -272,9 +296,13 @@ func (p *providerLoginPhase) PrepareFeatureAdmission(ctx context.Context, comman
 	}
 	b := identity.CommandBinding(p.input.Command)
 	scope, subject := p.riskScope()
+	actor := audit.ActorInput{Kind: audit.ActorAnonymous}
+	if p.member != nil {
+		actor = audit.ActorInput{Kind: audit.ActorHuman, ID: string(b.ActorID)}
+	}
 	result, err := p.service.config.Risk.Evaluation.Evaluate(ctx, risk.EvaluateRequest{Context: scope, Phase: risk.NonIssuing,
 		Subject: subject, Attribution: &risk.DecisionAttribution{CommandID: b.CommandID, CorrelationID: b.CommandID,
-			Actor: audit.ActorInput{Kind: audit.ActorAnonymous}, Subject: identity.SecurityAuthenticationAttempt, SubjectID: string(b.CommandID)}})
+			Actor: actor, Subject: identity.SecurityAuthenticationAttempt, SubjectID: string(b.CommandID)}})
 	if err != nil {
 		return nil, identity.UnavailableError{}
 	}

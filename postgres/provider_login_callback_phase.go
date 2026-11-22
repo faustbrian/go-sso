@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/faustbrian/go-audit"
+	"github.com/faustbrian/go-authorization/v3"
 	identity "github.com/faustbrian/go-identity"
 	kernel "github.com/faustbrian/go-identity/postgres"
 	"github.com/faustbrian/go-identity/risk"
@@ -42,6 +43,7 @@ type providerLoginCallbackExecution struct {
 	tokens     providerLoginPreparedTokens
 	roleUpdate organizationpg.ProviderRoleGrantUpdate
 	jit        *providerLoginJITExecution
+	link       *kernel.SSOOIDCExplicitLinkIntent
 	terminal   []byte
 	generation uint64
 	digest     [32]byte
@@ -62,22 +64,31 @@ func providerLoginCallbackRegistration() kernel.FeatureRegistration {
 
 func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Time, auditRetention uint64, grant kernel.CapabilityPlan, contributors []kernel.ContributorDescriptor) (kernel.CommandPlan, error) {
 	registration := providerLoginCallbackRegistration()
+	lifecycle := providerLoginCallbackLifecycle()
+	action, retention, actor := "identity.sso.login", "protected", audit.ActorService
+	if op := kernel.SSOOIDCExplicitLinkCallbackOperation(); binding.SchemaID == op.SchemaID {
+		if binding.ActorKind != authorization.SubjectUser || string(binding.ActorID) != string(binding.UserID) {
+			return kernel.CommandPlan{}, identity.ForbiddenError{}
+		}
+		registration.Operation = op
+		lifecycle.EventType = "enterprise_provider.account_linked.v1"
+		action, retention, actor = "identity.account.link", "standard", audit.ActorHuman
+	}
 	oneUse := kernel.ContributorDescriptor{Owner: "capability/postgres", ContractID: "capability.one-use", Version: 1}
 	if binding.ValidateFor(registration.Operation) != nil || occurred.IsZero() || auditRetention == 0 || grant.Purpose != providerOIDCCallback ||
 		grant.MaxUses != 1 || !occurred.Before(grant.ExpiresAt) || len(contributors) != 5 || contributors[3] != registration.Contributor || contributors[4] != oneUse {
 		return kernel.CommandPlan{}, identity.ForbiddenError{}
 	}
-	const action = "identity.sso.login"
 	builder, err := audit.NewBuilder(audit.BuilderConfig{IDGenerator: func() (string, error) { return "sso-login-callback-declaration", nil }})
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
 	auditSeed, err := builder.Build(audit.RecordInput{OccurredAt: occurred, Action: action, Outcome: audit.OutcomeSucceeded, ReasonCode: "completed",
-		Actor: audit.ActorInput{Kind: audit.ActorService, ID: string(binding.ActorID)}, Subject: audit.SubjectInput{Type: providerLoginSubject, ID: binding.RecordID},
+		Actor: audit.ActorInput{Kind: actor, ID: string(binding.ActorID)}, Subject: audit.SubjectInput{Type: providerLoginSubject, ID: binding.RecordID},
 		Context: audit.ContextInput{TenantID: string(binding.TenantID), CorrelationID: binding.CorrelationID},
 		Policy:  audit.PolicyMetadata{PolicyID: binding.PolicyID, Version: strconv.FormatUint(binding.PolicyVersion, 10)},
 		Changes: audit.ChangeSetInput{Redacted: true}, Attributes: map[string]string{
-			"identity.profile": "identity.security.v1", "command.id": string(binding.CommandID), "retention.class": "protected",
+			"identity.profile": "identity.security.v1", "command.id": string(binding.CommandID), "retention.class": retention,
 			"aggregate.type": providerLoginSubject, "aggregate.id": binding.RecordID, "aggregate.before_version": "1", "aggregate.after_version": "2",
 		}})
 	if err != nil {
@@ -87,9 +98,8 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
-	lifecycle := providerLoginCallbackLifecycle()
 	return kernel.CommandPlan{Contributors: slices.Clone(contributors), Feature: &registration, SubjectType: providerLoginSubject, Capability: &grant, Lifecycle: &lifecycle,
-		Audits: []kernel.AuditPlan{{EventType: action, SchemaVersion: 1, BindingDigest: digest, RetentionClass: "protected", RetentionPolicyVersion: auditRetention,
+		Audits: []kernel.AuditPlan{{EventType: action, SchemaVersion: 1, BindingDigest: digest, RetentionClass: retention, RetentionPolicyVersion: auditRetention,
 			Required: true, RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384}}}, nil
 }
 
@@ -97,8 +107,8 @@ func (*providerLoginCallbackPhase) Descriptor() kernel.ContributorDescriptor {
 	return providerLoginCallbackDescriptor()
 }
 
-func (*providerLoginCallbackPhase) FeatureOperations() []identity.FeatureOperation {
-	return []identity.FeatureOperation{providerOIDCCallbackOperation()}
+func (p *providerLoginCallbackPhase) FeatureOperations() []identity.FeatureOperation {
+	return []identity.FeatureOperation{p.operation()}
 }
 
 func (p *providerLoginCallbackPhase) plan() (kernel.CommandPlan, error) {
@@ -113,7 +123,7 @@ func (p *providerLoginCallbackPhase) plan() (kernel.CommandPlan, error) {
 }
 
 func (p *providerLoginCallbackPhase) ValidateSSOOIDCSigninConsumption(command identity.Command, grant kernel.CapabilityPlan) error {
-	if p == nil || p.service == nil || command == (identity.Command{}) || grant != p.grant {
+	if p == nil || p.service == nil || p.member != nil || command == (identity.Command{}) || grant != p.grant {
 		return identity.ForbiddenError{}
 	}
 	if command == p.command {
@@ -129,6 +139,16 @@ func (p *providerLoginCallbackPhase) ValidateSSOOIDCSigninConsumption(command id
 	return nil
 }
 
+func (p *providerLoginCallbackPhase) ValidateSSOOIDCExplicitLinkConsumption(command identity.Command, grant kernel.CapabilityPlan) error {
+	if p == nil || p.service == nil || p.member == nil || grant != p.grant || command == (identity.Command{}) {
+		return identity.ForbiddenError{}
+	}
+	if command == p.command || p.execution != nil && p.execution.link != nil && command == p.execution.command {
+		return nil
+	}
+	return identity.ForbiddenError{}
+}
+
 func equalProviderLoginSession(a, b session.Session) bool {
 	af, aErr := sessionpg.SSOOIDCSigninSessionFields(a)
 	bf, bErr := sessionpg.SSOOIDCSigninSessionFields(b)
@@ -141,6 +161,9 @@ func (p *providerLoginCallbackPhase) ValidateFeatureCommand(command identity.Com
 		plan.Capability == nil || plan.Lifecycle == nil || *plan.Lifecycle != *expected.Lifecycle ||
 		!reflect.DeepEqual(plan.Audits, expected.Audits) || !slices.Equal(plan.Contributors, expected.Contributors) {
 		return identity.ForbiddenError{}
+	}
+	if p.member != nil {
+		return p.ValidateSSOOIDCExplicitLinkConsumption(command, *plan.Capability)
 	}
 	return p.ValidateSSOOIDCSigninConsumption(command, *plan.Capability)
 }
@@ -224,7 +247,7 @@ func (p *providerLoginCallbackPhase) RestoreFeaturePreparation(ctx context.Conte
 }
 
 func (p *providerLoginCallbackPhase) checkExecutionAt(ctx context.Context, work kernel.Work, command identity.Command) error {
-	if p == nil || p.execution == nil || p.effect == nil || command != p.execution.command {
+	if p == nil || p.execution == nil || p.member == nil && p.effect == nil || command != p.execution.command {
 		return identity.ForbiddenError{}
 	}
 	now, err := work.DatabaseTime(ctx)
@@ -271,6 +294,9 @@ func (p *providerLoginCallbackPhase) ApplyFeature(ctx context.Context, work kern
 	if err != nil || generation != p.execution.generation || sha256.Sum256(wire) != p.execution.digest {
 		return identity.FeatureReceipt{}, identity.ForbiddenError{}
 	}
+	if p.member != nil {
+		return p.applyMemberCallback(ctx, work, command)
+	}
 	if p.execution.jit != nil {
 		if err := p.applyProviderLoginJIT(ctx, work, command); err != nil {
 			return identity.FeatureReceipt{}, err
@@ -314,6 +340,9 @@ func (p *providerLoginCallbackPhase) UpdateSSOOIDCOrganization(ctx context.Conte
 func (p *providerLoginCallbackPhase) CheckFeatureCommit(ctx context.Context, work kernel.Work, command identity.Command) error {
 	if err := p.checkExecutionAt(ctx, work, command); err != nil {
 		return err
+	}
+	if p.member != nil {
+		return p.requireMemberCallbackAuthority(ctx, work, p, command, false)
 	}
 	if p.execution.jit != nil {
 		if _, err := work.SSOOIDCJITUser(ctx, p, command); err != nil {

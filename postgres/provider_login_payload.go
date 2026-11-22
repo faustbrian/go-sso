@@ -19,12 +19,15 @@ import (
 	"time"
 	"unicode/utf8"
 
+	authentication "github.com/faustbrian/go-authentication/v2"
+	"github.com/faustbrian/go-authorization/v3"
 	capabilitypg "github.com/faustbrian/go-capability/postgres/identity"
 	"github.com/faustbrian/go-capability/v2"
 	identity "github.com/faustbrian/go-identity"
 	kernel "github.com/faustbrian/go-identity/postgres"
 	"github.com/faustbrian/go-identity/risk"
 	"github.com/faustbrian/go-identity/session"
+	sessionpg "github.com/faustbrian/go-identity/session/postgres"
 	envelope "github.com/faustbrian/go-secret-envelope/v2"
 )
 
@@ -46,6 +49,28 @@ type providerLoginPayloadInput struct {
 	IssuedAt, ExpiresAt                                       time.Time
 	BrowserOrigin, SuccessCallback, ErrorCallback             string
 	Remember                                                  session.RememberPolicySpec
+	Link                                                      *providerLoginMemberIntent `json:",omitempty"`
+}
+
+type providerLoginMemberIntent struct {
+	OriginalSession                                        []identity.FeatureField
+	ConsentedAt                                            time.Time
+	OrganizationVersion, OrganizationCredentialVersion     uint64
+	MembershipVersion, AuthorizationVersion, FactorVersion uint64
+}
+
+// These values can originate from separately authenticated envelopes. Compare
+// the retained member consent itself, not the address of either projection.
+func equalProviderLoginPayloadInput(a, b providerLoginPayloadInput) bool {
+	a.IssuedAt, a.ExpiresAt = a.IssuedAt.UTC(), a.ExpiresAt.UTC()
+	b.IssuedAt, b.ExpiresAt = b.IssuedAt.UTC(), b.ExpiresAt.UTC()
+	aLink, bLink := a.Link, b.Link
+	a.Link, b.Link = nil, nil
+	return a == b && reflect.DeepEqual(aLink, bLink)
+}
+
+func providerExplicitLinkStartOperation() identity.FeatureOperation {
+	return kernel.SSOOIDCExplicitLinkStartOperation()
 }
 
 // Only immutable columns available after the tenant/key-version/state-digest
@@ -98,6 +123,12 @@ type providerLoginBindingMetadata struct {
 	StateDigest, PKCECommitment [32]byte
 }
 
+func equalProviderLoginBindingMetadata(a, b providerLoginBindingMetadata) bool {
+	aInput, bInput := a.Input, b.Input
+	a.Input, b.Input = providerLoginPayloadInput{}, providerLoginPayloadInput{}
+	return a == b && equalProviderLoginPayloadInput(aInput, bInput)
+}
+
 // The callback proof never appears in the public redirect or an indexed
 // column. The binding envelope is its retained ciphertext owner; the raw
 // verifier is deliberately absent and has a separately erasable envelope.
@@ -123,6 +154,10 @@ func (providerLoginPayloadInput) Format(s fmt.State, _ rune) {
 	_, _ = io.WriteString(s, "postgres.providerLoginPayloadInput(redacted)")
 }
 
+func (providerLoginMemberIntent) Format(s fmt.State, _ rune) {
+	_, _ = io.WriteString(s, "postgres.providerLoginMemberIntent(redacted)")
+}
+
 func (providerLoginRowIdentity) Format(s fmt.State, _ rune) {
 	_, _ = io.WriteString(s, "postgres.providerLoginRowIdentity(redacted)")
 }
@@ -141,10 +176,17 @@ func (providerLoginPayloadOutput) Format(s fmt.State, _ rune) {
 
 func (i providerLoginPayloadInput) validate() error {
 	op := identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.signin-start", SchemaID: "identity.sso.signin-start.oidc-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired, SubjectRequirement: identity.FeatureSubjectAnonymousFlow}
-	if i.Command.ValidateFor(op) != nil || i.Command.RecordID != string(i.Command.CommandID) || i.Command.UserID != "" || i.InputFingerprint == ([32]byte{}) || i.ProviderVersion == 0 || i.CredentialGeneration == 0 || i.MappingVersion == 0 {
+	if i.Link != nil {
+		op = providerExplicitLinkStartOperation()
+	}
+	if i.Command.ValidateFor(op) != nil || i.Command.RecordID != string(i.Command.CommandID) || i.InputFingerprint == ([32]byte{}) || i.ProviderVersion == 0 || i.CredentialGeneration == 0 || i.MappingVersion == 0 {
 		return identity.ForbiddenError{}
 	}
-	if _, err := identity.ParsePreAuthTransactionID(i.Command.AnonymousFlowID); err != nil {
+	if i.Link == nil {
+		if _, err := identity.ParsePreAuthTransactionID(i.Command.AnonymousFlowID); err != nil {
+			return identity.ForbiddenError{}
+		}
+	} else if i.Command.ActorKind != authorization.SubjectUser || string(i.Command.ActorID) != string(i.Command.UserID) {
 		return identity.ForbiddenError{}
 	}
 	for _, value := range []string{i.OrganizationID, i.ProviderID} {
@@ -164,6 +206,55 @@ func (i providerLoginPayloadInput) validate() error {
 		return identity.ForbiddenError{}
 	}
 	if !providerLoginPayloadTime(i.IssuedAt) || !providerLoginPayloadTime(i.ExpiresAt) || !i.ExpiresAt.After(i.IssuedAt) || i.ExpiresAt.Sub(i.IssuedAt) > 10*time.Minute {
+		return identity.ForbiddenError{}
+	}
+	if i.Link != nil {
+		return i.Link.validate(i.Command, i.IssuedAt, i.ExpiresAt)
+	}
+	return nil
+}
+
+func (i providerLoginMemberIntent) validate(binding identity.CommandBinding, issuedAt, expiresAt time.Time) error {
+	if i.OrganizationVersion == 0 || i.OrganizationCredentialVersion == 0 || i.MembershipVersion == 0 || i.AuthorizationVersion == 0 || i.FactorVersion == 0 ||
+		i.ConsentedAt.IsZero() || i.ConsentedAt.Location() != time.UTC || !i.ConsentedAt.Truncate(time.Second).Equal(issuedAt) || !i.ConsentedAt.Before(expiresAt) {
+		return identity.ForbiddenError{}
+	}
+	original, err := sessionpg.OriginalSessionFromFields(binding.TenantID, binding.UserID, i.OriginalSession)
+	if err != nil {
+		return identity.ForbiddenError{}
+	}
+	canonical, err := sessionpg.OriginalSessionFields(original)
+	if err != nil || !reflect.DeepEqual(canonical, i.OriginalSession) {
+		return identity.ForbiddenError{}
+	}
+	spec, err := original.Bindings()
+	if err != nil {
+		return identity.ForbiddenError{}
+	}
+	authority, err := spec.Authority.Bindings()
+	if err != nil || authority.Organization.Present || authority.Factor.Present || authority.Passkey.Present {
+		return identity.ForbiddenError{}
+	}
+	if _, continued := original.CredentialContinuation(); continued {
+		return identity.ForbiddenError{}
+	}
+	if _, err := original.CSRFState().Bindings(); err != nil {
+		return identity.ForbiddenError{}
+	}
+	auth := spec.Authentication
+	if auth.Kind != session.AuthenticationVerified || auth.Proof.Method != "password" || auth.Proof.Assurance != authentication.AssuranceSingleFactor || auth.Proof.Purpose != "session-issue" {
+		return identity.ForbiddenError{}
+	}
+	// The grant's second-aligned time can precede a real session issued earlier
+	// in the same second. Check the authenticated original consent instant.
+	lifetime, err := original.Lifetime(i.ConsentedAt)
+	if err != nil || !lifetime.Fresh || expiresAt.After(lifetime.ExpiresAt) {
+		return identity.ForbiddenError{}
+	}
+	policy, err := spec.Remember.Bindings()
+	// Session freshness belongs to the original authentication and remember
+	// policy, not the historical issuance proof's expiry (session.Lifetime).
+	if err != nil || expiresAt.After(auth.Proof.IssuedAt.Add(policy.FreshFor)) {
 		return identity.ForbiddenError{}
 	}
 	return nil
@@ -335,7 +426,11 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 	defer clear(plainMetadata)
 	metadataDigest := sha256.Sum256(plainMetadata)
 	b := input.Command
-	issued, err := c.Issuer.Prepare(ctx, b, []capability.Payload{{Version: 1, Issuer: c.CapabilityIssuer, Audiences: []string{c.Audience}, Subject: b.AnonymousFlowID, Tenant: string(b.TenantID), Resource: b.RecordID, CorrelationID: b.CorrelationID, Operation: "identity.sso.oidc-callback", IssuedAt: input.IssuedAt, NotBefore: input.IssuedAt, ExpiresAt: input.ExpiresAt, MaxUses: 1, Caveats: map[string]string{"identity.sso.rp.binding": base64.RawURLEncoding.EncodeToString(metadataDigest[:])}}})
+	subject := b.AnonymousFlowID
+	if input.Link != nil {
+		subject = string(b.UserID)
+	}
+	issued, err := c.Issuer.Prepare(ctx, b, []capability.Payload{{Version: 1, Issuer: c.CapabilityIssuer, Audiences: []string{c.Audience}, Subject: subject, Tenant: string(b.TenantID), Resource: b.RecordID, CorrelationID: b.CorrelationID, Operation: "identity.sso.oidc-callback", IssuedAt: input.IssuedAt, NotBefore: input.IssuedAt, ExpiresAt: input.ExpiresAt, MaxUses: 1, Caveats: map[string]string{"identity.sso.rp.binding": base64.RawURLEncoding.EncodeToString(metadataDigest[:])}}})
 	if err != nil {
 		return nil, err
 	}

@@ -55,10 +55,17 @@ func (providerLoginPreparedTokens) Format(s fmt.State, _ rune) {
 
 func providerLoginTokenCallback(input providerLoginPayloadInput, callback identity.CommandID) identity.CommandBinding {
 	b := input.Command
-	op := providerOIDCCallbackOperation()
+	op := providerLoginCallbackPayloadOperation(input)
 	b.CommandID, b.CorrelationID = callback, string(callback)
 	b.OperationID, b.SchemaID, b.SchemaVersion = op.OperationID, op.SchemaID, op.SchemaVersion
 	return b
+}
+
+func providerLoginCallbackPayloadOperation(input providerLoginPayloadInput) identity.FeatureOperation {
+	if input.Link != nil {
+		return kernel.SSOOIDCExplicitLinkCallbackOperation()
+	}
+	return providerOIDCCallbackOperation()
 }
 
 func providerLoginTokenScopes(scopes []string) bool {
@@ -83,9 +90,12 @@ func (s *ProviderLoginService) validateProviderLoginTokenMetadata(p providerLogi
 		p.BindingDigest == ([32]byte{}) || p.BindingWireDigest == ([32]byte{}) || p.StateKey == 0 || p.StateDigest == ([32]byte{}) ||
 		p.Callback.CommandID == p.Input.Command.CommandID ||
 		p.Callback != providerLoginTokenCallback(p.Input, p.Callback.CommandID) ||
-		p.Callback.ValidateFor(providerOIDCCallbackOperation()) != nil ||
+		p.Callback.ValidateFor(providerLoginCallbackPayloadOperation(p.Input)) != nil ||
 		p.Account.Validate(p.Input.Command.TenantID, p.Account.UserID) != nil ||
 		p.Account.Issuer != p.Input.Issuer || p.SocialLinkVersion == 0 {
+		return identity.ForbiddenError{}
+	}
+	if p.Input.Link != nil && (p.Account.UserID != p.Callback.UserID || p.Account.Version != 1 || p.SocialLinkVersion != 2) {
 		return identity.ForbiddenError{}
 	}
 	profile, ok := s.profiles[providerLoginProfileKey{organization: organization.ID(p.Input.OrganizationID), provider: sso.ProviderID(p.Input.ProviderID)}]
@@ -140,7 +150,16 @@ func providerLoginTokenFailure(ctx context.Context) error {
 // prepareProviderLoginTokens consumes every shared TokenSet alias, including
 // on rejection. The command already freezes the resolved existing account;
 // this helper performs no lookup, network, authorization or transaction work.
-func (s *ProviderLoginService) prepareProviderLoginTokens(ctx context.Context, found providerLoginCallbackLookup, command identity.Command, generation uint64, tokens oauth.TokenSet) (out providerLoginPreparedTokens, err error) {
+func (s *ProviderLoginService) prepareProviderLoginTokens(ctx context.Context, found providerLoginCallbackLookup, command identity.Command, generation uint64, tokens oauth.TokenSet) (providerLoginPreparedTokens, error) {
+	account, err := kernel.SSOOIDCSigninAccount(command)
+	if err != nil || found.Binding.Metadata.Input.Link != nil {
+		tokens.Destroy()
+		return providerLoginPreparedTokens{}, identity.ForbiddenError{}
+	}
+	return s.prepareProviderLoginAccountTokens(ctx, found, command, generation, tokens, account.Account, account.SocialLinkVersion)
+}
+
+func (s *ProviderLoginService) prepareProviderLoginAccountTokens(ctx context.Context, found providerLoginCallbackLookup, command identity.Command, generation uint64, tokens oauth.TokenSet, account identity.Account, linkVersion uint64) (out providerLoginPreparedTokens, err error) {
 	defer tokens.Destroy()
 	defer func() {
 		if recover() != nil {
@@ -155,10 +174,9 @@ func (s *ProviderLoginService) prepareProviderLoginTokens(ctx context.Context, f
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
-	account, err := kernel.SSOOIDCSigninAccount(command)
 	feature, ok := command.Feature()
 	metadata := found.Binding.Metadata
-	if err != nil || !ok || feature.Operation != providerOIDCCallbackOperation() || metadata.Schema != 1 ||
+	if !ok || feature.Operation != providerLoginCallbackPayloadOperation(metadata.Input) || metadata.Schema != 1 ||
 		feature.Binding != providerLoginTokenCallback(metadata.Input, metadata.CallbackCommand) {
 		return out, identity.ForbiddenError{}
 	}
@@ -170,7 +188,7 @@ func (s *ProviderLoginService) prepareProviderLoginTokens(ctx context.Context, f
 	p := providerLoginPreparedTokens{
 		Input: metadata.Input, Callback: feature.Binding, CallbackGeneration: generation,
 		BindingDigest: sha256.Sum256(bound), BindingWireDigest: found.BindingWireDigest, StateKey: metadata.StateKey, StateDigest: metadata.StateDigest,
-		Account: account.Account, SocialLinkVersion: account.SocialLinkVersion,
+		Account: account, SocialLinkVersion: linkVersion,
 		RequestedScopes: tokens.RequestedScopes(), GrantedScopes: tokens.GrantedScopes(), ScopeReported: tokens.ScopeReported(),
 		ReceivedAt: tokens.ReceivedAt().UTC(), AccessExpiresAt: tokens.ExpiresAt().UTC(), Version: 1,
 	}
@@ -267,6 +285,16 @@ func providerLoginTokenOutputMatches(prepared, original, current uint64, authent
 // ciphertext, before entering Work and pass that exact output's digest. Envelope
 // providers can perform network I/O, so no Encrypt/Decrypt runs under SQL locks.
 func (s *ProviderLoginService) persistProviderLoginTokens(ctx context.Context, work kernel.Work, owner kernel.FeatureExecutionContributor, command identity.Command, p providerLoginPreparedTokens, outputDigest [32]byte) error {
+	if p.Input.Link != nil {
+		return identity.ForbiddenError{}
+	}
+	return s.persistProviderLoginAccountTokens(ctx, work, owner, command, p, outputDigest, nil)
+}
+
+// Only member Apply passes its immediately preceding kernel link result. That
+// native writer requires original consumption and already holds the account and
+// credential locks; no independently read or caller-provided account is used.
+func (s *ProviderLoginService) persistProviderLoginAccountTokens(ctx context.Context, work kernel.Work, owner kernel.FeatureExecutionContributor, command identity.Command, p providerLoginPreparedTokens, outputDigest [32]byte, linked *kernel.ProviderAccountAdmission) error {
 	if err := work.RequireFeatureCommand(ctx, owner, command); err != nil {
 		return err
 	}
@@ -284,16 +312,20 @@ func (s *ProviderLoginService) persistProviderLoginTokens(ctx context.Context, w
 	if err != nil || !outputMatches {
 		return identity.ForbiddenError{}
 	}
-	consumed, err := work.SSOOIDCSigninConsumption(owner)
-	if err != nil || consumed.Command != binding || consumed.Generation != generation {
+	if linked == nil {
+		consumed, err := work.SSOOIDCSigninConsumption(owner)
+		if err != nil || consumed.Command != binding || consumed.Generation != generation {
+			return identity.ForbiddenError{}
+		}
+		account, err := kernel.SSOOIDCSigninAccount(command)
+		if err != nil || account.Account != p.Account || account.SocialLinkVersion != p.SocialLinkVersion {
+			return identity.ForbiddenError{}
+		}
+		if _, err := work.RequireSSOOIDCSigninProviderAccount(ctx, owner, command); err != nil {
+			return err
+		}
+	} else if p.Input.Link == nil || linked.Account != p.Account || linked.SocialLinkVersion != p.SocialLinkVersion {
 		return identity.ForbiddenError{}
-	}
-	account, err := kernel.SSOOIDCSigninAccount(command)
-	if err != nil || account.Account != p.Account || account.SocialLinkVersion != p.SocialLinkVersion {
-		return identity.ForbiddenError{}
-	}
-	if _, err := work.RequireSSOOIDCSigninProviderAccount(ctx, owner, command); err != nil {
-		return err
 	}
 	if err := s.validateProviderLoginTokenMetadata(p); err != nil {
 		return err

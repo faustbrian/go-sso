@@ -49,16 +49,22 @@ func (s *ProviderLoginService) prepareProviderLoginCallbackGrant(ctx context.Con
 	clear(frame)
 	original := metadata.Input.Command
 	payload := grant.Payload()
+	subject := original.AnonymousFlowID
+	prepare := s.payload.Issuer.PrepareSSOOIDCSigninConsumption
+	if metadata.Input.Link != nil {
+		subject = string(original.UserID)
+		prepare = s.payload.Issuer.PrepareSSOOIDCExplicitLinkConsumption
+	}
 	use := capability.Use{
 		Issuer: s.payload.CapabilityIssuer, Audience: s.payload.Audience,
-		Subject: original.AnonymousFlowID, Tenant: string(s.config.TenantID),
+		Subject: subject, Tenant: string(s.config.TenantID),
 		Resource: original.RecordID, Operation: providerOIDCCallback,
 		Caveats: map[string]string{"identity.sso.rp.binding": base64.RawURLEncoding.EncodeToString(digest[:])},
 	}
 	if len(payload.Caveats) != 1 || !payload.IssuedAt.Equal(metadata.Input.IssuedAt) || !payload.ExpiresAt.Equal(metadata.Input.ExpiresAt) || grant.Authorize(use) != nil {
 		return kernel.CapabilityPlan{}, sso.ErrForbidden
 	}
-	plan, err := s.payload.Issuer.PrepareSSOOIDCSigninConsumption(ctx, original, proof, stored.Plan.Grant.ReplayKeyVersion)
+	plan, err := prepare(ctx, original, proof, stored.Plan.Grant.ReplayKeyVersion)
 	if err != nil {
 		return kernel.CapabilityPlan{}, providerError(ctx, err)
 	}

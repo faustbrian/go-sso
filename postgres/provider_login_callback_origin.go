@@ -13,7 +13,7 @@ import (
 // route's authority. The authenticated login row intentionally omits the full
 // organization-owned proof; selecting today's route could substitute it.
 func (s *ProviderLoginService) readProviderLoginCallbackOrigin(ctx context.Context, found providerLoginCallbackLookup, authenticatedBrowser session.PreAuthTransaction) (providerLoginStartInput, error) {
-	if s == nil || ctx == nil || found.CompletedAt != nil {
+	if s == nil || ctx == nil || found.CompletedAt != nil || found.Binding.Metadata.Input.Link != nil {
 		return providerLoginStartInput{}, sso.ErrForbidden
 	}
 	flow, err := authenticatedBrowser.Bindings()
@@ -21,9 +21,15 @@ func (s *ProviderLoginService) readProviderLoginCallbackOrigin(ctx context.Conte
 		return providerLoginStartInput{}, sso.ErrForbidden
 	}
 	phase := &providerLoginPhase{service: s, browser: ProviderLoginBrowser{FlowID: flow.Binding.ID}}
+	return s.readProviderLoginCallbackStart(ctx, found, phase)
+}
+
+// Read through the elected original actor and start registration. The member
+// caller must authenticate the original cookie before constructing the phase.
+func (s *ProviderLoginService) readProviderLoginCallbackStart(ctx context.Context, found providerLoginCallbackLookup, phase *providerLoginPhase) (providerLoginStartInput, error) {
 	want := found.Binding.Metadata.Input
 	start := want.Command
-	if start != phase.commandBinding(found.Row.StartCommandID) || start.ValidateFor(providerSigninOperation()) != nil {
+	if start != phase.commandBinding(found.Row.StartCommandID) || start.ValidateFor(phase.operation()) != nil {
 		return providerLoginStartInput{}, sso.ErrForbidden
 	}
 	coordinator, _, err := s.coordinator(phase)
@@ -32,10 +38,14 @@ func (s *ProviderLoginService) readProviderLoginCallbackOrigin(ctx context.Conte
 	}
 	query := identity.RecoveryQuery{
 		CommandID: start.CommandID, TenantID: start.TenantID, ActorID: start.ActorID, ActorKind: start.ActorKind,
-		AnonymousFlowID: start.AnonymousFlowID, OperationID: start.OperationID, RecordID: start.RecordID,
+		UserID: start.UserID, AnonymousFlowID: start.AnonymousFlowID, OperationID: start.OperationID, RecordID: start.RecordID,
 	}
-	caller := s.caller()
-	caller.Request.Resource = authorization.Resource{Type: "identity.anonymous-flow", ID: authorization.ResourceID(start.AnonymousFlowID)}
+	caller := phase.startCaller()
+	if phase.member == nil {
+		caller.Request.Resource = authorization.Resource{Type: "identity.anonymous-flow", ID: authorization.ResourceID(start.AnonymousFlowID)}
+	} else {
+		caller.Request.Resource = authorization.Resource{Type: "identity.user", ID: authorization.ResourceID(start.UserID)}
+	}
 	key, wire, err := coordinator.QueryRequestPreparation(ctx, query, caller, phase.registration(), phase)
 	if err != nil {
 		return providerLoginStartInput{}, providerError(ctx, err)
@@ -45,10 +55,7 @@ func (s *ProviderLoginService) readProviderLoginCallbackOrigin(ctx context.Conte
 	if err != nil {
 		return providerLoginStartInput{}, providerError(ctx, err)
 	}
-	got := original.payload()
-	got.IssuedAt, got.ExpiresAt = got.IssuedAt.UTC(), got.ExpiresAt.UTC()
-	want.IssuedAt, want.ExpiresAt = want.IssuedAt.UTC(), want.ExpiresAt.UTC()
-	if got != want {
+	if !equalProviderLoginPayloadInput(original.payload(), want) {
 		return providerLoginStartInput{}, sso.ErrForbidden
 	}
 	return original, nil
