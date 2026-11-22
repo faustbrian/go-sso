@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add read-only callback quota attribution through `SigninCallbackRateSource`.
+  Authenticate the original tenant, pending state and browser cookie before
+  returning the original provider, flow, callback command and stored lifetime.
+  No provider exchange, reservation or credential access is performed.
+
 - Add opt-in native static OIDC callback sign-in for existing linked active
   members. Exchange the original code and S256 verifier once. Bind the issued
   cookie, browser use, encrypted provider-token deposit, audit and session

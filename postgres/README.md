@@ -76,6 +76,13 @@ authority. This profile cannot satisfy a required second factor.
 
 Call `SigninCallback` with the exact configured provider callback URL, the
 original browser flow cookie/context, and the parsed authorization-code query.
+For transport-owned callback quotas, first call `SigninCallbackRateSource`
+with the trusted tenant and the same request. It authenticates the original
+pending state and cookie, deriving the flow when a provider GET has no flow
+selector. Its callback command and immutable stored lifetime provide quota
+correlation only; it neither reserves the callback nor opens provider secrets.
+Pass its `FlowID` with the same original cookie to `SigninCallback`, which
+repeats every protected gate after quota admission.
 Only an acknowledged first commit discloses the session cookie, CSRF token and
 configured return URL. Configure the session PostgreSQL service's explicit
 enterprise OIDC cookie profile for authenticated session reads and strict
