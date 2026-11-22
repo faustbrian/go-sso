@@ -450,9 +450,10 @@ type DomainEvidenceFactory interface {
 	DomainEvidence(organization.Authentication, string, identity.CommandBinding) (DomainEvidenceAuthority, error)
 }
 
-// Service is an immutable invocation-scoped domain challenge orchestrator. The
-// supplied current bearer and canonical network must come from trusted transport.
-// Reconstruct a Service with fresh authentication for recovery after process loss.
+// Service selects an immutable invocation-scoped SSO workflow. Constructors
+// select one supported workflow; domain management and public discovery do not
+// share caller authority. Reconstruct domain management with fresh authentication
+// for recovery after process loss.
 type Service struct {
 	config         DomainConfig
 	claims         DomainClaimReader
@@ -461,6 +462,7 @@ type Service struct {
 	authentication organization.Authentication
 	network        string
 	method         DomainProofMethod
+	discovery      *discoveryWorkflow
 }
 
 func (Service) Format(s fmt.State, _ rune)    { _, _ = s.Write([]byte("sso.Service(redacted)")) }
@@ -535,7 +537,7 @@ func (s *Service) authorize(ctx context.Context, op string, v organization.View,
 }
 
 func (s *Service) claim(ctx context.Context, key DomainChallengeKey, correlation string) (organization.View, error) {
-	if key.TenantID != s.authentication.TenantID || !safe(string(key.OrganizationID)) || !safe(string(key.ClaimID)) || !safe(correlation) {
+	if s.claims == nil || key.TenantID != s.authentication.TenantID || !safe(string(key.OrganizationID)) || !safe(string(key.ClaimID)) || !safe(correlation) {
 		return organization.View{}, ErrInvalidInput
 	}
 	v, e := s.claims.GetDomainClaim(ctx, organization.DomainClaimReadRequest{Authentication: s.authentication, OrganizationID: key.OrganizationID, ClaimID: key.ClaimID, CorrelationID: correlation})
@@ -728,7 +730,7 @@ func (s *Service) recover(ctx context.Context, r DomainProofRequest, state Domai
 // RecoverDomain queries only the original durable command. Missing preparation
 // is not a license to observe or apply. Current native authority remains required.
 func (s *Service) RecoverDomain(ctx context.Context, r DomainProofRequest) (organization.DomainEvidenceResult, error) {
-	if s == nil || ctx == nil || r.Validate() != nil || r.Claim().TenantID != s.authentication.TenantID {
+	if s == nil || s.store == nil || ctx == nil || r.Validate() != nil || r.Claim().TenantID != s.authentication.TenantID {
 		return organization.DomainEvidenceResult{}, ErrInvalidInput
 	}
 	bounded, cancel := context.WithTimeout(ctx, s.config.MaximumDuration)

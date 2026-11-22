@@ -97,6 +97,14 @@ Enabling provider state alone establishes no route, enforcement or login flow.
 
 ### Verified domain route contract
 
+Public discovery is a separate opt-in `Service.Discover` workflow. It accepts
+an exact DNS domain or plain ASCII email address, discards the email local
+part before calling the trusted discovery owner, and returns only a safe
+provider ID, protocol, and optional confirmation requirement for a match.
+A no-match contains no provider or organization data. Validated domain
+discovery does not authorize login or prove that an account exists. Use the
+native adapter, not an unguarded router, to back an anonymous surface.
+
 `NewDomainRouteRequest` takes an exact tenant, a DNS name, and optionally a
 provider ID. It uses the organization owner's ASCII domain grammar and never
 infers a tenant or organization from an email. `SelectDomainRoute` chooses an

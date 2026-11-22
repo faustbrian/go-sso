@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a typed opt-in SSO discovery service that accepts exact DNS or plain
+  email input and projects only the safe provider choice. The trusted owner
+  receives only the DNS domain and must establish abuse and route authority.
+
 - Add bounded native domain-route input, deterministic provider selection, and
   redacted snapshots tied to the original organization proof and expiry.
 
