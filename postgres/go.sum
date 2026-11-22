@@ -105,8 +105,8 @@ github.com/faustbrian/go-identity/postgres v0.0.0-20261113234404-7672e7aa715a h1
 github.com/faustbrian/go-identity/postgres v0.0.0-20261113234404-7672e7aa715a/go.mod h1:ghox2jHyUazXh448mYO5YMi6GVaH909JlPcxg4xxof8=
 github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789 h1:AcnrkJ3z7oITrIUc6nSJX3OwLitJek2bRJDRu+eE7SQ=
 github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789/go.mod h1:O/hmm6Lqqb8SknW6SGEhv+EornZU+sR8KVKCXK5h+uY=
-github.com/faustbrian/go-identity/risk v0.0.0-20261122050858-2fce0f15013b h1:w37lynYr2BlPusUSFrkkC5q+J9QDUyWKxIwTQ7JQNfc=
-github.com/faustbrian/go-identity/risk v0.0.0-20261122050858-2fce0f15013b/go.mod h1:zgNZ4X6AUlAWF12+6VIXijPginf0xGML8wBYVkv+FvY=
+github.com/faustbrian/go-identity/risk v0.0.0-20261122061124-dde9fad87c03 h1:8w3Op86iiXQuWLRuBHhPdw7ucJuM8Wzf0Rq6ApSXDhM=
+github.com/faustbrian/go-identity/risk v0.0.0-20261122061124-dde9fad87c03/go.mod h1:zgNZ4X6AUlAWF12+6VIXijPginf0xGML8wBYVkv+FvY=
 github.com/faustbrian/go-identity/risk/hibp v0.0.0-20261018021354-75e10d9681e0 h1:CdkeHkuX+7SrhNC6rLBHMXc3vJ2dH9epaU+1L1f8p5o=
 github.com/faustbrian/go-identity/risk/hibp v0.0.0-20261018021354-75e10d9681e0/go.mod h1:hmFfP+7i0J5142s8cSWtkOG2tyv0jc6rnBMwX93UaAc=
 github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261028092233-945b17fc88c4 h1:1BdPiActRH5yDHzHyBqkuYnFyE8RCnnDlCZcQYVFZQM=
@@ -145,8 +145,8 @@ github.com/faustbrian/go-service v1.1.2 h1:8gKlxhILZzn1gQg5edVzRomlqLLaa07e2nC9d
 github.com/faustbrian/go-service v1.1.2/go.mod h1:ivGR4lBgV5wiUS/06bI806R+LUZkoknk53VPn5Tn6pw=
 github.com/faustbrian/go-service/v2 v2.0.0 h1:ZKMUXJJfNUqweyJrGz4dzkP0d2l5A15n+wcrGDO42lw=
 github.com/faustbrian/go-service/v2 v2.0.0/go.mod h1:lYYYHYYYMyi4zr9GQBKb/1aVWWciFS/k35UwfCThbOY=
-github.com/faustbrian/go-sso v0.0.0-20261122054333-bd84d89c74d5 h1:pVvutltLqDR6s8oR73Xf66AnJwtySrjNoHOvLCE2ElA=
-github.com/faustbrian/go-sso v0.0.0-20261122054333-bd84d89c74d5/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
+github.com/faustbrian/go-sso v0.0.0-20261122061455-6a93e43b83cb h1:GQA3eFQjF27nArckqPyjOI0/69HWXcYDuMPQ2K9uKD8=
+github.com/faustbrian/go-sso v0.0.0-20261122061455-6a93e43b83cb/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734 h1:wi/Fl8h5KagSJogEvLMKRfY2dkNGRTC1HNcndrUL45o=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734/go.mod h1:WI4BJ4aQ1ki49oDREV0ORq21xMfxr+CvP+fshGTPEkQ=
 github.com/faustbrian/go-transactional-outbox/postgres/identity v0.0.0-20261020135213-493107bf82af h1:KPP2asGRm5OtY28qv4wzMCoH43jzhcjkmwAPzXQvNOA=

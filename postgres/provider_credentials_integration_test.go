@@ -85,12 +85,17 @@ func nativeCredentialService(t *testing.T, base *ssopg.ProviderService) *ssopg.P
 
 func nativeCredentialRequest(t *testing.T, f *orgFixture, config ssopg.ProviderServiceConfig, provider string, version, generation uint64) sso.ProviderCredentialsRotateRequest {
 	t.Helper()
+	return nativeCredentialRequestForTenant(t, f, "org-test-basic", config, provider, version, generation)
+}
+
+func nativeCredentialRequestForTenant(t *testing.T, f *orgFixture, tenant identity.TenantID, config ssopg.ProviderServiceConfig, provider string, version, generation uint64) sso.ProviderCredentialsRotateRequest {
+	t.Helper()
 	var at time.Time
 	if err := f.pool.Raw().QueryRow(f.ctx, `SELECT clock_timestamp()`).Scan(&at); err != nil {
 		t.Fatal(err)
 	}
 	at = at.UTC().Truncate(time.Microsecond)
-	binding := sso.CredentialReferenceContext{TenantID: "org-test-basic", OrganizationID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", ProviderID: provider, Protocol: "oidc", Purpose: "client-secret", Generation: generation, ProviderVersion: version, Audience: "identity.sso.provider.credentials-rotate", EnvelopeKeyID: config.KeyReference, IssuedAt: at, ExpiresAt: at.Add(time.Minute)}
+	binding := sso.CredentialReferenceContext{TenantID: string(tenant), OrganizationID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", ProviderID: provider, Protocol: "oidc", Purpose: "client-secret", Generation: generation, ProviderVersion: version, Audience: "identity.sso.provider.credentials-rotate", EnvelopeKeyID: config.KeyReference, IssuedAt: at, ExpiresAt: at.Add(time.Minute)}
 	aad, err := binding.EncryptionContext()
 	if err != nil {
 		t.Fatal(err)

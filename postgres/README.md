@@ -7,9 +7,9 @@ and original safe organization recovery scope. It has no proof/result table,
 transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata; a separate opt-in credential service stores
 only configured-envelope client-secret custody. A separate opt-in enables a
-static OIDC provider after verified readiness. Trusted native routing is also
-opt-in; public discovery, enforcement, protocol login, JIT and every optional
-wire-protocol module remain unselected.
+static OIDC provider after verified readiness. Trusted native routing and
+anonymous discovery are separate opt-ins; enforcement, protocol login, JIT
+and optional wire-protocol modules are not part of this adapter profile.
 
 ### Static OIDC provider enablement
 
@@ -61,6 +61,24 @@ The returned native binding is bounded by the original route read and proof
 expiry. Reusing it cannot renew those deadlines or bypass a future login
 transaction's current provider and organization admission. This adapter does
 not install a public discovery or login endpoint.
+
+### Anonymous discovery for advertised static OIDC providers
+
+Build an audited evaluator with `risk.NewSSODiscoveryPolicy`, the same policy
+in the durable counter coordinator, and the existing required audit owner.
+Install the selected counter storage migration before serving requests.
+Construct `NewProviderDiscovery` with the native router, evaluator, and a
+startup allowlist of exact tenant/organization/domain/provider choices.
+From trusted transport, call `ForBrowser` with the resolved peer IP and verified
+browser-device ID, then call `Service.Discover` with the untrusted email or
+domain. Never use a query field or unchecked cookie as browser-device proof.
+
+The adapter counts and audits before lookup and rechecks the original decision
+before disclosure. A verified, enabled, ready provider is visible only if the
+exact selected route is advertised. Unproved, ambiguous, revoked or otherwise
+unadvertised choices return the same no-match response. Neither that response
+nor a match reveals whether an account exists, and neither grants login.
+This adapter does not install an HTTP endpoint or browser-device issuance.
 
 ### Disabled provider metadata updates
 

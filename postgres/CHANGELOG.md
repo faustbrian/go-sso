@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Compose opt-in anonymous static OIDC discovery from native verified-domain
+  routing, counted risk and canonical audit. Publish only explicitly advertised
+  provider choices; this does not authorize enterprise sign-in.
+
 - Add opt-in native static OIDC provider routing with current organization
   proof, exact provider and credential rechecks, and deterministic selection.
 

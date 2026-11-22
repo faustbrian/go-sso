@@ -51,7 +51,8 @@ func (fixturePolicy) Decide(ctx context.Context, c authorization.DecisionContext
 	if err := ctx.Err(); err != nil {
 		return authorization.Decision{}, err
 	}
-	if c.PolicyRevision != 1 || c.Request.Subject.Kind != authorization.SubjectUser || !strings.HasPrefix(string(c.Request.Tenant), "org-test-") {
+	knownTestTenant := strings.HasPrefix(string(c.Request.Tenant), "org-test-") || c.Request.Tenant == authorization.TenantID(discoveryFixtureTenant)
+	if c.PolicyRevision != 1 || c.Request.Subject.Kind != authorization.SubjectUser || !knownTestTenant {
 		return authorization.Decision{Outcome: authorization.Deny, Revision: 1}, nil
 	}
 	return authorization.Decision{Outcome: authorization.Allow, Revision: 1}, nil

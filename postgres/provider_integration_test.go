@@ -34,6 +34,11 @@ func newProviderFixture(t *testing.T) (*orgFixture, *ssopg.ProviderService, ssop
 
 func newProviderFixtureWithUpdates(t *testing.T, updates bool, extras ...migrations.Source) (*orgFixture, *ssopg.ProviderService, ssopg.ProviderServiceConfig) {
 	t.Helper()
+	return newProviderFixtureForTenant(t, "org-test-basic", updates, extras...)
+}
+
+func newProviderFixtureForTenant(t *testing.T, tenant identity.TenantID, updates bool, extras ...migrations.Source) (*orgFixture, *ssopg.ProviderService, ssopg.ProviderServiceConfig) {
+	t.Helper()
 	// Compose real optional kernel migrations without duplicating the already
 	// installed kernel base or changing the accepted DNS fixture's history.
 	history, err := (kernel.RequestKeyPreparationMigrationSource{Base: kernel.RequestKeyMigrationSource{Base: kernel.CounterPreparationMigrationSource{Base: kernel.AdmissionPreparationMigrationSource{Base: kernel.PreparationMigrationSource{Base: kernel.MigrationSource{}, Version: 310}, Version: 311}, Version: 312}, Version: 313}, Version: 314}).Load(context.Background())
@@ -48,11 +53,11 @@ func newProviderFixtureWithUpdates(t *testing.T, updates bool, extras ...migrati
 	}
 	sources := append([]migrations.Source{additions, organizationpg.CredentialAuthorityMigrationSource{Version: 315}}, extras...)
 	sources = append(sources, ssopg.ProviderMigrationSource{Version: 320})
-	f := newOrgFixtureWithIdentities(t, []identity.TenantID{"org-test-basic", "org-test-other"}, []identity.UserID{"owner"}, sources...)
+	f := newOrgFixtureWithIdentities(t, []identity.TenantID{tenant, "org-test-other"}, []identity.UserID{"owner"}, sources...)
 	if updates {
 		installProviderUpdates(t, f)
 	}
-	f.create(t, "org-test-basic")
+	f.create(t, string(tenant))
 	repository, err := organizationpg.NewRepository(f.pool, organizationpg.Config{MaximumDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +86,7 @@ func newProviderFixtureWithUpdates(t *testing.T, updates bool, extras ...migrati
 			QueryPolicy: &queryPolicy, AdmissionPolicy: &queryPolicy},
 		Envelope: crypto, KeyReference: "provider-custody",
 	}
-	service, err := ssopg.NewProviderService(f.pool, config, f.auth("org-test-basic", "owner"), "127.0.0.1")
+	service, err := ssopg.NewProviderService(f.pool, config, f.auth(string(tenant), "owner"), "127.0.0.1")
 	if err != nil {
 		t.Fatal("actual provider composition", err)
 	}

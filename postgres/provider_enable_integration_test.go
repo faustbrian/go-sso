@@ -53,7 +53,12 @@ func (p *enableDisclosurePolicy) ObserveProviderEnableAuthorization(ctx context.
 
 func enableTestProof(t *testing.T, f *orgFixture, orgID, domain, id string, version uint64) organization.DomainProof {
 	t.Helper()
-	request := organization.DomainClaimRequest{Authentication: f.auth("org-test-basic", "owner"), CommandID: commandID(t), OrganizationID: organization.ID(orgID), ClaimID: organization.ID(id), OrganizationVersion: version, Domain: domain, CorrelationID: id}
+	return enableTestProofForTenant(t, f, "org-test-basic", orgID, domain, id, version)
+}
+
+func enableTestProofForTenant(t *testing.T, f *orgFixture, tenant identity.TenantID, orgID, domain, id string, version uint64) organization.DomainProof {
+	t.Helper()
+	request := organization.DomainClaimRequest{Authentication: f.auth(string(tenant), "owner"), CommandID: commandID(t), OrganizationID: organization.ID(orgID), ClaimID: organization.ID(id), OrganizationVersion: version, Domain: domain, CorrelationID: id}
 	prepared, err := f.service.PrepareReserveDomain(f.ctx, request, "127.0.0.1")
 	if err != nil {
 		t.Fatal("prepare organization-owned domain claim", err)
@@ -121,7 +126,13 @@ type providerEnableFixture struct {
 
 func newProviderEnableFixture(t *testing.T) providerEnableFixture {
 	t.Helper()
-	f, base, config := newProviderFixtureWithUpdates(t, false, organizationpg.DomainClaimMigrationSource{Version: 316}, organizationpg.DomainEvidenceMigrationSource{Version: 317})
+	return newProviderEnableFixtureForTenant(t, "org-test-basic")
+}
+
+func newProviderEnableFixtureForTenant(t *testing.T, tenant identity.TenantID, extra ...migrations.Source) providerEnableFixture {
+	t.Helper()
+	sources := append([]migrations.Source{organizationpg.DomainClaimMigrationSource{Version: 316}, organizationpg.DomainEvidenceMigrationSource{Version: 317}}, extra...)
+	f, base, config := newProviderFixtureForTenant(t, tenant, false, sources...)
 	f.domains = organization.DomainConfig{Version: 1, MaximumClaims: 5, EvidenceMaximumAge: time.Hour}
 	var err error
 	f.domainEvidence, err = organizationpg.NewDomainEvidenceSource(enableProofObserver{}, [32]byte{0x43})
@@ -140,11 +151,11 @@ func newProviderEnableFixture(t *testing.T) providerEnableFixture {
 	}
 	installProviderCredentials(t, f)
 	credentials := nativeCredentialService(t, bound)
-	rotated, err := credentials.ProviderCredentialsRotate(f.ctx, nativeCredentialRequest(t, f, config, registered.Provider.ID, 1, 1))
+	rotated, err := credentials.ProviderCredentialsRotate(f.ctx, nativeCredentialRequestForTenant(t, f, tenant, config, registered.Provider.ID, 1, 1))
 	if err != nil || rotated.Version != 2 {
 		t.Fatal("missing current encrypted credential", err)
 	}
-	proof := enableTestProof(t, f, registration.OrganizationID, registration.Domains[0], "test-enable-domain", 1)
+	proof := enableTestProofForTenant(t, f, tenant, registration.OrganizationID, registration.Domains[0], "test-enable-domain", 1)
 	installProviderEnable(t, f)
 	service, err := bound.WithProviderEnableAuthorization(enablePolicy{})
 	if err != nil {
@@ -227,7 +238,7 @@ func TestNativeProviderEnableUsesCurrentProofAndCredentialWithExactReplay(t *tes
 func revokeEnableTestProof(t *testing.T, x providerEnableFixture) {
 	t.Helper()
 	f := x.f
-	authentication := f.auth("org-test-basic", "owner")
+	authentication := f.auth(string(x.proof.TenantID), "owner")
 	owner, err := f.service.DomainEvidence(authentication, "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
