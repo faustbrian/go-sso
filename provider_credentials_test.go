@@ -164,6 +164,34 @@ func TestCredentialReferenceAuthenticatesExactBoundedEnvelopeContext(t *testing.
 	}
 }
 
+func TestCredentialReferenceAuthenticatesOAuth2WithoutOIDCSubstitution(t *testing.T) {
+	ctx := context.Background()
+	service := newCredentialEnvelopeService(t)
+	oidcBinding := credentialReferenceContext()
+	oauthBinding := oidcBinding
+	oauthBinding.Protocol = "oauth2"
+
+	oauthWire := credentialEnvelope(t, service, oauthBinding)
+	reference, err := sso.NewEncryptedCredentialReference(ctx, service, oauthWire, oauthBinding)
+	if err != nil || reference.Context() != oauthBinding || reference.ValidateAt(oauthBinding.IssuedAt) != nil {
+		t.Fatal("OAuth client-secret ingress lost its original binding", err)
+	}
+	if _, err = sso.NewEncryptedCredentialReference(ctx, service, oauthWire, oidcBinding); !errors.Is(err, sso.ErrForbidden) {
+		t.Fatal("OAuth ciphertext authenticated as OIDC", err)
+	}
+	oidcWire := credentialEnvelope(t, service, oidcBinding)
+	if _, err = sso.NewEncryptedCredentialReference(ctx, service, oidcWire, oauthBinding); !errors.Is(err, sso.ErrForbidden) {
+		t.Fatal("OIDC ciphertext authenticated as OAuth", err)
+	}
+	for _, protocol := range []string{"", "oauth", "OAuth2", "saml"} {
+		alias := oauthBinding
+		alias.Protocol = protocol
+		if _, err = alias.EncryptionContext(); !errors.Is(err, sso.ErrInvalidInput) {
+			t.Fatal("noncanonical credential protocol accepted", err)
+		}
+	}
+}
+
 func TestCredentialReferenceRejectsZeroUnsupportedAndOversizedInput(t *testing.T) {
 	service := newCredentialEnvelopeService(t)
 	binding := credentialReferenceContext()

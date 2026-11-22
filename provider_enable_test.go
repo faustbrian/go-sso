@@ -111,6 +111,34 @@ func TestCredentialCheckpointRejectsMalformedBindings(t *testing.T) {
 	}
 }
 
+func TestOAuth2CredentialCheckpointRetainsProtocolAndOriginalLifetime(t *testing.T) {
+	binding := enableCredentialBinding()
+	oauth, err := sso.NewOAuth2CredentialCheckpoint(binding)
+	if err != nil || oauth.Protocol() != "oauth2" {
+		t.Fatal("OAuth credential checkpoint did not preserve its protocol", err)
+	}
+	read, err := oauth.Bindings()
+	if err != nil || read != binding {
+		t.Fatal("OAuth credential checkpoint changed immutable metadata", err)
+	}
+	oidc, err := sso.NewCredentialCheckpoint(binding)
+	if err != nil || oidc.Protocol() != "oidc" || oauth == oidc {
+		t.Fatal("existing OIDC checkpoint became interchangeable with OAuth", err)
+	}
+	request := enableRequest(t)
+	request.CredentialCheckpoint = oauth
+	if err = request.Validate(); err != nil {
+		t.Fatal("OAuth checkpoint failed exact enablement shape", err)
+	}
+	binding.ExpiresAt = binding.ExpiresAt.Add(time.Microsecond)
+	if _, err = sso.NewOAuth2CredentialCheckpoint(binding); !errors.Is(err, sso.ErrInvalidInput) {
+		t.Fatal("OAuth checkpoint accepted evidence beyond twenty seconds", err)
+	}
+	if (sso.CredentialCheckpoint{}).Protocol() != "" {
+		t.Fatal("an unselected checkpoint defaulted to a protocol")
+	}
+}
+
 func TestProviderEnableRequestValidatesShapeWithoutGrantingAuthority(t *testing.T) {
 	for _, method := range []organization.DomainMethod{organization.DomainDNS, organization.DomainHTTPS} {
 		request := enableRequest(t)

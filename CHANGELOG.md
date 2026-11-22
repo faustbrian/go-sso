@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bind static OAuth 2.0 client-secret ingress and enablement checkpoints to
+  the exact `oauth2` protocol. Existing OIDC envelope bindings and the OIDC
+  checkpoint constructor are unchanged. Native adapters still own admission.
+
 - Add storage-neutral enterprise OAuth registration intent and identity proof
   policy. Add bounded OIDC/OAuth assertion observations and opaque enterprise
   token correlation without exposing provider tokens. These values do not

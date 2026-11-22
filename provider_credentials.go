@@ -10,7 +10,7 @@ import (
 	envelope "github.com/faustbrian/go-secret-envelope/v2"
 )
 
-// CredentialReferenceContext is the complete immutable AAD for an OIDC
+// CredentialReferenceContext is the complete immutable AAD for a static OIDC or OAuth 2.0
 // client-secret ingress envelope. It selects neither current ownership nor
 // permission. IDs and key identity are canonical 1..128 printable ASCII bytes.
 // Times must be UTC microsecond values with a positive lifetime. Generation is
@@ -25,7 +25,7 @@ type CredentialReferenceContext struct {
 }
 
 // EncryptionContext returns the exact non-secret authenticated binding for
-// trusted secret ingress. Only static OIDC client secrets for the separate
+// trusted secret ingress. Only static OIDC or OAuth 2.0 client secrets for the separate
 // credentials-rotate operation are selected. No implicit canonicalization,
 // issuer lookup, key lookup or lifetime renewal is performed.
 func (c CredentialReferenceContext) EncryptionContext() (envelope.Context, error) {
@@ -34,7 +34,10 @@ func (c CredentialReferenceContext) EncryptionContext() (envelope.Context, error
 			return envelope.Context{}, ErrInvalidInput
 		}
 	}
-	if c.Protocol != "oidc" || c.Purpose != "client-secret" || c.Audience != "identity.sso.provider.credentials-rotate" || c.Generation == 0 || c.ProviderVersion == 0 || !credentialReferenceTime(c.IssuedAt) || !credentialReferenceTime(c.ExpiresAt) || !c.ExpiresAt.After(c.IssuedAt) {
+	if c.Protocol != "oidc" && c.Protocol != "oauth2" {
+		return envelope.Context{}, ErrInvalidInput
+	}
+	if c.Purpose != "client-secret" || c.Audience != "identity.sso.provider.credentials-rotate" || c.Generation == 0 || c.ProviderVersion == 0 || !credentialReferenceTime(c.IssuedAt) || !credentialReferenceTime(c.ExpiresAt) || !c.ExpiresAt.After(c.IssuedAt) {
 		return envelope.Context{}, ErrInvalidInput
 	}
 	return envelope.NewContext(map[string]string{
@@ -130,7 +133,7 @@ func (EncryptedCredentialReference) MarshalText() ([]byte, error) {
 }
 
 // CredentialOverlapPolicy is an explicit closed rotation profile. The selected
-// profile permits no overlap and only a disabled static-OIDC provider. It grants
+// profile permits no overlap and only a disabled static provider. It grants
 // no enablement, active-use, grace, drain or provider-network authority.
 type CredentialOverlapPolicy struct{ noOverlap bool }
 
@@ -155,7 +158,7 @@ func (CredentialOverlapPolicy) MarshalJSON() ([]byte, error) { return nil, ErrSe
 func (CredentialOverlapPolicy) MarshalText() ([]byte, error) { return nil, ErrSensitiveSerialization }
 
 // ProviderCredentialsRotateRequest initializes or replaces one disabled static
-// OIDC provider's encrypted client-secret generation. Fresh org:sso-credentials
+// OIDC or OAuth 2.0 provider's encrypted client-secret generation. Fresh org:sso-credentials
 // authorization and current provider ownership/version are mandatory at the
 // native transition. Preserve the complete original command across retries;
 // there is deliberately no external idempotency key or implicit overlap policy.

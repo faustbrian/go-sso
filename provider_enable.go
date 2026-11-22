@@ -25,11 +25,11 @@ func (DomainProofCheckpoint) MarshalJSON() ([]byte, error) { return nil, ErrSens
 func (DomainProofCheckpoint) MarshalText() ([]byte, error) { return nil, ErrSensitiveSerialization }
 
 // CredentialCheckpointBinding is a detached, non-authoritative snapshot for the
-// enablement-only static-OIDC client-secret checkpoint. IDs are exact 1..128
+// enablement-only static client-secret checkpoint. IDs are exact 1..128
 // printable ASCII bytes. ProviderVersion is the current optimistic version;
 // Generation selects the active encrypted credential. Observation and exclusive
 // expiry must be UTC microseconds, with a positive lifetime of at most 20 seconds.
-// These fields select no other protocol, credential purpose or operation.
+// The enclosing checkpoint selects the exact protocol and credential purpose.
 type CredentialCheckpointBinding struct {
 	TenantID        identity.TenantID
 	OrganizationID  organization.ID
@@ -40,19 +40,30 @@ type CredentialCheckpointBinding struct {
 	ExpiresAt       time.Time
 }
 
-// CredentialCheckpoint is immutable, enablement-only static-OIDC client-secret
+// CredentialCheckpoint is immutable, enablement-only static client-secret
 // metadata. It contains no secret and grants no authority. Zero is invalid; copies
 // are safe for concurrent reads. Native admission must read the current encrypted
 // credential under the exact owner/version/generation and original lifetime.
 type CredentialCheckpoint struct {
-	binding CredentialCheckpointBinding
-	valid   bool
+	binding  CredentialCheckpointBinding
+	protocol string
 }
 
-// NewCredentialCheckpoint snapshots validated shape only, without I/O, clock
+// NewCredentialCheckpoint selects the static OIDC profile and snapshots validated shape only, without I/O, clock
 // reads, authorization or renewal. Native admission, not caller construction,
 // determines whether this exact checkpoint still describes a usable credential.
 func NewCredentialCheckpoint(b CredentialCheckpointBinding) (CredentialCheckpoint, error) {
+	return newCredentialCheckpoint(b, "oidc")
+}
+
+// NewOAuth2CredentialCheckpoint selects the static OAuth 2.0 profile with the
+// same original bounded observation as NewCredentialCheckpoint. Construction
+// does not check current credentials, authorization or provider ownership.
+func NewOAuth2CredentialCheckpoint(b CredentialCheckpointBinding) (CredentialCheckpoint, error) {
+	return newCredentialCheckpoint(b, "oauth2")
+}
+
+func newCredentialCheckpoint(b CredentialCheckpointBinding, protocol string) (CredentialCheckpoint, error) {
 	for _, owner := range []string{string(b.TenantID), string(b.OrganizationID), b.ProviderID} {
 		if !providerClaimName(owner) {
 			return CredentialCheckpoint{}, ErrInvalidInput
@@ -69,14 +80,18 @@ func NewCredentialCheckpoint(b CredentialCheckpointBinding) (CredentialCheckpoin
 	if b.ExpiresAt.Sub(b.ObservedAt) > 20*time.Second {
 		return CredentialCheckpoint{}, ErrInvalidInput
 	}
-	return CredentialCheckpoint{binding: b, valid: true}, nil
+	return CredentialCheckpoint{binding: b, protocol: protocol}, nil
 }
+
+// Protocol returns the exact selected provider protocol, or an empty string
+// for a zero checkpoint. This is a binding, not evidence of current authority.
+func (c CredentialCheckpoint) Protocol() string { return c.protocol }
 
 // Bindings explicitly returns a detached metadata copy for native composition.
 // It does not check freshness, establish authority or renew the original lifetime.
 // The zero checkpoint returns ErrInvalidInput and no binding.
 func (c CredentialCheckpoint) Bindings() (CredentialCheckpointBinding, error) {
-	if !c.valid {
+	if c.protocol == "" {
 		return CredentialCheckpointBinding{}, ErrInvalidInput
 	}
 	return c.binding, nil
@@ -88,7 +103,7 @@ func (CredentialCheckpoint) Format(s fmt.State, _ rune) {
 func (CredentialCheckpoint) MarshalJSON() ([]byte, error) { return nil, ErrSensitiveSerialization }
 func (CredentialCheckpoint) MarshalText() ([]byte, error) { return nil, ErrSensitiveSerialization }
 
-// ProviderEnableRequest selects one disabled static-OIDC provider and its exact
+// ProviderEnableRequest selects one disabled static provider and its exact
 // domain/credential checkpoints. Native fresh org:sso-write authorization and
 // current primary owner reads remain mandatory. Preserve all original fields and
 // the key across retries; this keyed operation has no caller-selected command ID.
