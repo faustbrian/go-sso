@@ -6,8 +6,40 @@ provider metadata registration.
 and original safe organization recovery scope. It has no proof/result table,
 transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata; a separate opt-in credential service stores
-only configured-envelope client-secret custody. Provider enable, protocol login, JIT
-and every optional wire-protocol module remain unselected.
+only configured-envelope client-secret custody. A separate opt-in enables a
+static OIDC provider after verified readiness. Routing, enforcement, protocol
+login, JIT and every optional wire-protocol module remain unselected.
+
+### Static OIDC provider enablement
+
+Install `ProviderEnableMigrationSource` after the metadata and credential
+migrations and before selecting enablement. It keeps existing disabled rows
+unchanged: a bounded metadata-only `ALTER TABLE` replaces the disabled-only
+constraint and adds nullable fields, with no rewrite or historical scan. The
+new receipt table retains only the original mapping version alongside existing
+command effect custody. Both DDL steps have a five-second lock timeout; retry
+failed installation through the migration runner. There is no destructive
+down migration. Older writers continue to fail closed for enabled providers;
+older readers report disabled rather than establishing positive authority.
+
+Bind `ProviderService` to an organization, then call
+`WithProviderEnableAuthorization(owner)` with a policy owner for this exact
+enablement use. Obtain an organization-issued proof for the provider's single
+configured domain and call `ObserveProviderCredentialCheckpoint` for the
+expected provider version. Pass both checkpoints and an explicit idempotency
+key to `ProviderEnable`. It supports fresh password bearer sessions with
+current `org:sso-write` permission and the exact privileged risk action. It
+does not install HTTP or cookie handling, enable enforcement, contact an IdP,
+or permit authentication through the provider.
+
+The adapter authenticates the current configured credential, then fences the
+original session, organization authority version, proof expiry, provider
+version and exact credential generation in native Work. It stores an
+encrypted reference to the organization-owned proof, not a second source of
+domain authority. Change, required audit, and lifecycle outbox commit together.
+Keep the exact original key and request for recovery; a committed historical
+result is neither refreshed proof nor permission to start login. Get/List
+expose the persisted `Enabled` flag as administrative configuration only.
 
 ### Disabled provider metadata updates
 

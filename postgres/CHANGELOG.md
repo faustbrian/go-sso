@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add opt-in native static OIDC provider enablement with exact organization
+  proof, authenticated credential generation, fresh policy and versioned
+  atomic audit/outbox. Original-key recovery retains the redacted result.
+- Add forward-only `ProviderEnableMigrationSource`; install before enabling
+  provider administration. Routing, enforcement and protocol login are unchanged.
+
 - Add separately composed disabled-OIDC client-secret initialization/replacement
   with exact configured-envelope ingress, fresh credentials-only authorization,
   shared provider-version fencing and explicit no overlap. Original commands

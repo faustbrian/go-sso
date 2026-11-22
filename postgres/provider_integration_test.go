@@ -19,6 +19,7 @@ import (
 	kernel "github.com/faustbrian/go-identity/postgres"
 	"github.com/faustbrian/go-identity/session"
 	sessionpg "github.com/faustbrian/go-identity/session/postgres"
+	migrations "github.com/faustbrian/go-migrations/v3"
 	organization "github.com/faustbrian/go-organization"
 	organizationpg "github.com/faustbrian/go-organization/postgres"
 	envelope "github.com/faustbrian/go-secret-envelope/v2"
@@ -31,7 +32,7 @@ func newProviderFixture(t *testing.T) (*orgFixture, *ssopg.ProviderService, ssop
 	return newProviderFixtureWithUpdates(t, true)
 }
 
-func newProviderFixtureWithUpdates(t *testing.T, updates bool) (*orgFixture, *ssopg.ProviderService, ssopg.ProviderServiceConfig) {
+func newProviderFixtureWithUpdates(t *testing.T, updates bool, extras ...migrations.Source) (*orgFixture, *ssopg.ProviderService, ssopg.ProviderServiceConfig) {
 	t.Helper()
 	// Compose real optional kernel migrations without duplicating the already
 	// installed kernel base or changing the accepted DNS fixture's history.
@@ -45,7 +46,9 @@ func newProviderFixtureWithUpdates(t *testing.T, updates bool) (*orgFixture, *ss
 			additions = append(additions, migration)
 		}
 	}
-	f := newOrgFixtureWithIdentities(t, []identity.TenantID{"org-test-basic", "org-test-other"}, []identity.UserID{"owner"}, additions, organizationpg.CredentialAuthorityMigrationSource{Version: 315}, ssopg.ProviderMigrationSource{Version: 320})
+	sources := append([]migrations.Source{additions, organizationpg.CredentialAuthorityMigrationSource{Version: 315}}, extras...)
+	sources = append(sources, ssopg.ProviderMigrationSource{Version: 320})
+	f := newOrgFixtureWithIdentities(t, []identity.TenantID{"org-test-basic", "org-test-other"}, []identity.UserID{"owner"}, sources...)
 	if updates {
 		installProviderUpdates(t, f)
 	}

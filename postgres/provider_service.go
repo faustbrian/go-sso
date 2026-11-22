@@ -48,8 +48,9 @@ type ProviderServiceConfig struct {
 	KeyReference    string
 }
 
-// ProviderService authenticates each invocation and exposes only disabled
-// metadata registration, non-secret update and scoped safe reads. The service is concurrency-safe;
+// ProviderService authenticates each invocation and exposes disabled metadata
+// registration, non-secret update, opt-in enablement and scoped safe reads.
+// The service is concurrency-safe;
 // each mutation gets a separate native contributor and immutable admission.
 // Authentication and network are trusted transport inputs, not request fields.
 type ProviderService struct {
@@ -60,6 +61,7 @@ type ProviderService struct {
 	directory           *kernel.Repository
 	updateOrganization  string
 	updateAuthorization ProviderUpdateAuthorization
+	enableAuthorization ProviderEnableAuthorization
 }
 
 func (ProviderService) Format(s fmt.State, _ rune) {
@@ -198,7 +200,7 @@ func (s *ProviderService) admit(ctx context.Context, organizationID, action stri
 }
 
 func (s *ProviderService) read(ctx context.Context, organizationID string, cursor sso.ProviderID, limit uint32) ([]sso.Provider, error) {
-	rows, err := s.pool.Raw().Query(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id>$3 ORDER BY provider_id LIMIT $4`, string(s.authentication.TenantID), organizationID, string(cursor), int32(limit))
+	rows, err := s.pool.Raw().Query(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text,enabled FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id>$3 ORDER BY provider_id LIMIT $4`, string(s.authentication.TenantID), organizationID, string(cursor), int32(limit))
 	if err != nil {
 		return nil, providerError(ctx, err)
 	}
@@ -207,7 +209,7 @@ func (s *ProviderService) read(ctx context.Context, organizationID string, curso
 	for rows.Next() {
 		var p sso.Provider
 		var version, providerVersion string
-		if err := rows.Scan(&p.ID, &version, &providerVersion); err != nil {
+		if err := rows.Scan(&p.ID, &version, &providerVersion, &p.Enabled); err != nil {
 			return nil, providerError(ctx, err)
 		}
 		if p.MappingVersion, err = strconv.ParseUint(version, 10, 64); err != nil || p.MappingVersion == 0 {
@@ -226,7 +228,8 @@ func (s *ProviderService) read(ctx context.Context, organizationID string, curso
 }
 
 // ProviderGet authenticates current organization read authority; missing and
-// foreign providers have the same redacted denial. No configuration is opened.
+// foreign providers have the same redacted denial. Enabled describes persisted
+// configuration, not current domain or login authority. No envelope is opened.
 func (s *ProviderService) ProviderGet(ctx context.Context, r sso.ProviderGetRequest) (sso.ProviderGetResult, error) {
 	if s == nil || ctx == nil || !providerID(r.OrganizationID) || !providerID(string(r.ProviderID)) {
 		return sso.ProviderGetResult{}, sso.ErrInvalidInput
@@ -238,7 +241,7 @@ func (s *ProviderService) ProviderGet(ctx context.Context, r sso.ProviderGetRequ
 	}
 	var p sso.Provider
 	var version, providerVersion string
-	err := s.pool.Raw().QueryRow(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`, string(s.authentication.TenantID), r.OrganizationID, string(r.ProviderID)).Scan(&p.ID, &version, &providerVersion)
+	err := s.pool.Raw().QueryRow(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text,enabled FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`, string(s.authentication.TenantID), r.OrganizationID, string(r.ProviderID)).Scan(&p.ID, &version, &providerVersion, &p.Enabled)
 	if err != nil {
 		return sso.ProviderGetResult{}, providerError(ctx, err)
 	}
