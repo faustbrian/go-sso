@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add the forward-only `LoginTransactionMigrationSource` for static OIDC
+  transaction custody and versioned provider disposition. Install it after
+  provider enablement schema and before activating later native writers.
+  Existing provider data and operations are unchanged.
+
 - Add native `ProviderDiscovery.ForTenantBrowser` to reject an empty or foreign
   trusted transport tenant before creating discovery authority. Existing direct
   single-tenant `ForBrowser` callers remain compatible.

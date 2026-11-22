@@ -11,6 +11,23 @@ static OIDC provider after verified readiness. Trusted native routing and
 anonymous discovery are separate opt-ins; enforcement, protocol login, JIT
 and optional wire-protocol modules are not part of this adapter profile.
 
+### Static OIDC login custody schema
+
+`LoginTransactionMigrationSource` is an additive schema prerequisite. Install
+it after `ProviderEnableMigrationSource`, before configuring a login or
+disable writer that requires it. It creates two empty tables and indexes
+without rewriting provider, credential, or command rows. Foreign-key lock
+acquisition on existing tables is bounded to five seconds. There is no
+backfill or destructive down migration. Rolling back the code leaves the new
+custody and disposition records intact; existing provider reads and writes
+do not depend on these tables.
+
+Login rows separate keyed lookup and replay commitments from encrypted
+binding and verifier custody. The verifier column must be absent once a row is
+terminal. The second table retains the selected drain or revoke disposition
+and its original bounded active count for one exact provider version. Applying
+this migration does not enable sign-in, execute disablement, or start cleanup.
+
 ### Static OIDC provider enablement
 
 Install `ProviderEnableMigrationSource` after the metadata and credential
