@@ -19,11 +19,11 @@ import (
 // CompletedAt retains terminal correlation for exact callback recovery even
 // after expiry; terminal results deliberately carry no execution proof.
 type providerLoginCallbackLookup struct {
-	Row         providerLoginRowIdentity
-	Binding     providerLoginStoredBinding
+	Row               providerLoginRowIdentity
+	Binding           providerLoginStoredBinding
 	BindingWireDigest [32]byte
-	ObservedAt  time.Time
-	CompletedAt *time.Time
+	ObservedAt        time.Time
+	CompletedAt       *time.Time
 }
 
 func (providerLoginCallbackLookup) Format(s fmt.State, _ rune) {
@@ -44,10 +44,21 @@ const providerLoginCallbackLookupSQL = `SELECT l.tenant_id,l.organization_id,l.p
  LIMIT 2`
 
 func (s *ProviderLoginService) lookupProviderLoginCallback(ctx context.Context, state string) (providerLoginCallbackLookup, error) {
+	return s.lookupProviderLoginCallbackForProtocol(ctx, state, "")
+}
+
+func (s *ProviderLoginService) lookupProviderOAuth2LoginCallback(ctx context.Context, state string) (providerLoginCallbackLookup, error) {
+	return s.lookupProviderLoginCallbackForProtocol(ctx, state, providerProtocolOAuth2)
+}
+
+// Only the native callback owner chooses the original start discriminator.
+// Neither provider nor issuer supplied by a callback can select this domain.
+func (s *ProviderLoginService) lookupProviderLoginCallbackForProtocol(ctx context.Context, state, discriminator string) (providerLoginCallbackLookup, error) {
 	deny := func() (providerLoginCallbackLookup, error) {
 		return providerLoginCallbackLookup{}, sso.ErrForbidden
 	}
-	if s == nil || ctx == nil || !providerLoginPayloadTenant(s.config.TenantID) ||
+	expectedProtocol, _ := providerLoginCryptoProtocol(discriminator)
+	if expectedProtocol == "" || s == nil || ctx == nil || !providerLoginPayloadTenant(s.config.TenantID) ||
 		len(state) != 43 || len(s.payload.StateKeys) < 1 || len(s.payload.StateKeys) > 32 {
 		return deny()
 	}
@@ -82,7 +93,7 @@ func (s *ProviderLoginService) lookupProviderLoginCallback(ctx context.Context, 
 		}
 	}()
 	for _, version := range versions {
-		digest, err := providerLoginStateDigest(s.payload.StateKeys[uint32(version)], uint32(version), s.config.TenantID, raw)
+		digest, err := providerLoginProtocolStateDigest(s.payload.StateKeys[uint32(version)], uint32(version), s.config.TenantID, discriminator, raw)
 		if err != nil {
 			return deny()
 		}
@@ -138,11 +149,14 @@ func (s *ProviderLoginService) lookupProviderLoginCallback(ctx context.Context, 
 	}
 	row.IssuedAt, row.ExpiresAt = row.IssuedAt.UTC(), row.ExpiresAt.UTC()
 	found.ObservedAt = found.ObservedAt.UTC()
-	if row.TenantID != s.config.TenantID || protocol != "oidc" ||
+	if row.TenantID != s.config.TenantID || protocol != expectedProtocol ||
 		stateKey < 1 || stateKey > 4294967295 || pkceKey < 1 || pkceKey > 4294967295 ||
 		len(stateDigest) != 32 || len(pkceCommitment) != 32 || found.ObservedAt.Before(row.IssuedAt) {
 		return deny()
 	}
+	// SQL retains the explicit protocol; published OIDC envelope identities
+	// retain their original omitted discriminator, while OAuth is explicit.
+	row.Protocol = discriminator
 	if found.CompletedAt == nil {
 		if !found.ObservedAt.Before(row.ExpiresAt) {
 			return deny()
@@ -157,6 +171,8 @@ func (s *ProviderLoginService) lookupProviderLoginCallback(ctx context.Context, 
 	var stored providerLoginStoredBinding
 	if found.CompletedAt == nil {
 		stored, err = s.payload.openCommittedBinding(ctx, *row, wire)
+	} else if discriminator == providerProtocolOAuth2 {
+		stored, err = s.payload.openProviderOAuth2LoginCallbackTerminal(ctx, *row, wire)
 	} else {
 		stored, err = s.payload.openProviderLoginCallbackTerminal(ctx, *row, wire)
 	}

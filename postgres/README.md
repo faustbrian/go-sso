@@ -77,6 +77,14 @@ admitted retry returns the original redirect without renewing its expiry.
 This entry point installs no HTTP route, exchanges no code and creates no user
 or session. OIDC start and callback do not accept OAuth custody.
 
+Before enabling a native OAuth callback writer, install both versions of
+`ProviderLoginTokenVaultProtocolMigrationSource` after the original token
+vault history. The first version atomically replaces only the origin check
+under a five-second lock wait, with no row rewrite. The second validates the
+expanded check without that exclusive lock. Existing encrypted grants,
+command/account foreign keys and indexes stay intact. Leave the expansion
+installed on code rollback; applying it alone enables no callback or API.
+
 ### Native static OIDC callback for an existing linked member
 
 Before opting in, install the native callback account, capability, MFA,

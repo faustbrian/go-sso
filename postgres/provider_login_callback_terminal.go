@@ -25,7 +25,16 @@ type providerLoginCallbackTerminalBinding struct {
 }
 
 func providerLoginCallbackTerminalAAD(row providerLoginRowIdentity) (envelope.Context, error) {
-	if row.Protocol != "" { // Terminal callback custody remains OIDC-only.
+	return providerLoginProtocolCallbackTerminalAAD(row, "")
+}
+
+func providerOAuth2LoginCallbackTerminalAAD(row providerLoginRowIdentity) (envelope.Context, error) {
+	return providerLoginProtocolCallbackTerminalAAD(row, providerProtocolOAuth2)
+}
+
+func providerLoginProtocolCallbackTerminalAAD(row providerLoginRowIdentity, discriminator string) (envelope.Context, error) {
+	protocol, _ := providerLoginCryptoProtocol(discriminator)
+	if protocol == "" || row.Protocol != discriminator {
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
 	if _, err := row.aad(); err != nil {
@@ -37,19 +46,27 @@ func providerLoginCallbackTerminalAAD(row providerLoginRowIdentity) (envelope.Co
 		return envelope.Context{}, identity.UnavailableError{}
 	}
 	digest := sha256.Sum256(plain)
-	return envelope.NewContext(map[string]string{"profile": "identity-sso-oidc-login-terminal-v1", "binding": hex.EncodeToString(digest[:])})
+	return envelope.NewContext(map[string]string{"profile": "identity-sso-" + protocol + "-login-terminal-v1", "binding": hex.EncodeToString(digest[:])})
 }
 
 // Seal only during acknowledged Generate; Apply must not call a potentially
 // remote envelope provider while holding Work's transaction and row locks.
 func (c providerLoginPayloadConfig) sealProviderLoginCallbackTerminal(ctx context.Context, found providerLoginCallbackLookup) ([]byte, error) {
+	return c.sealProviderLoginProtocolCallbackTerminal(ctx, found, "")
+}
+
+func (c providerLoginPayloadConfig) sealProviderOAuth2LoginCallbackTerminal(ctx context.Context, found providerLoginCallbackLookup) ([]byte, error) {
+	return c.sealProviderLoginProtocolCallbackTerminal(ctx, found, providerProtocolOAuth2)
+}
+
+func (c providerLoginPayloadConfig) sealProviderLoginProtocolCallbackTerminal(ctx context.Context, found providerLoginCallbackLookup, discriminator string) ([]byte, error) {
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return nil, err
 	}
 	if !c.ready() || found.CompletedAt != nil || found.ObservedAt.IsZero() || found.ObservedAt.Before(found.Row.IssuedAt) || !found.ObservedAt.Before(found.Row.ExpiresAt) || !c.validProviderLoginPendingBinding(found.Row, found.Binding) {
 		return nil, identity.ForbiddenError{}
 	}
-	aad, err := providerLoginCallbackTerminalAAD(found.Row)
+	aad, err := providerLoginProtocolCallbackTerminalAAD(found.Row, discriminator)
 	if err != nil {
 		return nil, err
 	}
@@ -62,13 +79,21 @@ func (c providerLoginPayloadConfig) sealProviderLoginCallbackTerminal(ctx contex
 }
 
 func (c providerLoginPayloadConfig) openProviderLoginCallbackTerminal(ctx context.Context, row providerLoginRowIdentity, wire []byte) (providerLoginStoredBinding, error) {
+	return c.openProviderLoginProtocolCallbackTerminal(ctx, row, wire, "")
+}
+
+func (c providerLoginPayloadConfig) openProviderOAuth2LoginCallbackTerminal(ctx context.Context, row providerLoginRowIdentity, wire []byte) (providerLoginStoredBinding, error) {
+	return c.openProviderLoginProtocolCallbackTerminal(ctx, row, wire, providerProtocolOAuth2)
+}
+
+func (c providerLoginPayloadConfig) openProviderLoginProtocolCallbackTerminal(ctx context.Context, row providerLoginRowIdentity, wire []byte, discriminator string) (providerLoginStoredBinding, error) {
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return providerLoginStoredBinding{}, err
 	}
 	if !c.ready() {
 		return providerLoginStoredBinding{}, identity.ForbiddenError{}
 	}
-	aad, err := providerLoginCallbackTerminalAAD(row)
+	aad, err := providerLoginProtocolCallbackTerminalAAD(row, discriminator)
 	if err != nil {
 		return providerLoginStoredBinding{}, err
 	}

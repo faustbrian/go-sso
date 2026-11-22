@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Allow the existing enterprise token vault schema to accept native OAuth
+  callback origins without rewriting grants or relaxing command and account
+  provenance. Keep OAuth callback state and verifier custody separate from OIDC.
+
 - Add opt-in native enterprise OAuth sign-in start for an exact installed
   provider and browser flow. Commit separate encrypted PKCE custody and one
   OAuth state grant before returning the original code/S256 redirect.

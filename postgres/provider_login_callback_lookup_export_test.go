@@ -24,7 +24,14 @@ type ProviderLoginCallbackLookupForTest struct {
 }
 
 func LookupProviderLoginCallbackForTest(ctx context.Context, service *ProviderLoginService, state string) (ProviderLoginCallbackLookupForTest, error) {
-	found, err := service.lookupProviderLoginCallback(ctx, state)
+	return projectProviderLoginCallbackLookupForTest(service.lookupProviderLoginCallback(ctx, state))
+}
+
+func LookupProviderOAuth2LoginCallbackForTest(ctx context.Context, service *ProviderLoginService, state string) (ProviderLoginCallbackLookupForTest, error) {
+	return projectProviderLoginCallbackLookupForTest(service.lookupProviderOAuth2LoginCallback(ctx, state))
+}
+
+func projectProviderLoginCallbackLookupForTest(found providerLoginCallbackLookup, err error) (ProviderLoginCallbackLookupForTest, error) {
 	if err != nil {
 		return ProviderLoginCallbackLookupForTest{}, err
 	}

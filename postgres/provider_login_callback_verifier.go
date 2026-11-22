@@ -15,7 +15,19 @@ import (
 // native coordinator has acknowledged reservation. This custody operation
 // checks the original cryptographic binding; it does not reserve or renew it.
 func (c providerLoginPayloadConfig) withCallbackVerifier(ctx context.Context, metadata providerLoginBindingMetadata, now time.Time, wire []byte, use func(context.Context, []byte) error) error {
-	if ctx == nil || c.Envelope == nil || use == nil || metadata.Input.Protocol != "" || now.IsZero() || now.Before(metadata.Input.IssuedAt) || !now.Before(metadata.Input.ExpiresAt) {
+	return c.withProtocolCallbackVerifier(ctx, metadata, now, wire, use, "")
+}
+
+// withOAuth2CallbackVerifier borrows only the original OAuth start verifier.
+// Its caller owns acknowledged reservation and all subsequent exchange and
+// callback authority; opening custody grants none of those permissions.
+func (c providerLoginPayloadConfig) withOAuth2CallbackVerifier(ctx context.Context, metadata providerLoginBindingMetadata, now time.Time, wire []byte, use func(context.Context, []byte) error) error {
+	return c.withProtocolCallbackVerifier(ctx, metadata, now, wire, use, providerProtocolOAuth2)
+}
+
+func (c providerLoginPayloadConfig) withProtocolCallbackVerifier(ctx context.Context, metadata providerLoginBindingMetadata, now time.Time, wire []byte, use func(context.Context, []byte) error, discriminator string) error {
+	protocol, _ := providerLoginCryptoProtocol(discriminator)
+	if protocol == "" || ctx == nil || c.Envelope == nil || use == nil || metadata.Input.Protocol != discriminator || now.IsZero() || now.Before(metadata.Input.IssuedAt) || !now.Before(metadata.Input.ExpiresAt) {
 		return identity.ForbiddenError{}
 	}
 	if err := ctx.Err(); err != nil {
@@ -44,7 +56,7 @@ func (c providerLoginPayloadConfig) withCallbackVerifier(ctx context.Context, me
 		return identity.ForbiddenError{}
 	}
 	input := metadata.Input
-	commitment := providerLoginPayloadMAC(key, metadata.PKCEKey, "identity.sso.oidc.pkce-verifier.v1", aad.AdditionalData(), []byte(input.IssuedAt.Format(time.RFC3339Nano)), []byte(input.ExpiresAt.Format(time.RFC3339Nano)), verifier)
+	commitment := providerLoginPayloadMAC(key, metadata.PKCEKey, "identity.sso."+protocol+".pkce-verifier.v1", aad.AdditionalData(), []byte(input.IssuedAt.Format(time.RFC3339Nano)), []byte(input.ExpiresAt.Format(time.RFC3339Nano)), verifier)
 	challenge := sha256.Sum256(verifier)
 	challengeText := base64.RawURLEncoding.EncodeToString(challenge[:])
 	if !hmac.Equal(commitment[:], metadata.PKCECommitment[:]) || !hmac.Equal([]byte(challengeText), []byte(metadata.Public.Challenge)) {
