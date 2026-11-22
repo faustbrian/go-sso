@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	identity "github.com/faustbrian/go-identity"
 	"github.com/faustbrian/go-identity/oauth"
 	"github.com/faustbrian/go-identity/risk"
+	"github.com/faustbrian/go-identity/session"
 	organization "github.com/faustbrian/go-organization"
 	"github.com/faustbrian/go-sso"
 )
@@ -87,12 +89,20 @@ func (c providerLoginPayloadConfig) exchangeProviderLoginOAuth2(ctx context.Cont
 	if err := validateProviderOAuth2ExchangeProfile(request.original, request.selected, request.transport, request.material.configuration); err != nil {
 		return oauth.ExchangeResult{}, err
 	}
+	transaction, err := request.binding.protocolTransaction(request.original)
+	if err != nil {
+		return oauth.ExchangeResult{}, err
+	}
+	generation, err := transaction.ValidateAt(now)
+	if err != nil || generation != request.selected.CredentialGeneration {
+		return oauth.ExchangeResult{}, sso.ErrForbidden
+	}
 	// Translate native authority's remaining lifetime without extending an
 	// earlier caller deadline, even when the trusted clock is not wall time.
 	ctx, cancel := context.WithTimeout(ctx, request.deadline.Sub(now))
 	defer cancel()
 	var result oauth.ExchangeResult
-	err := c.withOAuth2CallbackVerifier(ctx, request.binding, now, request.material.verifier, func(ctx context.Context, verifierBytes []byte) error {
+	err = c.withOAuth2CallbackVerifier(ctx, request.binding, now, request.material.verifier, func(ctx context.Context, verifierBytes []byte) error {
 		verifier, err := oauth.NewPKCEVerifier(verifierBytes)
 		if err != nil {
 			return err
@@ -129,6 +139,32 @@ func (c providerLoginPayloadConfig) exchangeProviderLoginOAuth2(ctx context.Cont
 		return oauth.ExchangeResult{}, err
 	}
 	return result, nil
+}
+
+func (b providerLoginBindingMetadata) protocolTransaction(original providerLoginStartInput) (sso.LoginTransaction, error) {
+	input := b.Input
+	if identity.CommandBinding(original.Command) != input.Command || original.Remember != input.Remember ||
+		!original.Issued.Equal(input.IssuedAt) || !original.Expires.Equal(input.ExpiresAt) || b.CallbackCommand == input.Command.CommandID {
+		return sso.LoginTransaction{}, sso.ErrForbidden
+	}
+	callback, err := url.Parse(input.RedirectURI)
+	if err != nil || callback.String() != input.RedirectURI {
+		return sso.LoginTransaction{}, sso.ErrForbidden
+	}
+	remember, err := session.NewRememberPolicy(input.Remember)
+	if err != nil {
+		return sso.LoginTransaction{}, sso.ErrForbidden
+	}
+	transaction, err := sso.NewLoginTransaction(sso.LoginTransaction{
+		TenantID: input.Command.TenantID, ID: string(input.Command.CommandID), ProviderID: input.ProviderID,
+		OrganizationID: organization.ID(input.OrganizationID), Protocol: input.Protocol, Callback: *callback,
+		ExpiresAt: input.ExpiresAt, ProviderVersion: input.ProviderVersion, MappingVersion: input.MappingVersion,
+		RememberPolicy: remember, CommandID: b.CallbackCommand,
+	}, input.CredentialGeneration)
+	if err != nil {
+		return sso.LoginTransaction{}, sso.ErrForbidden
+	}
+	return transaction, nil
 }
 
 func validateProviderOAuth2ExchangeProfile(original providerLoginStartInput, selected StaticOAuth2LoginProfile, transport StaticOAuth2CompletionProfile, installed providerOAuthConfiguration) error {

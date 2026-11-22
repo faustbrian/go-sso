@@ -17,6 +17,7 @@ import (
 
 	"github.com/faustbrian/go-identity/oauth"
 	"github.com/faustbrian/go-identity/risk"
+	"github.com/faustbrian/go-identity/session"
 	organization "github.com/faustbrian/go-organization"
 	envelope "github.com/faustbrian/go-secret-envelope/v2"
 	"github.com/faustbrian/go-sso"
@@ -108,7 +109,8 @@ func TestProviderOAuth2CallbackTransportBindsOriginalCustodyBeforeTLSExchange(t 
 	defer clear(credentialContext)
 	original := providerLoginStartInput{Command: providerLoginStoredCommand(input.Command), Protocol: input.Protocol, ProviderID: sso.ProviderID(input.ProviderID), ProviderVersion: input.ProviderVersion,
 		Generation: input.CredentialGeneration, MappingVersion: input.MappingVersion, Issuer: input.Issuer, AuthorizationEndpoint: server.URL + "/authorize", ClientID: input.ClientID,
-		ProtocolRedirectURI: input.RedirectURI, Proof: organization.DomainProofKey{OrganizationID: organization.ID(input.OrganizationID), Domain: "enterprise.example"}}
+		ProtocolRedirectURI: input.RedirectURI, Proof: organization.DomainProofKey{OrganizationID: organization.ID(input.OrganizationID), Domain: "enterprise.example"},
+		Remember: input.Remember, Issued: input.IssuedAt, Expires: input.ExpiresAt}
 	selected := StaticOAuth2LoginProfile{ProviderID: original.ProviderID, OrganizationID: original.Proof.OrganizationID, Domain: original.Proof.Domain,
 		ClientID: input.ClientID, ProtocolRedirectURI: input.RedirectURI, ProviderVersion: input.ProviderVersion, CredentialGeneration: input.CredentialGeneration, MappingVersion: input.MappingVersion, Scopes: []string{"identity", "email"}}
 	namespace, err := SSOOAuth2AccountProviderNamespace(selected.OrganizationID, selected.ProviderID)
@@ -154,6 +156,15 @@ func TestProviderOAuth2CallbackTransportBindsOriginalCustodyBeforeTLSExchange(t 
 		"provider version":      func(p *providerLoginOAuth2ExchangeInput) { p.transport.Profile.Profile.Version++ },
 		"credential generation": func(p *providerLoginOAuth2ExchangeInput) { p.selected.CredentialGeneration++ },
 		"mapping version":       func(p *providerLoginOAuth2ExchangeInput) { p.selected.MappingVersion++ },
+		"original command substitution": func(p *providerLoginOAuth2ExchangeInput) {
+			p.original.Command.CommandID = "AwMDAwMDAwMDAwMDAwMDAw"
+		},
+		"original remember substitution": func(p *providerLoginOAuth2ExchangeInput) {
+			p.original.Remember.Choice = session.PersistentSession
+		},
+		"original expiry substitution": func(p *providerLoginOAuth2ExchangeInput) {
+			p.original.Expires = p.original.Expires.Add(time.Second)
+		},
 		"scope order": func(p *providerLoginOAuth2ExchangeInput) {
 			p.transport.Profile.Profile.Scopes = []string{"email", "identity"}
 		},

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Before provider exchange, bind the shared adapter transaction to the original
+  enterprise OAuth2 command, exact redirect, credential generation, expiry and
+  resolved remember policy. Substituted custody fails before provider I/O.
+
 - Attribute native OAuth2 browser callbacks to their authenticated original
   provider, flow, callback command and immutable lifetime for transport quotas.
   Attribution leaves custody untouched, including definitive issuer refusals;
