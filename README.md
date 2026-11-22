@@ -12,9 +12,9 @@ metadata. A separate opt-in native credential profile initializes or replaces
 an encrypted client secret while preserving disabled state. These profiles are
 not a release-qualified SSO platform. The separate opt-in enablement profile
 changes disabled static-OIDC provider state only after current native domain,
-credential and organization checks. Active-use credential overlap, routing,
-login, JIT, protocol adapters and HTTP
-routes are not implemented or advertised.
+credential and organization checks. Trusted native verified-domain routing
+is opt-in. Active-use credential overlap, public discovery, login, JIT,
+protocol adapters and HTTP routes are not implemented or advertised.
 
 ## Disabled static OIDC provider values
 

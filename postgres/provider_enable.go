@@ -74,7 +74,7 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 	if err != nil || installed < 2 || installed > version {
 		return result, sso.ErrUnavailable
 	}
-	if err := s.authenticateEnableCredential(ctx, provider, row, generation, installed); err != nil {
+	if err := authenticateStoredProviderCredential(ctx, s.config.Envelope, string(s.authentication.TenantID), s.updateOrganization, provider, row.credential, row.credentialContext, generation, installed); err != nil {
 		return result, err
 	}
 	codec := ProviderContributor{service: s}
@@ -99,26 +99,29 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 	return providerEnablePredecessor{configuration: plain, domain: canonical, mappingVersion: mapping, credentialGeneration: generation, credentialVersion: installed, configurationHash: sha256.Sum256(row.configuration), credentialHash: sha256.Sum256(row.credential), contextHash: sha256.Sum256(row.credentialContext)}, nil
 }
 
-func (s *ProviderService) authenticateEnableCredential(ctx context.Context, provider string, row providerEnableStored, generation, installed uint64) error {
+func authenticateStoredProviderCredential(ctx context.Context, crypto *envelope.Service, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64) error {
+	if installed < 2 || generation == 0 || len(wire) == 0 || len(wire) > 32768 || len(contextWire) == 0 || len(contextWire) > 4096 {
+		return sso.ErrForbidden
+	}
 	var binding sso.CredentialReferenceContext
-	if json.Unmarshal(row.credentialContext, &binding) != nil || binding.TenantID != string(s.authentication.TenantID) || binding.OrganizationID != s.updateOrganization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
+	if json.Unmarshal(contextWire, &binding) != nil || binding.TenantID != tenant || binding.OrganizationID != organization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
 		return sso.ErrUnavailable
 	}
 	canonical, err := json.Marshal(binding)
-	if err != nil || !bytes.Equal(canonical, row.credentialContext) {
+	if err != nil || !bytes.Equal(canonical, contextWire) {
 		return sso.ErrUnavailable
 	}
 	aad, err := binding.EncryptionContext()
 	if err != nil {
 		return sso.ErrUnavailable
 	}
-	sealed, err := envelope.ParseEnvelope(row.credential)
+	sealed, err := envelope.ParseEnvelope(wire)
 	if err != nil || sealed.KeyReference() != binding.EnvelopeKeyID {
 		return sso.ErrForbidden
 	}
 	// The ingress lifetime protects credential installation. This is a read of
 	// already installed custody: check authenticity, not the past ingress grant.
-	plain, err := s.config.Envelope.Decrypt(ctx, envelope.DecryptRequest{Envelope: sealed, Context: aad})
+	plain, err := crypto.Decrypt(ctx, envelope.DecryptRequest{Envelope: sealed, Context: aad})
 	defer clear(plain)
 	if err != nil || len(plain) == 0 || len(plain) > 32768 {
 		return providerError(ctx, sso.ErrForbidden)
@@ -160,8 +163,12 @@ func (p *ProviderContributor) prepareEnable(ctx context.Context) error {
 	return nil
 }
 
+func providerEnableProofContext(tenant, organization, provider string, version uint64) (envelope.Context, error) {
+	return envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": tenant, "organization": organization, "provider": provider, "protocol": "oidc", "purpose": "enablement-proof", "version": strconv.FormatUint(version, 10)})
+}
+
 func (p *ProviderContributor) sealEnableProof(ctx context.Context) ([]byte, error) {
-	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(p.binding.TenantID), "organization": p.request.OrganizationID, "provider": p.binding.RecordID, "protocol": "oidc", "purpose": "enablement-proof", "version": strconv.FormatUint(p.afterVersion(), 10)})
+	aad, err := providerEnableProofContext(string(p.binding.TenantID), p.request.OrganizationID, p.binding.RecordID, p.afterVersion())
 	if err != nil {
 		return nil, sso.ErrUnavailable
 	}

@@ -18,11 +18,11 @@ require (
 	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261027044816-80f08eb82bb9
 	github.com/faustbrian/go-migrations/v3 v3.1.1-0.20261015110643-ca105f265cfc
 	github.com/faustbrian/go-organization v0.0.0-20261029043426-3ab7798be548
-	github.com/faustbrian/go-organization/postgres v0.0.0-20261029050316-02c55d2b5bc0
+	github.com/faustbrian/go-organization/postgres v0.0.0-20261122054917-c492ad64121c
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
-	github.com/faustbrian/go-sso v0.0.0-20261122053002-6efedb1a3708
+	github.com/faustbrian/go-sso v0.0.0-20261122054333-bd84d89c74d5
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734
 	github.com/faustbrian/go-transactional-outbox/postgres/identity v0.0.0-20261020135213-493107bf82af
 	github.com/faustbrian/go-transactional-outbox/v2 v2.0.2-0.20261015062550-37ea15436ae9

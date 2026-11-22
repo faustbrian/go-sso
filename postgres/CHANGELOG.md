@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add opt-in native static OIDC provider routing with current organization
+  proof, exact provider and credential rechecks, and deterministic selection.
+
 - Add opt-in native static OIDC provider enablement with exact organization
   proof, authenticated credential generation, fresh policy and versioned
   atomic audit/outbox. Original-key recovery retains the redacted result.

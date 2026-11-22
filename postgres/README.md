@@ -7,8 +7,9 @@ and original safe organization recovery scope. It has no proof/result table,
 transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata; a separate opt-in credential service stores
 only configured-envelope client-secret custody. A separate opt-in enables a
-static OIDC provider after verified readiness. Routing, enforcement, protocol
-login, JIT and every optional wire-protocol module remain unselected.
+static OIDC provider after verified readiness. Trusted native routing is also
+opt-in; public discovery, enforcement, protocol login, JIT and every optional
+wire-protocol module remain unselected.
 
 ### Static OIDC provider enablement
 
@@ -40,6 +41,26 @@ domain authority. Change, required audit, and lifecycle outbox commit together.
 Keep the exact original key and request for recovery; a committed historical
 result is neither refreshed proof nor permission to start login. Get/List
 expose the persisted `Enabled` flag as administrative configuration only.
+
+### Verified-domain provider routing
+
+`NewProviderRouter` opts trusted native composition into routing. Pass a
+`DomainRouteRequest` for the service's tenant and exact domain, optionally with
+an explicit provider. The router resolves the current organization-owned proof
+on the same primary as the provider data, checks the encrypted proof reference
+and authenticates the selected credential generation without returning it.
+
+Configure per-tenant, organization and domain defaults only when the selected
+provider must win. Missing explicit or configured defaults do not fall back.
+Without a preferred provider, automatic selection needs a single matching route
+inside the complete bounded provider window. Scope overflow or ambiguity
+denies; explicit and default selections still use an exact primary-key read.
+No extra route table, backfill, or copy of organization authority is needed.
+
+The returned native binding is bounded by the original route read and proof
+expiry. Reusing it cannot renew those deadlines or bypass a future login
+transaction's current provider and organization admission. This adapter does
+not install a public discovery or login endpoint.
 
 ### Disabled provider metadata updates
 
