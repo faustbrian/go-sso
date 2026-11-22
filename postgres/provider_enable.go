@@ -50,7 +50,7 @@ func (r *providerEnableStored) scan(row interface{ Scan(...any) error }) error {
 	return row.Scan(&r.version, &r.mapping, &r.configuration, &r.pending, &r.enabled, &r.generation, &r.credentialVersion, &r.credential, &r.credentialContext)
 }
 
-func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider string, version uint64) (providerEnablePredecessor, error) {
+func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider, protocol string, version uint64) (providerEnablePredecessor, error) {
 	result := providerEnablePredecessor{}
 	var row providerEnableStored
 	if err := row.scan(s.pool.Raw().QueryRow(ctx, providerEnablePredecessorSQL, string(s.authentication.TenantID), s.updateOrganization, provider)); err != nil {
@@ -74,11 +74,11 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 	if err != nil || installed < 2 || installed > version {
 		return result, sso.ErrUnavailable
 	}
-	if err := authenticateStoredProviderCredential(ctx, s.config.Envelope, string(s.authentication.TenantID), s.updateOrganization, provider, row.credential, row.credentialContext, generation, installed); err != nil {
+	if err := authenticateProtocolProviderCredential(ctx, s.config.Envelope, protocol, string(s.authentication.TenantID), s.updateOrganization, provider, row.credential, row.credentialContext, generation, installed); err != nil {
 		return result, err
 	}
 	codec := ProviderContributor{service: s}
-	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(s.authentication.TenantID), "organization": s.updateOrganization, "provider": provider, "protocol": "oidc", "purpose": "static-configuration", "version": row.version})
+	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(s.authentication.TenantID), "organization": s.updateOrganization, "provider": provider, "protocol": protocol, "purpose": "static-configuration", "version": row.version})
 	if err != nil {
 		return result, sso.ErrUnavailable
 	}
@@ -86,13 +86,13 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 	if err != nil {
 		return result, err
 	}
-	var current providerConfiguration
-	if json.Unmarshal(plain, &current) != nil || len(current.Domains) != 1 || current.Mapping.Version != mapping {
+	domains, err := readProviderConfigurationDomains(protocol, plain, mapping, 1)
+	if err != nil {
 		clear(plain)
-		return result, sso.ErrUnavailable
+		return result, err
 	}
-	canonical, err := organization.CanonicalDomain(current.Domains[0])
-	if err != nil || canonical != current.Domains[0] {
+	canonical, err := organization.CanonicalDomain(domains[0])
+	if err != nil || canonical != domains[0] {
 		clear(plain)
 		return result, sso.ErrUnavailable
 	}
@@ -100,7 +100,11 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 }
 
 func authenticateStoredProviderCredential(ctx context.Context, crypto *envelope.Service, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64) error {
-	return withAuthenticatedStoredProviderCredential(ctx, crypto, tenant, organization, provider, wire, contextWire, generation, installed, func(ctx context.Context, _ []byte) error {
+	return authenticateProtocolProviderCredential(ctx, crypto, providerProtocolOIDC, tenant, organization, provider, wire, contextWire, generation, installed)
+}
+
+func authenticateProtocolProviderCredential(ctx context.Context, crypto *envelope.Service, protocol, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64) error {
+	return withAuthenticatedProtocolProviderCredential(ctx, crypto, protocol, tenant, organization, provider, wire, contextWire, generation, installed, func(ctx context.Context, _ []byte) error {
 		return ctx.Err()
 	})
 }
@@ -110,6 +114,10 @@ func authenticateStoredProviderCredential(ctx context.Context, crypto *envelope.
 // must already authorize the installed generation and, for exchange, hold the
 // original acknowledged callback reservation. This does neither operation.
 func withAuthenticatedStoredProviderCredential(ctx context.Context, crypto *envelope.Service, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64, use func(context.Context, []byte) error) error {
+	return withAuthenticatedProtocolProviderCredential(ctx, crypto, providerProtocolOIDC, tenant, organization, provider, wire, contextWire, generation, installed, use)
+}
+
+func withAuthenticatedProtocolProviderCredential(ctx context.Context, crypto *envelope.Service, protocol, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64, use func(context.Context, []byte) error) error {
 	if ctx == nil || crypto == nil || use == nil || installed < 2 || generation == 0 || len(wire) == 0 || len(wire) > 32768 || len(contextWire) == 0 || len(contextWire) > 4096 {
 		return sso.ErrForbidden
 	}
@@ -117,7 +125,7 @@ func withAuthenticatedStoredProviderCredential(ctx context.Context, crypto *enve
 		return err
 	}
 	var binding sso.CredentialReferenceContext
-	if json.Unmarshal(contextWire, &binding) != nil || binding.Protocol != providerProtocolOIDC || binding.TenantID != tenant || binding.OrganizationID != organization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
+	if json.Unmarshal(contextWire, &binding) != nil || binding.Protocol != protocol || binding.TenantID != tenant || binding.OrganizationID != organization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
 		return sso.ErrUnavailable
 	}
 	canonical, err := json.Marshal(binding)
@@ -168,7 +176,7 @@ func (p *ProviderContributor) prepareEnable(ctx context.Context) error {
 	if proof != e.proof {
 		return sso.ErrForbidden
 	}
-	e.predecessor, err = s.observeEnablePredecessor(ctx, e.request.ProviderID, e.request.ExpectedVersion)
+	e.predecessor, err = s.observeEnablePredecessor(ctx, e.request.ProviderID, p.request.providerProtocol(), e.request.ExpectedVersion)
 	if err != nil {
 		return err
 	}
@@ -180,11 +188,15 @@ func (p *ProviderContributor) prepareEnable(ctx context.Context) error {
 }
 
 func providerEnableProofContext(tenant, organization, provider string, version uint64) (envelope.Context, error) {
-	return envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": tenant, "organization": organization, "provider": provider, "protocol": "oidc", "purpose": "enablement-proof", "version": strconv.FormatUint(version, 10)})
+	return providerProofContext(providerProtocolOIDC, tenant, organization, provider, version)
+}
+
+func providerProofContext(protocol, tenant, organization, provider string, version uint64) (envelope.Context, error) {
+	return envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": tenant, "organization": organization, "provider": provider, "protocol": protocol, "purpose": "enablement-proof", "version": strconv.FormatUint(version, 10)})
 }
 
 func (p *ProviderContributor) sealEnableProof(ctx context.Context) ([]byte, error) {
-	aad, err := providerEnableProofContext(string(p.binding.TenantID), p.request.OrganizationID, p.binding.RecordID, p.afterVersion())
+	aad, err := providerProofContext(p.request.providerProtocol(), string(p.binding.TenantID), p.request.OrganizationID, p.binding.RecordID, p.afterVersion())
 	if err != nil {
 		return nil, sso.ErrUnavailable
 	}
@@ -252,7 +264,7 @@ func (p *ProviderContributor) writeEnable(ctx context.Context, w kernel.Work, b 
 	return nil
 }
 
-func (s *ProviderService) readEnableReceipt(ctx context.Context, b identity.CommandBinding, domain string, version uint64) (sso.Provider, error) {
+func (s *ProviderService) readEnableReceipt(ctx context.Context, b identity.CommandBinding, protocol, domain string, version uint64) (sso.Provider, error) {
 	var mapping string
 	if err := s.pool.Raw().QueryRow(ctx, readProviderEnableReceiptSQL, string(b.CommandID), string(b.TenantID), s.updateOrganization, b.RecordID).Scan(&mapping); err != nil {
 		return sso.Provider{}, providerError(ctx, err)
@@ -261,5 +273,5 @@ func (s *ProviderService) readEnableReceipt(ctx context.Context, b identity.Comm
 	if err != nil || mappingVersion == 0 {
 		return sso.Provider{}, sso.ErrUnavailable
 	}
-	return sso.Provider{ID: b.RecordID, OrganizationID: s.updateOrganization, Protocol: "oidc", Version: version, Enabled: true, VerifiedDomains: []string{domain}, MappingVersion: mappingVersion}, nil
+	return sso.Provider{ID: b.RecordID, OrganizationID: s.updateOrganization, Protocol: protocol, Version: version, Enabled: true, VerifiedDomains: []string{domain}, MappingVersion: mappingVersion}, nil
 }

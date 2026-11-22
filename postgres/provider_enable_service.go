@@ -107,12 +107,27 @@ func (s *ProviderService) admitFreshProviderWrite(ctx context.Context, observe f
 }
 
 // ObserveProviderCredentialCheckpoint authenticates the current encrypted
-// client-secret generation for a disabled provider, after fresh authorized
+// client-secret generation for a disabled OIDC provider, after fresh authorized
 // administration. It returns no secret and cannot authorize a later write;
 // ProviderEnable rechecks the exact existing custody under its own fence.
 func (s *ProviderService) ObserveProviderCredentialCheckpoint(ctx context.Context, provider string, version uint64) (sso.CredentialCheckpoint, error) {
+	return s.observeProviderCredentialCheckpoint(ctx, provider, providerProtocolOIDC, version)
+}
+
+// ObserveOAuth2ProviderCredentialCheckpoint authenticates the installed
+// OAuth 2.0 client secret of a disabled provider. The service requires the
+// migrated OAuth registry and fresh enablement authorization. The returned
+// checkpoint binds the original expiry and is not permission to enable.
+func (s *ProviderService) ObserveOAuth2ProviderCredentialCheckpoint(ctx context.Context, provider string, version uint64) (sso.CredentialCheckpoint, error) {
+	return s.observeProviderCredentialCheckpoint(ctx, provider, providerProtocolOAuth2, version)
+}
+
+func (s *ProviderService) observeProviderCredentialCheckpoint(ctx context.Context, provider, protocol string, version uint64) (sso.CredentialCheckpoint, error) {
 	if s == nil || ctx == nil || !providerID(provider) || version == 0 || version == math.MaxUint64 {
 		return sso.CredentialCheckpoint{}, sso.ErrInvalidInput
+	}
+	if protocol == providerProtocolOAuth2 && !s.oauthRegistration {
+		return sso.CredentialCheckpoint{}, sso.ErrForbidden
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.config.MaximumDuration)
 	defer cancel()
@@ -120,7 +135,7 @@ func (s *ProviderService) ObserveProviderCredentialCheckpoint(ctx context.Contex
 	if err != nil {
 		return sso.CredentialCheckpoint{}, err
 	}
-	current, err := s.observeEnablePredecessor(ctx, provider, version)
+	current, err := s.observeEnablePredecessor(ctx, provider, protocol, version)
 	defer clear(current.configuration)
 	if err != nil {
 		return sso.CredentialCheckpoint{}, err
@@ -128,12 +143,19 @@ func (s *ProviderService) ObserveProviderCredentialCheckpoint(ctx context.Contex
 	if !s.config.Clock.Now().Before(a.until) {
 		return sso.CredentialCheckpoint{}, sso.ErrForbidden
 	}
-	return sso.NewCredentialCheckpoint(sso.CredentialCheckpointBinding{TenantID: s.authentication.TenantID, OrganizationID: organization.ID(s.updateOrganization), ProviderID: provider, ProviderVersion: version, Generation: current.credentialGeneration, ObservedAt: a.verified, ExpiresAt: a.until.UTC().Truncate(time.Microsecond)})
+	binding := sso.CredentialCheckpointBinding{TenantID: s.authentication.TenantID, OrganizationID: organization.ID(s.updateOrganization), ProviderID: provider, ProviderVersion: version, Generation: current.credentialGeneration, ObservedAt: a.verified, ExpiresAt: a.until.UTC().Truncate(time.Microsecond)}
+	if protocol == providerProtocolOAuth2 {
+		return sso.NewOAuth2CredentialCheckpoint(binding)
+	}
+	return sso.NewCredentialCheckpoint(binding)
 }
 
 // ProviderEnable atomically enables the exact disabled provider and advances
-// its version once. Only the selected static OIDC profile with a single
-// configured domain is supported. Preserve the original key and checkpoints
+// its version once. Static OIDC and explicitly selected OAuth 2.0 require a
+// single verified configured domain. OAuth 2.0 also requires the protocol
+// registry and a configured disable authorization owner. Operators must first
+// opt existing OIDC routers into WithProtocolRegistry. Preserve the original
+// key and checkpoints
 // on retry; replay recovers historical metadata, never current route authority.
 // This is the authenticated native bearer path; no cookie or HTTP route is
 // installed. Cookie callers require a separate transport with origin and CSRF.
@@ -142,10 +164,17 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 	if s == nil || s.pool == nil || ctx == nil || !providerID(s.updateOrganization) || r.Validate() != nil {
 		return out, sso.ErrInvalidInput
 	}
-	// OAuth credential custody does not opt this OIDC-only transition into
-	// routing a new protocol. Keep historical OIDC request commitments intact.
-	if r.CredentialCheckpoint.Protocol() != providerProtocolOIDC {
-		return out, sso.ErrForbidden
+	protocol := r.CredentialCheckpoint.Protocol()
+	var oauthProtocol string
+	switch protocol {
+	case providerProtocolOIDC:
+	case providerProtocolOAuth2:
+		if !s.oauthRegistration || s.disableAuthorization == nil {
+			return out, sso.ErrForbidden
+		}
+		oauthProtocol = protocol
+	default:
+		return out, sso.ErrInvalidInput
 	}
 	checkpoint, _ := r.CredentialCheckpoint.Bindings()
 	proof := organization.DomainProof(r.DomainProofCheckpoint.Key)
@@ -162,7 +191,9 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 	frame, err := json.Marshal(struct {
 		Credential sso.CredentialCheckpointBinding
 		Proof      organization.DomainProof
-	}{checkpoint, proof})
+		// OIDC commitments predate the protocol field and keep their bytes.
+		OAuthProtocol string `json:",omitempty"`
+	}{checkpoint, proof, oauthProtocol})
 	if err != nil {
 		return out, sso.ErrInvalidInput
 	}
@@ -177,7 +208,7 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 	if err != nil {
 		return out, sso.ErrInvalidInput
 	}
-	p := &ProviderContributor{service: s, request: providerCommandInput{OrganizationID: s.updateOrganization}, admission: a, intent: intent, enable: &selected}
+	p := &ProviderContributor{service: s, request: providerCommandInput{OrganizationID: s.updateOrganization, protocol: protocol}, admission: a, intent: intent, enable: &selected}
 	defer func() { clear(p.configuration); clear(selected.predecessor.configuration) }()
 	if err = s.composeProvider(p); err != nil {
 		return out, err
@@ -221,6 +252,6 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 	if out.Completion.Binding != original || out.Completion.Feature == nil || out.Completion.Feature.Operation != op || out.Completion.Feature.BeforeVersion != r.ExpectedVersion || out.Completion.Feature.AfterVersion != r.ExpectedVersion+1 {
 		return sso.ProviderEnableResult{}, sso.ErrUnavailable
 	}
-	out.Provider, err = s.readEnableReceipt(ctx, original, proof.Domain, out.Completion.Feature.AfterVersion)
+	out.Provider, err = s.readEnableReceipt(ctx, original, protocol, proof.Domain, out.Completion.Feature.AfterVersion)
 	return out, err
 }

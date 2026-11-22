@@ -298,9 +298,15 @@ func (p *ProviderContributor) requestContext(b kernel.RequestKeyPreparationBindi
 	}
 	if p.enable != nil {
 		owner, profile = "sso/provider-enable", "static-oidc-enable-v1"
+		if p.request.providerProtocol() == providerProtocolOAuth2 {
+			profile = "static-oauth2-enable-v1"
+		}
 	}
 	if p.disable != nil {
 		owner, profile = "sso/provider-disable", "static-oidc-disable-v1"
+		if p.request.providerProtocol() == providerProtocolOAuth2 {
+			profile = "static-oauth2-disable-v1"
+		}
 	}
 	return envelope.NewContext(map[string]string{"owner": owner, "profile": profile, "binding": hex.EncodeToString(digest[:])})
 }

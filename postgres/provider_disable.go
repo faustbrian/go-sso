@@ -68,7 +68,8 @@ func (p *ProviderContributor) prepareDisable(ctx context.Context) error {
 	}
 	// Metadata is authenticated against its version. Re-seal the same
 	// configuration at the successor without reading credentials or proofs.
-	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": tenant, "organization": organization, "provider": provider, "protocol": "oidc", "purpose": "static-configuration", "version": version})
+	protocol := p.request.providerProtocol()
+	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": tenant, "organization": organization, "provider": provider, "protocol": protocol, "purpose": "static-configuration", "version": version})
 	if err != nil {
 		return sso.ErrUnavailable
 	}
@@ -76,16 +77,14 @@ func (p *ProviderContributor) prepareDisable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var configuration providerConfiguration
-	if json.Unmarshal(plain, &configuration) != nil {
+	mappingVersion, err := strconv.ParseUint(mapping, 10, 64)
+	if err != nil || mappingVersion == 0 || domains < 1 || domains > 128 {
 		clear(plain)
 		return sso.ErrUnavailable
 	}
-	canonical, err := json.Marshal(configuration)
-	defer clear(canonical)
-	if err != nil || !bytes.Equal(canonical, plain) || configuration.Mapping.Version == 0 || strconv.FormatUint(configuration.Mapping.Version, 10) != mapping || domains < 1 || domains > 128 || len(configuration.Domains) != int(domains) {
+	if _, err = readProviderConfigurationDomains(protocol, plain, mappingVersion, int(domains)); err != nil {
 		clear(plain)
-		return sso.ErrUnavailable
+		return err
 	}
 	p.configuration = plain
 	p.disable.predecessorEnvelope = wire

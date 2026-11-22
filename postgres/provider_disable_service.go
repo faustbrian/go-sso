@@ -28,7 +28,8 @@ type ProviderDisableAuthorization interface {
 type ProviderDisableAuthorizationEvidence = ProviderUpdateAuthorizationEvidence
 
 // WithProviderDisableAuthorization opts an organization-bound service into
-// native static-OIDC disablement. The original service is unchanged. Install
+// native disablement. OAuth 2.0 also requires WithOAuthRegistration.
+// The original service is unchanged. Install
 // the login transaction and request-key preparation migrations first.
 func (s *ProviderService) WithProviderDisableAuthorization(owner ProviderDisableAuthorization) (*ProviderService, error) {
 	if s == nil || s.pool == nil || !providerID(s.updateOrganization) || owner == nil {
@@ -71,7 +72,15 @@ func (s *ProviderService) disableRequestKeys() kernel.RequestKeyConfig {
 // delete the provider, or claim transaction cleanup. Matching retries recover
 // the original receipt; conflicting intent is not another disable command.
 func (s *ProviderService) ProviderDisable(ctx context.Context, r sso.ProviderDisableRequest) (sso.ProviderDisableResult, error) {
-	return s.providerDisable(ctx, r, "")
+	return s.providerDisable(ctx, r, "", providerProtocolOIDC)
+}
+
+// ProviderDisableOAuth2 disables one exact enabled OAuth 2.0 provider and
+// atomically records the selected predecessor disposition. It retains the
+// installed credentials and domain proof. Retry the same request to recover an
+// unknown outcome; no callback or external provider action is performed.
+func (s *ProviderService) ProviderDisableOAuth2(ctx context.Context, r sso.ProviderDisableRequest) (sso.ProviderDisableResult, error) {
+	return s.providerDisable(ctx, r, "", providerProtocolOAuth2)
 }
 
 // RetryProviderDisable starts or recovers a fresh exact attempt after a
@@ -83,13 +92,26 @@ func (s *ProviderService) RetryProviderDisable(ctx context.Context, r sso.Provid
 	if _, err := identity.ParseCommandID(string(failed)); err != nil {
 		return sso.ProviderDisableResult{}, sso.ErrInvalidInput
 	}
-	return s.providerDisable(ctx, r, failed)
+	return s.providerDisable(ctx, r, failed, providerProtocolOIDC)
 }
 
-func (s *ProviderService) providerDisable(ctx context.Context, r sso.ProviderDisableRequest, failed identity.CommandID) (sso.ProviderDisableResult, error) {
+// RetryProviderDisableOAuth2 admits an exact OAuth 2.0 request only after
+// the coordinator confirms its original same-protocol attempt did not
+// commit. Reconcile unknown outcomes through ProviderDisableOAuth2 first.
+func (s *ProviderService) RetryProviderDisableOAuth2(ctx context.Context, r sso.ProviderDisableRequest, failed identity.CommandID) (sso.ProviderDisableResult, error) {
+	if _, err := identity.ParseCommandID(string(failed)); err != nil {
+		return sso.ProviderDisableResult{}, sso.ErrInvalidInput
+	}
+	return s.providerDisable(ctx, r, failed, providerProtocolOAuth2)
+}
+
+func (s *ProviderService) providerDisable(ctx context.Context, r sso.ProviderDisableRequest, failed identity.CommandID, protocol string) (sso.ProviderDisableResult, error) {
 	var out sso.ProviderDisableResult
 	if s == nil || s.pool == nil || ctx == nil || !providerID(s.updateOrganization) || r.Validate() != nil {
 		return out, sso.ErrInvalidInput
+	}
+	if protocol == providerProtocolOAuth2 && !s.oauthRegistration {
+		return out, sso.ErrForbidden
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.config.MaximumDuration)
 	defer cancel()
@@ -99,7 +121,13 @@ func (s *ProviderService) providerDisable(ctx context.Context, r sso.ProviderDis
 	}
 	selection, _ := r.ActiveTransactionDisposition.Bindings()
 	version := strconv.FormatUint(selection.ProviderVersion, 10)
-	selectorFrame, err := json.Marshal([4]string{s.updateOrganization, r.ProviderID, version, string(failed)})
+	selectorFields := []string{s.updateOrganization, r.ProviderID, version, string(failed)}
+	if protocol == providerProtocolOAuth2 {
+		// Keep historical OIDC selectors byte-identical and prevent either
+		// protocol from recovering a canonical request owned by the other.
+		selectorFields = append(selectorFields, protocol)
+	}
+	selectorFrame, err := json.Marshal(selectorFields)
 	if err != nil {
 		return out, sso.ErrInvalidInput
 	}
@@ -120,7 +148,7 @@ func (s *ProviderService) providerDisable(ctx context.Context, r sso.ProviderDis
 		return out, sso.ErrInvalidInput
 	}
 	p := &ProviderContributor{
-		service: s, request: providerCommandInput{OrganizationID: s.updateOrganization},
+		service: s, request: providerCommandInput{OrganizationID: s.updateOrganization, protocol: protocol},
 		admission: admission, intent: intent, disable: &providerDisable{selection: selection, reasonDigest: reason},
 	}
 	defer func() { clear(p.configuration); clear(p.disable.predecessorEnvelope) }()

@@ -298,7 +298,8 @@ func (p *ProviderCredentialsContributor) loadConfiguration(ctx context.Context) 
 	if pending < 1 || pending > 128 {
 		return sso.ErrUnavailable
 	}
-	return requireCredentialConfiguration(p.request.CredentialReference.Context().Protocol, p.metadata, p.mappingVersion, int(pending))
+	_, err = readProviderConfigurationDomains(p.request.CredentialReference.Context().Protocol, p.metadata, p.mappingVersion, int(pending))
+	return err
 }
 
 func (p *ProviderCredentialsContributor) configurationContext(version string) (envelope.Context, error) {
@@ -311,32 +312,33 @@ func (p *ProviderCredentialsContributor) configurationContext(version string) (e
 	})
 }
 
-func requireCredentialConfiguration(protocol string, plain []byte, version uint64, pending int) error {
+// readProviderConfigurationDomains checks the authenticated metadata against
+// the selected protocol and its row projections without re-encoding it for use.
+func readProviderConfigurationDomains(protocol string, plain []byte, version uint64, pending int) ([]string, error) {
+	var domains []string
+	var decoded any
 	switch protocol {
 	case providerProtocolOIDC:
 		var current providerConfiguration
 		if json.Unmarshal(plain, &current) != nil || current.Mapping.Version != version || len(current.Domains) != pending {
-			return sso.ErrUnavailable
+			return nil, sso.ErrUnavailable
 		}
-		return requireCanonicalCredentialConfiguration(plain, current)
+		domains, decoded = current.Domains, current
 	case providerProtocolOAuth2:
 		var current providerOAuthConfiguration
 		if json.Unmarshal(plain, &current) != nil || current.Mapping.Version != version || len(current.Domains) != pending {
-			return sso.ErrUnavailable
+			return nil, sso.ErrUnavailable
 		}
-		return requireCanonicalCredentialConfiguration(plain, current)
+		domains, decoded = current.Domains, current
 	default:
-		return sso.ErrUnavailable
+		return nil, sso.ErrUnavailable
 	}
-}
-
-func requireCanonicalCredentialConfiguration(plain []byte, configuration any) error {
-	canonical, err := json.Marshal(configuration)
+	canonical, err := json.Marshal(decoded)
 	defer clear(canonical)
 	if err != nil || !bytes.Equal(canonical, plain) {
-		return sso.ErrUnavailable
+		return nil, sso.ErrUnavailable
 	}
-	return nil
+	return domains, nil
 }
 
 func (p *ProviderCredentialsContributor) RestoreRequestKey(ctx context.Context, b kernel.RequestKeyPreparationBinding, wire []byte) (identity.CommandBinding, error) {

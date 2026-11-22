@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Enable and disable explicitly selected static OAuth 2.0 providers using
+  exact encrypted credential and current domain proof. Both operations
+  preserve historical retry semantics, with separate protocol bindings.
+- Let existing OIDC routers opt into the mixed provider registry. OAuth
+  rows cannot enter OIDC routing or change its explicit/default selection.
+
 - Install and replace protocol-bound OAuth 2.0 client secrets for disabled
   providers through the existing credential command. Exact retries retain one
   encrypted generation, audit and outbox effect. OIDC enablement and credential

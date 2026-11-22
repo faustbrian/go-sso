@@ -50,10 +50,11 @@ type providerRouteScope struct {
 // static-OIDC read boundary. It owns no pool lifecycle or background retries.
 // It is not an HTTP endpoint, an authentication grant or public discovery.
 type ProviderRouter struct {
-	pool          *database.Pool
-	organizations *organizationpg.Repository
-	config        ProviderRouterConfig
-	defaults      map[providerRouteScope]sso.ProviderID
+	pool             *database.Pool
+	organizations    *organizationpg.Repository
+	config           ProviderRouterConfig
+	defaults         map[providerRouteScope]sso.ProviderID
+	protocolRegistry bool
 }
 
 // NewProviderRouter borrows a migrated primary pool. The organization owner is
@@ -82,6 +83,21 @@ func NewProviderRouter(pool *database.Pool, config ProviderRouterConfig) (*Provi
 		return nil, sso.ErrInvalidInput
 	}
 	return &ProviderRouter{pool: pool, organizations: organizations, config: config, defaults: defaults}, nil
+}
+
+// WithProtocolRegistry returns an immutable opt-in copy for a primary with both
+// ProviderProtocolMigrationSource migrations installed. It performs no I/O and
+// leaves the original router's schema requirements unchanged. Selection remains
+// OIDC-only: OAuth providers are ineligible, but count toward MaximumProviders;
+// unsupported protocol values and malformed OIDC state fail closed. Explicit
+// and configured-default foreign-protocol choices never fall back to OIDC.
+func (r *ProviderRouter) WithProtocolRegistry() (*ProviderRouter, error) {
+	if r == nil || r.pool == nil || r.pool.Raw() == nil {
+		return nil, sso.ErrInvalidInput
+	}
+	selected := *r
+	selected.protocolRegistry = true
+	return &selected, nil
 }
 
 func (ProviderRouter) Format(s fmt.State, _ rune) {
@@ -126,6 +142,15 @@ func (r *ProviderRouter) Route(ctx context.Context, request sso.DomainRouteReque
 	}
 	choices := make([]sso.DomainRoute, 0, len(stored))
 	for _, candidate := range stored {
+		if r.protocolRegistry {
+			switch candidate.protocol {
+			case providerProtocolOIDC:
+			case providerProtocolOAuth2:
+				continue
+			default:
+				return sso.DomainRoute{}, sso.ErrUnavailable
+			}
+		}
 		if !candidate.enabled {
 			continue
 		}
@@ -174,8 +199,13 @@ const routeExactProviderSQL = routeProviderProjection + ` AND provider_id=$3`
 // key can stop at the limit even when the organization has many disabled rows.
 const routeProviderWindowSQL = routeProviderProjection + ` ORDER BY provider_id LIMIT $3`
 
+const routeProtocolProviderProjection = `SELECT p.provider_id,p.metadata_version::text,p.enabled,p.enablement_proof,COALESCE(p.enablement_credential_generation,0)::text,p.protocol FROM sso_providers.providers p WHERE p.tenant_id=$1 AND p.organization_id=$2`
+const routeExactProtocolProviderSQL = routeProtocolProviderProjection + ` AND p.provider_id=$3`
+const routeProtocolProviderWindowSQL = routeProtocolProviderProjection + ` ORDER BY p.provider_id LIMIT $3`
+
 type routeProviderRecord struct {
 	id, version, generation string
+	protocol                string
 	enabled                 bool
 	proof                   []byte
 }
@@ -183,12 +213,22 @@ type routeProviderRecord struct {
 func (r *ProviderRouter) readRouteCandidates(ctx context.Context, proof organization.DomainProof, target sso.ProviderID) ([]routeProviderRecord, error) {
 	if target != "" {
 		var row routeProviderRecord
-		if err := r.pool.Raw().QueryRow(ctx, routeExactProviderSQL, string(proof.TenantID), string(proof.OrganizationID), string(target)).Scan(&row.id, &row.version, &row.enabled, &row.proof, &row.generation); err != nil {
+		query := routeExactProviderSQL
+		destinations := []any{&row.id, &row.version, &row.enabled, &row.proof, &row.generation}
+		if r.protocolRegistry {
+			query = routeExactProtocolProviderSQL
+			destinations = append(destinations, &row.protocol)
+		}
+		if err := r.pool.Raw().QueryRow(ctx, query, string(proof.TenantID), string(proof.OrganizationID), string(target)).Scan(destinations...); err != nil {
 			return nil, providerError(ctx, err)
 		}
 		return []routeProviderRecord{row}, nil
 	}
-	rows, err := r.pool.Raw().Query(ctx, routeProviderWindowSQL, string(proof.TenantID), string(proof.OrganizationID), int32(r.config.MaximumProviders+1))
+	query := routeProviderWindowSQL
+	if r.protocolRegistry {
+		query = routeProtocolProviderWindowSQL
+	}
+	rows, err := r.pool.Raw().Query(ctx, query, string(proof.TenantID), string(proof.OrganizationID), int32(r.config.MaximumProviders+1))
 	if err != nil {
 		return nil, providerError(ctx, err)
 	}
@@ -199,7 +239,11 @@ func (r *ProviderRouter) readRouteCandidates(ctx context.Context, proof organiza
 			return nil, sso.ErrConflict
 		}
 		var row routeProviderRecord
-		if err = rows.Scan(&row.id, &row.version, &row.enabled, &row.proof, &row.generation); err != nil {
+		destinations := []any{&row.id, &row.version, &row.enabled, &row.proof, &row.generation}
+		if r.protocolRegistry {
+			destinations = append(destinations, &row.protocol)
+		}
+		if err = rows.Scan(destinations...); err != nil {
 			return nil, providerError(ctx, err)
 		}
 		result = append(result, row)

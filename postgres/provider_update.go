@@ -31,9 +31,15 @@ func (s *ProviderService) ForOrganization(organizationID string) (*ProviderServi
 
 func (p *ProviderContributor) operation() identity.FeatureOperation {
 	if p.disable != nil {
+		if p.request.providerProtocol() == providerProtocolOAuth2 {
+			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.disable", SchemaID: "sso-static-oauth2-disable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
+		}
 		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.disable", SchemaID: "sso-static-oidc-disable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 	}
 	if p.enable != nil {
+		if p.request.providerProtocol() == providerProtocolOAuth2 {
+			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.enable", SchemaID: "sso-static-oauth2-enable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
+		}
 		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.enable", SchemaID: "sso-static-oidc-enable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 	}
 	if p.update != nil {

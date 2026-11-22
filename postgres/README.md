@@ -568,6 +568,32 @@ Exact retries recover the original disabled result. Pending domains do not
 become verified, and registration does not install credentials, enable the
 provider, make a provider request or issue a session.
 
+### OAuth provider activation and safe OIDC coexistence
+
+Before enabling any OAuth provider, apply the protocol, credential, enablement
+and login-transaction histories and select `WithProtocolRegistry` on every
+OIDC `ProviderRouter` sharing that database. This immutable copy uses the
+registry discriminator to ignore OAuth candidates before reading an OIDC
+proof. It still counts all rows against the automatic selection limit and
+will not fall back from an explicit or configured OAuth selection. The
+original router remains supported for a registry without OAuth activations.
+
+Use the protocol-aware organization-bound `ProviderService` with both explicit
+enable and disable authorization owners. After installing the exact OAuth
+client secret, obtain `ObserveOAuth2ProviderCredentialCheckpoint` and pass it
+with the current verified organization domain proof to `ProviderEnable`. The
+checkpoint selects the protocol and does not extend the original observation.
+Only a provider with a single configured verified domain can be enabled. Keep
+the original inputs and key to recover an ambiguous result. A later disabled
+provider does not erase or rewrite the historical result of that request.
+
+Use `ProviderDisableOAuth2` with the exact enabled version and a disposition
+selector. A lost acknowledgement is reconciled through the original request;
+use `RetryProviderDisableOAuth2` only for a confirmed not-committed command.
+The older OIDC methods cannot consume OAuth credentials, proofs or recovery
+anchors. These are native administrative operations; activation alone does
+not register an OAuth start/callback, reach the provider or issue a session.
+
 ## Domain recovery
 
 The exact original safe organization `CommandBinding` is compare-and-set before
