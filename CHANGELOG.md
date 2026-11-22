@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add storage-neutral `SigninStartRequest`, `SigninStartResult` and opaque
+  immutable `LoginIntent` values. Shape validation preserves exact HTTPS
+  callbacks, the original command/key and a resolved session remember policy;
+  callback allowlists and current authority remain native responsibilities.
+  Formatting and structured logs redact these values, and implicit JSON/text
+  serialization fails closed. No callable login or protocol flow is added.
+
 - Add separate storage-neutral provider-disable request/result values and an
   immutable, provider/version-bound drain-or-revoke selector. Shape validation
   rejects inconsistent bindings, exhausted versions and malformed bounded

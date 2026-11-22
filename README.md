@@ -142,6 +142,28 @@ generation, policy version, organization proof and original deadline. The
 snapshot is not a login grant and is never implicitly serialized. Any later
 login transaction must recheck its current provider and organization authority.
 
+### Sign-in start value boundary
+
+`SigninStartRequest` carries the original `CommandID`, an explicit provider ID
+or canonical DNS domain (or both), exact HTTPS success and error callbacks,
+an immutable `LoginIntent` and the original `IdempotencyKey`. Its `Validate`
+method checks bounded shape without changing any supplied value. Both callbacks
+are limited to 2048 serialized bytes and must exclude userinfo, fragments and
+opaque or non-round-tripping URL representations. Query and escaped path bytes
+are preserved; callback allowlist checks belong to trusted native composition.
+
+Construct `LoginIntent` with `NewLoginIntent` using an already resolved
+`session.RememberPolicy`; `RememberPolicy()` returns the exact immutable copy.
+Zero intent and zero remember policy are invalid. The core chooses no deployment
+default and cannot upgrade a browser-session choice during continuation.
+
+`SigninStartResult` reserves the protocol redirect, transaction ID, provider ID,
+protocol and native `Completion`, without adding an expiry or another outcome
+state machine. Request, intent and result redact formatting and structured
+logging and reject implicit JSON/text serialization. These values add no
+callable sign-in workflow, protocol exchange, transaction persistence or login
+authority; a native sign-in-start command is not shipped by this boundary.
+
 ## Composition
 
 The root package defines immutable `DomainProofRequest`,
