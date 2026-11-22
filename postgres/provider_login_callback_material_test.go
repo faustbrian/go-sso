@@ -110,7 +110,7 @@ func TestProviderLoginCallbackMaterialAuthenticatesOriginalConfigurationAtStored
 		wire := seal(configuration, storedVersion, false)
 		got, err := openProviderLoginCallbackConfiguration(t.Context(), payload.Envelope, original, strconv.FormatUint(storedVersion, 10), wire)
 		clear(wire)
-		if err != nil || got != configuration.Metadata {
+		if err != nil || got.Metadata != configuration.Metadata || got.Mapping != configuration.Mapping {
 			t.Fatal("exact current or immediate-drain metadata was not authenticated at its stored envelope version", err)
 		}
 	}

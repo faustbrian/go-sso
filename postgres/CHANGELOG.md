@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add opt-in first-login provisioning for enabled enterprise OIDC profiles.
+  An exact verified-domain mailbox and never-linked subject create an ordinary
+  member and session in the original callback transaction. Existing-account
+  auto-linking is not supported.
+
 - Add opt-in static OIDC custom-role synchronization for existing linked
   members. Verified boolean claims replace only that provider's grants in the
   session transaction; unrelated grants, previous start ordering, and replay

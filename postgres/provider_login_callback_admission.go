@@ -120,45 +120,52 @@ func (p *providerLoginCallbackInvocation) prepareRisk(ctx context.Context, comma
 	return s.custody.Prepare(ctx, result, scope, subject)
 }
 
+type providerLoginCallbackExchange struct {
+	oauth.ExchangeResult
+	mapping         sso.AttributeMappingSpec
+	providerEnabled bool
+}
+
 // Called by FeaturePreparationAdmission.Generate only, after acknowledgment of
 // the original one-use reservation and generation marker; no Work is retained.
-func (p *providerLoginCallbackInvocation) exchangeAcknowledged(ctx context.Context, input identity.OAuthCallbackInput, transport providerLoginCallbackTransport, admission risk.AuthenticationAdmission) (oauth.ExchangeResult, error) {
+func (p *providerLoginCallbackInvocation) exchangeAcknowledged(ctx context.Context, input identity.OAuthCallbackInput, transport providerLoginCallbackTransport, admission risk.AuthenticationAdmission) (providerLoginCallbackExchange, error) {
 	if p == nil || p.service == nil || p.authenticatedAt.IsZero() || ctx == nil {
-		return oauth.ExchangeResult{}, identity.ForbiddenError{}
+		return providerLoginCallbackExchange{}, identity.ForbiddenError{}
 	}
 	s := p.service
 	clock := s.router.config.Clock
 	now := clock.Now().UTC()
 	if err := p.checkOriginal(now); err != nil {
-		return oauth.ExchangeResult{}, err
+		return providerLoginCallbackExchange{}, err
 	}
 	if err := admission.CheckAt(ctx, now); err != nil {
-		return oauth.ExchangeResult{}, err
+		return providerLoginCallbackExchange{}, err
 	}
 	row := p.found.Row
 	profile, ok := s.profiles[providerLoginProfileKey{organization: organization.ID(row.OrganizationID), provider: sso.ProviderID(row.ProviderID)}]
 	if !ok {
-		return oauth.ExchangeResult{}, identity.ForbiddenError{}
+		return providerLoginCallbackExchange{}, identity.ForbiddenError{}
 	}
 	material, err := s.readProviderLoginCallbackMaterial(ctx, p.found, p.original, p.authority)
 	if err != nil {
-		return oauth.ExchangeResult{}, err
+		return providerLoginCallbackExchange{}, err
 	}
 	defer clear(material.credential)
 	defer clear(material.credentialContext)
 	defer clear(material.verifier)
 	now = clock.Now().UTC()
 	if err := p.checkOriginal(now); err != nil {
-		return oauth.ExchangeResult{}, err
+		return providerLoginCallbackExchange{}, err
 	}
 	if err := admission.CheckAt(ctx, now); err != nil {
-		return oauth.ExchangeResult{}, err
+		return providerLoginCallbackExchange{}, err
 	}
-	return s.payload.exchangeProviderLoginOIDC(ctx, providerLoginOIDCExchangeInput{
+	result, err := s.payload.exchangeProviderLoginOIDC(ctx, providerLoginOIDCExchangeInput{
 		original: p.found.Binding.Metadata, observedAt: p.found.ObservedAt, deadline: p.authority.deadline,
 		profile: profile, metadata: material.metadata, pinnedMetadata: transport.metadata,
 		credential: material.credential, credentialContext: material.credentialContext, credentialVersion: material.credentialVersion, verifier: material.verifier,
 		callback: input, clientAuthentication: transport.authentication, algorithms: transport.algorithms,
 		claimNames: transport.claims, keys: transport.keys, client: transport.client, clock: clock, beforePost: admission.CheckAt,
 	})
+	return providerLoginCallbackExchange{ExchangeResult: result, mapping: material.mapping, providerEnabled: material.enabled}, err
 }

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -101,6 +102,7 @@ type ProviderLoginCompletionService struct {
 	profiles         map[providerLoginProfileKey]providerLoginCallbackTransport
 	protocolProfiles map[providerLoginProfileKey]oauth.ProviderProfile
 	roleMappings     map[providerLoginProfileKey]providerLoginRoleMapping
+	jitPolicies      map[providerLoginProfileKey]providerLoginJITPolicy
 	policy           sessionpg.IdentifierAdmissionConfig
 	effect           *sessionpg.SSOOIDCSigninEffect
 	issuer           session.IssuerConfig
@@ -230,6 +232,13 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 		}
 		assignedRoles = &mapping
 	}
+	var assignedJIT *providerLoginJITPolicy
+	if execution, selected := s.jitPolicies[key]; selected {
+		if execution.MappingVersion != found.Row.MappingVersion {
+			return out, sso.ErrForbidden
+		}
+		assignedJIT = &execution
+	}
 	command, err := s.start.prepareProviderLoginCallbackCommand(ctx, found, request.ReceivedRedirectURI, request.Browser, request.Input)
 	if err != nil {
 		return out, err
@@ -252,7 +261,7 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 	}
 	phase := &providerLoginCallbackPhase{
 		providerLoginCallbackInvocation: providerLoginCallbackInvocation{service: s.start, found: found, original: original, authority: authority, flow: flow, browser: request.Browser, command: command},
-		grant:                           grant, transport: transport, input: request.Input, effect: s.effect, policy: s.policy, roleMapping: assignedRoles,
+		grant:                           grant, transport: transport, input: request.Input, effect: s.effect, policy: s.policy, roleMapping: assignedRoles, jitPolicy: assignedJIT,
 	}
 	defer func() {
 		if phase.refusal != nil {
@@ -283,6 +292,13 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 	result, err := coordinator.ExecutePreparedFeature(ctx, command, plan)
 	out.Completion = result
 	if err != nil {
+		// An occupied mailbox, occupied subject or admission conflict must
+		// not provide a separate browser-visible account-discovery signal.
+		var conflict identity.ConflictError
+		if phase.execution != nil && phase.execution.jit != nil && ctx.Err() == nil &&
+			(errors.As(err, &conflict) || errors.Is(err, organization.ErrConflict)) {
+			return out, sso.ErrForbidden
+		}
 		return out, providerError(ctx, err)
 	}
 	if result.Validate() != nil || result.Binding.CommandID != entered || result.Outcome != identity.CommitOutcomeCommitted {

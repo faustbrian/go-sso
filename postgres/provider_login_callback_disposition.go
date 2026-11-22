@@ -39,6 +39,10 @@ const providerLoginCallbackDrainSQL = `SELECT e.command_id,e.binding
 // Work. Admission neither consumes the login nor releases its verifier, and a
 // drain admits only this unchanged installed predecessor, never a later enable.
 func requireProviderLoginCallbackDisposition(ctx context.Context, work kernel.Work, found providerLoginCallbackLookup, deadline time.Time) error {
+	return requireProviderLoginCallbackDispositionAt(ctx, work, found, deadline, true)
+}
+
+func requireProviderLoginCallbackDispositionAt(ctx context.Context, work kernel.Work, found providerLoginCallbackLookup, deadline time.Time, allowDrain bool) error {
 	if ctx == nil {
 		return identity.ForbiddenError{}
 	}
@@ -74,6 +78,11 @@ func requireProviderLoginCallbackDisposition(ctx context.Context, work kernel.Wo
 	rows.Close()
 	if enabled {
 		return nil
+	}
+	if !allowDrain {
+		// Draining may finish an existing linked login, but cannot create a
+		// first identity or membership after the provider has been disabled.
+		return identity.ForbiddenError{}
 	}
 
 	rows, err = work.Query(ctx, providerLoginCallbackDrainSQL, args[0], args[1], args[2], args[3], deadline)

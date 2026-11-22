@@ -8,8 +8,9 @@ transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata; a separate opt-in credential service stores
 only configured-envelope client-secret custody. Separate opt-ins enable or
 disable a static OIDC provider. Trusted routing, anonymous discovery, static
-OIDC sign-in start and completion are separate opt-ins. Completion supports
-existing linked members only; it does not provision accounts or create links.
+OIDC sign-in start and completion are separate opt-ins. Completion defaults
+to existing linked members. First-login provisioning requires a further
+selection; it never links an existing local account by email.
 
 ### Static OIDC login custody schema
 
@@ -92,8 +93,8 @@ response without an eligible link or member closes original verifier custody.
 An uncertain provider response remains unresolved and must not be exchanged
 again. None of these failures creates a session.
 
-This API installs no public HTTP route and does not implement JIT provisioning,
-new account linking, or non-OIDC federation.
+This API installs no public HTTP route. Explicit linking of an existing local
+account and non-OIDC federation are separate workflows.
 
 For transport-owned callback parsing, `SigninProtocolProfile` selects the exact
 configured organization/provider pair and returns detached, secret-free public
@@ -126,6 +127,30 @@ session binds the successor organization revision. Disabling a provider with
 retained grants invalidates the old revision when the disable commits. Under
 contention the native disable remains subject to its ordinary outcome recovery
 and confirmed-failure retry rules.
+
+#### Optional first-login provisioning
+
+Use `NewProviderLoginCompletionServiceWithJIT` with a `StaticOIDCJITPolicy`
+for each eligible exact organization/provider/mapping version. Select both
+installed mailbox and verification claims in `StaticOIDCCompletionProfile`;
+the installed subject mapping must be `sub`. The signed ID token must carry
+the mailbox as a string and its verification as boolean `true`. Use the
+tenant's existing email parser and identifier-retirement keys. The canonical
+mailbox domain must equal the originally routed and still verified domain.
+
+Install the identity account, credential, identifier normalization and
+retirement histories, `SSOOIDCSubjectAvailabilityMigrationSource`, the MFA
+`SSOOIDCJITFactorMigrationSource`, and the organization membership and
+credential-authority histories. Set the JIT membership limits to the
+organization's existing admission limits. JIT creates a new ordinary member,
+never an owner, administrator or existing user. Existing or retired mailbox
+ownership and previously occupied provider subjects refuse the attempt. A
+disabled provider cannot provision even while earlier linked sign-ins drain.
+
+The original callback commit owns all new identity, membership, authorization,
+factor, token-vault, session, audit and outbox effects. Replay cannot issue a
+second credential; an unknown outcome returns no session. Optional `RoleSync`
+applies on subsequent linked sign-ins, not on first-login admission.
 
 ### Static OIDC provider enablement
 

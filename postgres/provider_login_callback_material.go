@@ -20,6 +20,8 @@ import (
 // native coordinator has acknowledged this callback's original reservation.
 type providerLoginCallbackMaterial struct {
 	metadata          sso.OIDCStaticMetadataSpec
+	mapping           sso.AttributeMappingSpec
+	enabled           bool
 	credential        []byte
 	credentialContext []byte
 	credentialVersion uint64
@@ -115,7 +117,7 @@ func (s *ProviderLoginService) readProviderLoginCallbackMaterial(ctx context.Con
 	if err := validateProviderLoginCallbackCredential(original, installed, stored.credential, stored.credentialContext); err != nil {
 		return providerLoginCallbackMaterial{}, err
 	}
-	metadata, err := openProviderLoginCallbackConfiguration(ctx, s.router.config.Envelope, original, stored.version, stored.configuration)
+	configuration, err := openProviderLoginCallbackConfiguration(ctx, s.router.config.Envelope, original, stored.version, stored.configuration)
 	if err != nil {
 		return providerLoginCallbackMaterial{}, err
 	}
@@ -125,7 +127,8 @@ func (s *ProviderLoginService) readProviderLoginCallbackMaterial(ctx context.Con
 	if !validProviderLoginCallbackMaterialInput(found, original, authority, s.router.config.Clock.Now()) {
 		return providerLoginCallbackMaterial{}, sso.ErrForbidden
 	}
-	return providerLoginCallbackMaterial{metadata: metadata, credential: stored.credential, credentialContext: stored.credentialContext, credentialVersion: installed, verifier: verifier}, nil
+	return providerLoginCallbackMaterial{metadata: configuration.Metadata, mapping: configuration.Mapping, enabled: stored.enabled,
+		credential: stored.credential, credentialContext: stored.credentialContext, credentialVersion: installed, verifier: verifier}, nil
 }
 
 func validProviderLoginCallbackMaterialInput(found providerLoginCallbackLookup, original providerLoginStartInput, authority providerLoginCallbackAuthority, now time.Time) bool {
@@ -170,43 +173,43 @@ func validateProviderLoginCallbackCredential(original providerLoginStartInput, i
 	return nil
 }
 
-func openProviderLoginCallbackConfiguration(ctx context.Context, crypto *envelope.Service, original providerLoginStartInput, storedVersion string, wire []byte) (sso.OIDCStaticMetadataSpec, error) {
+func openProviderLoginCallbackConfiguration(ctx context.Context, crypto *envelope.Service, original providerLoginStartInput, storedVersion string, wire []byte) (providerConfiguration, error) {
 	if ctx == nil || crypto == nil || len(wire) == 0 || len(wire) > providerConfigurationEnvelopeMaximumBytes {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrUnavailable
+		return providerConfiguration{}, sso.ErrUnavailable
 	}
 	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(original.Proof.TenantID), "organization": string(original.Proof.OrganizationID), "provider": string(original.ProviderID), "protocol": "oidc", "purpose": "static-configuration", "version": storedVersion})
 	if err != nil {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrUnavailable
+		return providerConfiguration{}, sso.ErrUnavailable
 	}
 	sealed, err := envelope.ParseEnvelope(wire)
 	if err != nil {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrUnavailable
+		return providerConfiguration{}, sso.ErrUnavailable
 	}
 	plain, err := crypto.Decrypt(ctx, envelope.DecryptRequest{Envelope: sealed, Context: aad})
 	defer clear(plain)
 	if err != nil || len(plain) == 0 || len(plain) > providerConfigurationMaximumBytes {
-		return sso.OIDCStaticMetadataSpec{}, providerError(ctx, sso.ErrUnavailable)
+		return providerConfiguration{}, providerError(ctx, sso.ErrUnavailable)
 	}
 	var stored providerConfiguration
 	if json.Unmarshal(plain, &stored) != nil {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrUnavailable
+		return providerConfiguration{}, sso.ErrUnavailable
 	}
 	canonical, err := json.Marshal(stored)
 	defer clear(canonical)
 	if err != nil || !bytes.Equal(canonical, plain) || len(stored.Domains) != 1 || stored.Domains[0] != original.Proof.Domain || stored.Mapping.Version != original.MappingVersion || stored.Metadata.Issuer != original.Issuer || stored.Metadata.AuthorizationEndpoint != original.AuthorizationEndpoint {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrForbidden
+		return providerConfiguration{}, sso.ErrForbidden
 	}
 	if _, err := sso.NewAttributeMapping(stored.Mapping); err != nil {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrUnavailable
+		return providerConfiguration{}, sso.ErrUnavailable
 	}
 	if _, err := sso.NewOIDCStaticMetadata(stored.Metadata); err != nil {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrUnavailable
+		return providerConfiguration{}, sso.ErrUnavailable
 	}
 	if _, _, err := providerLoginAuthorizationEndpoint(stored.Metadata.AuthorizationEndpoint); err != nil {
-		return sso.OIDCStaticMetadataSpec{}, sso.ErrUnavailable
+		return providerConfiguration{}, sso.ErrUnavailable
 	}
 	if err := ctx.Err(); err != nil {
-		return sso.OIDCStaticMetadataSpec{}, err
+		return providerConfiguration{}, err
 	}
-	return stored.Metadata, nil
+	return stored, nil
 }

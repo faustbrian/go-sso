@@ -26,6 +26,7 @@ type providerLoginCallbackRecipient struct {
 }
 
 var errProviderLoginRecipientIneligible = errors.New("provider login recipient ineligible")
+var errProviderLoginRecipientLinkUnavailable = errors.New("provider login recipient link unavailable")
 
 func (providerLoginCallbackRecipient) Format(s fmt.State, _ rune) {
 	_, _ = s.Write([]byte("postgres.providerLoginCallbackRecipient(redacted)"))
@@ -103,7 +104,9 @@ func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context
 	if err != nil {
 		var forbidden identity.ForbiddenError
 		if ctx.Err() == nil && errors.As(err, &forbidden) {
-			return providerLoginCallbackRecipient{}, errProviderLoginRecipientIneligible
+			// This can mean an existing unusable or retired account. The JIT
+			// branch must independently prove exact subject absence.
+			return providerLoginCallbackRecipient{}, errProviderLoginRecipientLinkUnavailable
 		}
 		return providerLoginCallbackRecipient{}, providerError(ctx, err)
 	}

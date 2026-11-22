@@ -30,6 +30,7 @@ type providerLoginCallbackPhase struct {
 	prepared     session.PreparedIssuance
 	execution    *providerLoginCallbackExecution
 	roleMapping  *providerLoginRoleMapping
+	jitPolicy    *providerLoginJITPolicy
 	acknowledged identity.CommandResult
 	canDisclose  bool
 }
@@ -40,6 +41,7 @@ type providerLoginCallbackExecution struct {
 	admission  risk.AuthenticationAdmission
 	tokens     providerLoginPreparedTokens
 	roleUpdate organizationpg.ProviderRoleGrantUpdate
+	jit        *providerLoginJITExecution
 	terminal   []byte
 	generation uint64
 	digest     [32]byte
@@ -243,13 +245,19 @@ func (p *providerLoginCallbackPhase) checkProviderCurrent(ctx context.Context, w
 	// The session effect acquires its session locks before organization. Keep
 	// the same ordering, then retain the exact provider disposition lock.
 	owner := p.authority.organization
-	if p.roleMapping != nil {
+	if p.execution.jit != nil {
+		owner = p.execution.jit.owner
+		owner.Version = p.execution.jit.membership.ExpectedOrganizationVersion()
+	} else if p.roleMapping != nil {
 		// Apply already checked the predecessor and the bound successor in
 		// this Work. Preserve the original observation's freshness window.
 		owner.Version = p.execution.roleUpdate.ExpectedOrganizationVersion()
 	}
 	if err := p.service.router.organizations.RequireCredentialAuthority(ctx, work, p, owner); err != nil {
 		return err
+	}
+	if p.execution.jit != nil {
+		return requireProviderLoginCallbackDispositionAt(ctx, work, p.found, p.execution.validUntil, false)
 	}
 	return requireProviderLoginCallbackDisposition(ctx, work, p.found, p.execution.validUntil)
 }
@@ -263,8 +271,13 @@ func (p *providerLoginCallbackPhase) ApplyFeature(ctx context.Context, work kern
 	if err != nil || generation != p.execution.generation || sha256.Sum256(wire) != p.execution.digest {
 		return identity.FeatureReceipt{}, identity.ForbiddenError{}
 	}
+	if p.execution.jit != nil {
+		if err := p.applyProviderLoginJIT(ctx, work, command); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+	}
 	var receipt identity.FeatureReceipt
-	if p.roleMapping == nil {
+	if p.roleMapping == nil && p.execution.jit == nil {
 		receipt, err = p.effect.Apply(ctx, work, p, command, p.flow)
 	} else {
 		receipt, err = p.effect.ApplyWithOrganizationUpdate(ctx, work, p, command, p.flow, p)
@@ -285,8 +298,14 @@ func (p *providerLoginCallbackPhase) ApplyFeature(ctx context.Context, work kern
 }
 
 func (p *providerLoginCallbackPhase) UpdateSSOOIDCOrganization(ctx context.Context, work kernel.Work, owner kernel.FeatureExecutionContributor, command identity.Command, record session.Session) error {
-	if p == nil || p.execution == nil || p.roleMapping == nil || owner != p || command != p.execution.command ||
+	if p == nil || p.execution == nil || owner != p || command != p.execution.command ||
 		!equalProviderLoginSession(record, p.execution.record) {
+		return identity.ForbiddenError{}
+	}
+	if p.execution.jit != nil {
+		return p.service.router.organizations.ApplyProviderJITMembership(ctx, work, owner, command, p.execution.jit.membership)
+	}
+	if p.roleMapping == nil {
 		return identity.ForbiddenError{}
 	}
 	return p.service.router.organizations.ApplyProviderRoleGrantUpdate(ctx, work, owner, command, p.execution.roleUpdate)
@@ -295,6 +314,11 @@ func (p *providerLoginCallbackPhase) UpdateSSOOIDCOrganization(ctx context.Conte
 func (p *providerLoginCallbackPhase) CheckFeatureCommit(ctx context.Context, work kernel.Work, command identity.Command) error {
 	if err := p.checkExecutionAt(ctx, work, command); err != nil {
 		return err
+	}
+	if p.execution.jit != nil {
+		if _, err := work.SSOOIDCJITUser(ctx, p, command); err != nil {
+			return err
+		}
 	}
 	if err := p.effect.CheckCurrent(ctx, work, p, command); err != nil {
 		return err

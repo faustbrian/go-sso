@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -68,15 +69,16 @@ func (nativeCallbackJourneyPolicy) Decide(ctx context.Context, c authorization.D
 }
 
 type nativeCallbackJourneyFixture struct {
-	start      providerLoginStartFixture
-	completion *ssopg.ProviderLoginCompletionService
-	request    ssopg.ProviderLoginCallbackRequest
-	csrf       session.CSRFKey
-	lookup     session.DigestKey
-	started    sso.SigninStartResult
-	posts      *atomic.Int32
-	idToken    string
-	newAttempt func(*testing.T, string, *bool, time.Time) ssopg.ProviderLoginCallbackRequest
+	start            providerLoginStartFixture
+	completion       *ssopg.ProviderLoginCompletionService
+	completionConfig ssopg.ProviderLoginCompletionConfig
+	request          ssopg.ProviderLoginCallbackRequest
+	csrf             session.CSRFKey
+	lookup           session.DigestKey
+	started          sso.SigninStartResult
+	posts            *atomic.Int32
+	idToken          string
+	newAttempt       func(*testing.T, string, *bool, time.Time) ssopg.ProviderLoginCallbackRequest
 }
 
 func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJourneyFixture {
@@ -84,16 +86,21 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 	x := newProviderLoginStartFixture(t)
 	const roleGrant = "native-enterprise-reader"
 	rolesSelected := mode == "role-grant"
+	jitFixture := strings.HasPrefix(mode, "jit")
 	if rolesSelected {
 		installNativeCallbackJourneyMigrations(t, x.enable.f)
 		installProviderRoleSourceProjection(t, x.enable.f)
-		prepareNativeCallbackJourneyProvider(t, &x)
+		prepareNativeCallbackJourneyProvider(t, &x, false)
 		prepareNativeCallbackRole(t, x, roleGrant)
 	} else {
-		prepareNativeCallbackJourneyProvider(t, &x)
+		prepareNativeCallbackJourneyProvider(t, &x, jitFixture)
 		installNativeCallbackJourneyMigrations(t, x.enable.f)
 	}
-	seedNativeCallbackJourneyRecipient(t, x)
+	if jitFixture {
+		installNativeCallbackJourneyJITMigrations(t, x.enable.f)
+	} else {
+		seedNativeCallbackJourneyRecipient(t, x)
+	}
 	policy := kernel.CommandQueryPolicy{Authorization: nativeCallbackJourneyPolicy{}, Clock: clock.System{}, PolicyVersion: 1}
 	x.config.Coordinator.AdmissionPolicy, x.config.Coordinator.QueryPolicy = &policy, &policy
 	var err error
@@ -132,7 +139,11 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 		value := true
 		projectView = &value
 	}
-	idToken := nativeCallbackJourneyIDToken(t, key, query.Get("nonce"), projectView, time.Now().UTC())
+	var attributes map[string]any
+	if jitFixture {
+		attributes = nativeCallbackJourneyJITClaims(mode)
+	}
+	idToken := nativeCallbackJourneyIDToken(t, key, query.Get("nonce"), projectView, time.Now().UTC(), attributes)
 	const originalCode = "native-enterprise-original-code"
 	type providerReply struct{ challenge, token string }
 	replies := map[string]providerReply{originalCode: {challenge: query.Get("code_challenge"), token: idToken}}
@@ -140,6 +151,12 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 	secret := nativeCallbackJourneyInstalledSecret(t, x)
 	t.Cleanup(func() { clear(secret) })
 	posts := &atomic.Int32{}
+	var disable *ssopg.ProviderService
+	var drain sso.ProviderDisableRequest
+	if mode == "jit-provider-draining" {
+		disable = nativeProviderDisableService(t, x, providerDisablePolicy{})
+		drain = nativeProviderDisableRequest(t, x, sso.ActiveTransactionDrain)
+	}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		posts.Add(1)
 		client, encodedSecret, authenticated := r.BasicAuth()
@@ -160,6 +177,27 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 			t.Error("provider exchange substituted the original code, redirect or PKCE verifier")
 			http.Error(w, "invalid grant fixture", http.StatusBadRequest)
 			return
+		}
+		if mode == "jit-stale-owner" {
+			// Callback authority was read before the provider POST. Simulate an
+			// independent policy change during that external round trip.
+			selected := x.config.Profiles[0]
+			updated, err := x.enable.f.pool.Raw().Exec(r.Context(), `UPDATE organization.organizations SET version=version+1 WHERE tenant_id=$1 AND organization_id=$2`, string(x.config.TenantID), string(selected.OrganizationID))
+			if err != nil || updated.RowsAffected() != 1 {
+				t.Error("the fixture did not advance the observed organization revision")
+				http.Error(w, "fixture could not advance authority", http.StatusInternalServerError)
+				return
+			}
+		}
+		if disable != nil {
+			// The running callback saw an enabled provider. Keep its normal
+			// drain disposition available, then let the callback check the fence.
+			result, err := disable.ProviderDisable(r.Context(), drain)
+			if err != nil || !result.Disabled || result.Completion.Outcome != identity.CommitOutcomeCommitted {
+				t.Error("the fixture did not commit an actual provider drain", err)
+				http.Error(w, "fixture did not commit disablement", http.StatusInternalServerError)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": nativeCallbackJourneyAccessToken,
@@ -200,7 +238,18 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 			Keys: &coreoidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&key.PublicKey}}, HTTPClient: &http.Client{Transport: transport}}},
 	}
 	var completion *ssopg.ProviderLoginCompletionService
-	if rolesSelected {
+	if jitFixture {
+		completionConfig.Profiles[0].ClaimNames = []string{"work_mail", "verified_work_mail", "email", "email_verified"}
+		if mode == "jit-disabled" {
+			completion, err = ssopg.NewProviderLoginCompletionService(x.service, completionConfig)
+		} else {
+			jit := nativeCallbackJourneyJITConfig(t, x)
+			if mode == "jit-at-capacity" {
+				jit.Profiles[0].MaximumMembers = 1 // The existing organization owner fills the last seat.
+			}
+			completion, err = ssopg.NewProviderLoginCompletionServiceWithJIT(x.service, completionConfig, jit)
+		}
+	} else if rolesSelected {
 		completionConfig.Profiles[0].ClaimNames = []string{"project_view"}
 		completion, err = ssopg.NewProviderLoginCompletionServiceWithRoleSync(x.service, completionConfig, []ssopg.StaticOIDCRoleMapping{{
 			OrganizationID: profile.OrganizationID, ProviderID: profile.ProviderID, MappingVersion: profile.MappingVersion,
@@ -224,7 +273,7 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 		if assertedAt.IsZero() {
 			assertedAt = time.Now().UTC()
 		}
-		reply := providerReply{challenge: authorize.Get("code_challenge"), token: nativeCallbackJourneyIDToken(t, key, authorize.Get("nonce"), projectView, assertedAt)}
+		reply := providerReply{challenge: authorize.Get("code_challenge"), token: nativeCallbackJourneyIDToken(t, key, authorize.Get("nonce"), projectView, assertedAt, attributes)}
 		repliesMu.Lock()
 		replies[code] = reply
 		repliesMu.Unlock()
@@ -235,7 +284,7 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 		t.Cleanup(input.Destroy)
 		return ssopg.ProviderLoginCallbackRequest{Input: input, Browser: browser, ReceivedRedirectURI: profile.ProtocolRedirectURI}
 	}
-	return nativeCallbackJourneyFixture{start: x, completion: completion, csrf: csrf, lookup: lookup, started: started, posts: posts, idToken: idToken, newAttempt: newAttempt,
+	return nativeCallbackJourneyFixture{start: x, completion: completion, completionConfig: completionConfig, csrf: csrf, lookup: lookup, started: started, posts: posts, idToken: idToken, newAttempt: newAttempt,
 		request: ssopg.ProviderLoginCallbackRequest{Input: input, Browser: x.browser, ReceivedRedirectURI: profile.ProtocolRedirectURI}}
 }
 
@@ -274,10 +323,17 @@ func newNativeCallbackJourneyAttempt(t *testing.T, x providerLoginStartFixture, 
 	return browser, attempt
 }
 
-func prepareNativeCallbackJourneyProvider(t *testing.T, x *providerLoginStartFixture) {
+func prepareNativeCallbackJourneyProvider(t *testing.T, x *providerLoginStartFixture, jit bool) {
 	t.Helper()
 	ctx := x.enable.f.ctx
 	registration := providerRequest(t, nativeCallbackJourneyIssuer, "native-callback-journey-register")
+	if jit {
+		mapping, err := sso.NewAttributeMapping(sso.AttributeMappingSpec{Version: 1, SubjectClaim: "sub", EmailClaim: "work_mail", VerifiedEmailClaim: "verified_work_mail"})
+		if err != nil {
+			t.Fatal("configure the installed verified enterprise mailbox mapping", err)
+		}
+		registration.Mapping = mapping
+	}
 	registered, err := x.enable.base.ProviderRegisterOidc(ctx, registration)
 	if err != nil || registered.Provider.Enabled || registered.Provider.Version != 1 {
 		t.Fatal("register the controlled provider through native disabled metadata custody", err)
@@ -449,12 +505,17 @@ func nativeCallbackJourneyInstalledSecret(t *testing.T, x providerLoginStartFixt
 	return secret
 }
 
-func nativeCallbackJourneyIDToken(t *testing.T, key *ecdsa.PrivateKey, nonce string, projectView *bool, assertedAt time.Time) string {
+func nativeCallbackJourneyIDToken(t *testing.T, key *ecdsa.PrivateKey, nonce string, projectView *bool, assertedAt time.Time, attributes ...map[string]any) string {
 	t.Helper()
 	claimSet := map[string]any{"iss": nativeCallbackJourneyIssuer, "sub": nativeCallbackJourneySubject, "aud": "native-sso-client",
 		"iat": assertedAt.Unix(), "exp": assertedAt.Add(5 * time.Minute).Unix(), "nonce": nonce}
 	if projectView != nil {
 		claimSet["project_view"] = *projectView
+	}
+	for _, selected := range attributes {
+		for name, value := range selected {
+			claimSet[name] = value
+		}
 	}
 	claims, err := json.Marshal(claimSet)
 	if err != nil {
