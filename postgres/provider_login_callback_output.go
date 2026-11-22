@@ -34,6 +34,7 @@ type providerLoginCallbackOutput struct {
 	ValidUntil time.Time
 	Terminal   []byte
 	Tokens     providerLoginPreparedTokens
+	RoleUpdate *providerLoginRoleUpdateWire `json:",omitempty"`
 }
 
 const providerLoginCallbackCipherLimit = 192 << 10
@@ -48,6 +49,10 @@ func (p *providerLoginCallbackPhase) callbackOutputContext(generation uint64, pu
 	if !ok || generation == 0 {
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
+	var roleMappingDigest *[32]byte
+	if p.roleMapping != nil {
+		roleMappingDigest = &p.roleMapping.digest
+	}
 	encoded, err := providerLoginPayloadEncode(struct {
 		Original                  identity.FeatureCommandSpec
 		StartProfile              [32]byte
@@ -56,8 +61,9 @@ func (p *providerLoginCallbackPhase) callbackOutputContext(generation uint64, pu
 		Metadata                  sso.OIDCStaticMetadataSpec
 		Authentication            oauth.ClientAuthentication
 		Algorithms, Claims        []string
+		RoleMappingDigest         *[32]byte `json:",omitempty"`
 	}{f, p.service.profileDigest, generation, p.policy.Audience, p.policy.PolicyNamespace, p.transport.metadata,
-		p.transport.authentication, p.transport.algorithms, p.transport.claims})
+		p.transport.authentication, p.transport.algorithms, p.transport.claims, roleMappingDigest})
 	defer clear(encoded)
 	if err != nil {
 		return envelope.Context{}, identity.ForbiddenError{}
@@ -105,7 +111,18 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 	if !now.Before(until) {
 		return nil, identity.ForbiddenError{}
 	}
-	fields, command, err := p.prepareCallbackSession(recipient, now, until)
+	roleUpdate, roleField, err := p.prepareProviderLoginRoleUpdate(ctx, result, recipient)
+	if errors.Is(err, sso.ErrForbidden) {
+		return p.sealProviderLoginCallbackRefusal(ctx, generation)
+	}
+	if err != nil {
+		return nil, err
+	}
+	organizationVersion := recipient.member.Version
+	if roleUpdate != nil {
+		organizationVersion = roleUpdate.ExpectedOrganizationVersion
+	}
+	fields, command, err := p.prepareCallbackSession(recipient, now, until, organizationVersion, roleField)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +137,7 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 	}
 	defer clear(terminal)
 	plain, err := providerLoginPayloadEncode(providerLoginCallbackOutput{Schema: 1, Fields: fields, Risk: providerLoginStoredAdmission(admission.Prepared()),
-		ObservedAt: p.found.ObservedAt, ValidUntil: until, Terminal: terminal, Tokens: tokens})
+		ObservedAt: p.found.ObservedAt, ValidUntil: until, Terminal: terminal, Tokens: tokens, RoleUpdate: roleUpdate})
 	defer clear(plain)
 	if err != nil || len(plain) > providerLoginCallbackPlainLimit {
 		return nil, identity.UnavailableError{}
@@ -135,7 +152,7 @@ func earliestProviderLoginCallbackTime(first time.Time, rest ...time.Time) time.
 	return first
 }
 
-func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLoginCallbackRecipient, now, until time.Time) ([]identity.FeatureField, identity.Command, error) {
+func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLoginCallbackRecipient, now, until time.Time, organizationVersion uint64, roleField *identity.FeatureField) ([]identity.FeatureField, identity.Command, error) {
 	deny := func(err error) ([]identity.FeatureField, identity.Command, error) {
 		return nil, identity.Command{}, err
 	}
@@ -148,7 +165,7 @@ func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLo
 		return deny(err)
 	}
 	account := recipient.account
-	vector, err := p.callbackSessionAuthority(account, recipient.factorVersion, recipient.policyVersion, recipient.member.Version, string(id), string(family))
+	vector, err := p.callbackSessionAuthority(account, recipient.factorVersion, recipient.policyVersion, organizationVersion, string(id), string(family))
 	if err != nil {
 		return deny(err)
 	}
@@ -176,6 +193,9 @@ func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLo
 	fields, err := callbackAccountSessionFields(record, account)
 	if err != nil {
 		return deny(err)
+	}
+	if roleField != nil {
+		fields = append(fields, *roleField)
 	}
 	command, err := p.callbackCommandWithOutput(fields)
 	if err != nil {
@@ -285,10 +305,24 @@ func (p *providerLoginCallbackPhase) restoreAccepted(ctx context.Context, genera
 		return err
 	}
 	fields, err := callbackAccountSessionFields(record, account)
-	if err != nil || !reflect.DeepEqual(fields, saved.Fields) || account.Account != saved.Tokens.Account || account.SocialLinkVersion != saved.Tokens.SocialLinkVersion {
+	if err != nil || account.Account != saved.Tokens.Account || account.SocialLinkVersion != saved.Tokens.SocialLinkVersion {
 		return identity.ForbiddenError{}
 	}
-	if err := p.checkRestoredSession(record, account, saved); err != nil {
+	roleUpdate, roleField, err := p.restoreProviderLoginRoleUpdate(saved.RoleUpdate, account.Account.UserID)
+	if err != nil {
+		return err
+	}
+	if roleField != nil {
+		fields = append(fields, *roleField)
+	}
+	if !reflect.DeepEqual(fields, saved.Fields) {
+		return identity.ForbiddenError{}
+	}
+	organizationVersion := p.authority.organization.Version
+	if roleField != nil {
+		organizationVersion = roleUpdate.ExpectedOrganizationVersion()
+	}
+	if err := p.checkRestoredSession(record, account, saved, organizationVersion); err != nil {
 		return err
 	}
 	terminal, err := p.service.payload.openProviderLoginCallbackTerminal(ctx, p.found.Row, saved.Terminal)
@@ -303,13 +337,13 @@ func (p *providerLoginCallbackPhase) restoreAccepted(ctx context.Context, genera
 	if err != nil {
 		return err
 	}
-	p.execution = &providerLoginCallbackExecution{command: command, record: record, admission: admission, tokens: saved.Tokens, terminal: saved.Terminal,
+	p.execution = &providerLoginCallbackExecution{command: command, record: record, admission: admission, tokens: saved.Tokens, terminal: saved.Terminal, roleUpdate: roleUpdate,
 		generation: generation, digest: digest, validUntil: earlierLoginTime(saved.ValidUntil, p.authority.deadline)}
 	owned = true
 	return nil
 }
 
-func (p *providerLoginCallbackPhase) checkRestoredSession(record session.Session, account kernel.ProviderAccountAdmission, output providerLoginCallbackOutput) error {
+func (p *providerLoginCallbackPhase) checkRestoredSession(record session.Session, account kernel.ProviderAccountAdmission, output providerLoginCallbackOutput, organizationVersion uint64) error {
 	spec, err := record.Bindings()
 	if err != nil {
 		return err
@@ -330,7 +364,7 @@ func (p *providerLoginCallbackPhase) checkRestoredSession(record session.Session
 	if err != nil {
 		return err
 	}
-	expected, err := p.callbackSessionAuthority(account, vector.Factor.Binding.Version, vector.Authorization.Version, p.authority.organization.Version, spec.SessionID, spec.FamilyID)
+	expected, err := p.callbackSessionAuthority(account, vector.Factor.Binding.Version, vector.Authorization.Version, organizationVersion, spec.SessionID, spec.FamilyID)
 	if err != nil {
 		return err
 	}

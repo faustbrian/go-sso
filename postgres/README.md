@@ -103,6 +103,30 @@ alias, not the stored provider ID. This construction-time snapshot performs no
 I/O and supplies no freshness or admission authority. `SigninCallback` retains
 all current provider, browser, linked-member and session checks.
 
+#### Optional repeat-login role synchronization
+
+Install the organization PostgreSQL `ProviderRoleGrantMigrationSource` and
+`ProviderRoleSourceProjectionMigrationSource` before this module's
+`ProviderRoleSourceMigrationSource`. The latter attaches to the existing
+provider lifecycle after its enablement history. It does not seed existing
+provider rows. Select a provider for role sync only after its enabled generation
+has been projected by its native lifecycle; unselected providers are unchanged.
+
+Use `NewProviderLoginCompletionServiceWithRoleSync` with explicit
+`StaticOIDCRoleMapping` rules scoped to the installed provider, organization and
+mapping version. Project each named claim from the signed ID token. An explicit
+`true` grants its mapped custom role and `false` withdraws it. Missing, null or
+nonboolean values deny the selected sign-in. The newer original start must
+replace older grants atomically with session issuance. This neither changes
+application-assigned or team roles nor admits an unlinked identity. For
+permission evaluation use the organization PostgreSQL
+`NewRepositoryWithProviderRoleGrants` reader.
+Role changes invalidate earlier organization-bound sessions; the newly issued
+session binds the successor organization revision. Disabling a provider with
+retained grants invalidates the old revision when the disable commits. Under
+contention the native disable remains subject to its ordinary outcome recovery
+and confirmed-failure retry rules.
+
 ### Static OIDC provider enablement
 
 Install `ProviderEnableMigrationSource` after the metadata and credential

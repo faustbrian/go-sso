@@ -58,6 +58,7 @@ type providerLoginStartFixture struct {
 	browser      ssopg.ProviderLoginBrowser
 	config       ssopg.ProviderLoginConfig
 	originalFlow session.PreAuthBinding
+	flowIssuer   *session.PreAuthIssuer
 }
 
 func newProviderLoginStartFixture(t *testing.T) providerLoginStartFixture {
@@ -183,7 +184,7 @@ func newProviderLoginStartFixture(t *testing.T) providerLoginStartFixture {
 		t.Fatal(err)
 	}
 	return providerLoginStartFixture{
-		enable: x, service: service, config: config, originalFlow: flow.Binding,
+		enable: x, service: service, config: config, originalFlow: flow.Binding, flowIssuer: issuer,
 		request: sso.SigninStartRequest{CommandID: commandID(t), ProviderID: string(provider), Domain: x.proof.Domain, SuccessCallback: callback, ErrorCallback: failure, LoginIntent: intent, IdempotencyKey: idempotency},
 		browser: ssopg.ProviderLoginBrowser{FlowID: flow.Binding.ID, FlowCookie: authentication.NewBearerCredential(wire), Origin: origin, Network: netip.MustParseAddr("192.0.2.84"), Device: "verified-native-login-browser"},
 	}

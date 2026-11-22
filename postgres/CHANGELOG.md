@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add opt-in static OIDC custom-role synchronization for existing linked
+  members. Verified boolean claims replace only that provider's grants in the
+  session transaction; unrelated grants, previous start ordering, and replay
+  boundaries are preserved. An additive migration tracks provider eligibility.
+
 - Add `SigninProtocolProfile` for exact organization/provider selection of
   detached, secret-free validated protocol metadata and effective parser limits.
   This read-only construction snapshot grants no callback or session authority.

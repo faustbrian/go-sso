@@ -14,6 +14,7 @@ import (
 	"github.com/faustbrian/go-identity/risk"
 	"github.com/faustbrian/go-identity/session"
 	sessionpg "github.com/faustbrian/go-identity/session/postgres"
+	organizationpg "github.com/faustbrian/go-organization/postgres"
 )
 
 type providerLoginCallbackPhase struct {
@@ -28,6 +29,7 @@ type providerLoginCallbackPhase struct {
 	policy       sessionpg.IdentifierAdmissionConfig
 	prepared     session.PreparedIssuance
 	execution    *providerLoginCallbackExecution
+	roleMapping  *providerLoginRoleMapping
 	acknowledged identity.CommandResult
 	canDisclose  bool
 }
@@ -37,6 +39,7 @@ type providerLoginCallbackExecution struct {
 	record     session.Session
 	admission  risk.AuthenticationAdmission
 	tokens     providerLoginPreparedTokens
+	roleUpdate organizationpg.ProviderRoleGrantUpdate
 	terminal   []byte
 	generation uint64
 	digest     [32]byte
@@ -239,7 +242,13 @@ func (p *providerLoginCallbackPhase) checkExecutionAt(ctx context.Context, work 
 func (p *providerLoginCallbackPhase) checkProviderCurrent(ctx context.Context, work kernel.Work) error {
 	// The session effect acquires its session locks before organization. Keep
 	// the same ordering, then retain the exact provider disposition lock.
-	if err := p.service.router.organizations.RequireCredentialAuthority(ctx, work, p, p.authority.organization); err != nil {
+	owner := p.authority.organization
+	if p.roleMapping != nil {
+		// Apply already checked the predecessor and the bound successor in
+		// this Work. Preserve the original observation's freshness window.
+		owner.Version = p.execution.roleUpdate.ExpectedOrganizationVersion()
+	}
+	if err := p.service.router.organizations.RequireCredentialAuthority(ctx, work, p, owner); err != nil {
 		return err
 	}
 	return requireProviderLoginCallbackDisposition(ctx, work, p.found, p.execution.validUntil)
@@ -254,7 +263,12 @@ func (p *providerLoginCallbackPhase) ApplyFeature(ctx context.Context, work kern
 	if err != nil || generation != p.execution.generation || sha256.Sum256(wire) != p.execution.digest {
 		return identity.FeatureReceipt{}, identity.ForbiddenError{}
 	}
-	receipt, err := p.effect.Apply(ctx, work, p, command, p.flow)
+	var receipt identity.FeatureReceipt
+	if p.roleMapping == nil {
+		receipt, err = p.effect.Apply(ctx, work, p, command, p.flow)
+	} else {
+		receipt, err = p.effect.ApplyWithOrganizationUpdate(ctx, work, p, command, p.flow, p)
+	}
 	if err != nil {
 		return identity.FeatureReceipt{}, err
 	}
@@ -268,6 +282,14 @@ func (p *providerLoginCallbackPhase) ApplyFeature(ctx context.Context, work kern
 		return identity.FeatureReceipt{}, err
 	}
 	return receipt, nil
+}
+
+func (p *providerLoginCallbackPhase) UpdateSSOOIDCOrganization(ctx context.Context, work kernel.Work, owner kernel.FeatureExecutionContributor, command identity.Command, record session.Session) error {
+	if p == nil || p.execution == nil || p.roleMapping == nil || owner != p || command != p.execution.command ||
+		!equalProviderLoginSession(record, p.execution.record) {
+		return identity.ForbiddenError{}
+	}
+	return p.service.router.organizations.ApplyProviderRoleGrantUpdate(ctx, work, owner, command, p.execution.roleUpdate)
 }
 
 func (p *providerLoginCallbackPhase) CheckFeatureCommit(ctx context.Context, work kernel.Work, command identity.Command) error {

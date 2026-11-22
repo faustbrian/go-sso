@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -75,13 +76,23 @@ type nativeCallbackJourneyFixture struct {
 	started    sso.SigninStartResult
 	posts      *atomic.Int32
 	idToken    string
+	newAttempt func(*testing.T, string, *bool, time.Time) ssopg.ProviderLoginCallbackRequest
 }
 
 func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJourneyFixture {
 	t.Helper()
 	x := newProviderLoginStartFixture(t)
-	prepareNativeCallbackJourneyProvider(t, &x)
-	installNativeCallbackJourneyMigrations(t, x.enable.f)
+	const roleGrant = "native-enterprise-reader"
+	rolesSelected := mode == "role-grant"
+	if rolesSelected {
+		installNativeCallbackJourneyMigrations(t, x.enable.f)
+		installProviderRoleSourceProjection(t, x.enable.f)
+		prepareNativeCallbackJourneyProvider(t, &x)
+		prepareNativeCallbackRole(t, x, roleGrant)
+	} else {
+		prepareNativeCallbackJourneyProvider(t, &x)
+		installNativeCallbackJourneyMigrations(t, x.enable.f)
+	}
 	seedNativeCallbackJourneyRecipient(t, x)
 	policy := kernel.CommandQueryPolicy{Authorization: nativeCallbackJourneyPolicy{}, Clock: clock.System{}, PolicyVersion: 1}
 	x.config.Coordinator.AdmissionPolicy, x.config.Coordinator.QueryPolicy = &policy, &policy
@@ -116,7 +127,16 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 	if err != nil {
 		t.Fatal(err)
 	}
-	idToken := nativeCallbackJourneyIDToken(t, key, query.Get("nonce"))
+	var projectView *bool
+	if rolesSelected {
+		value := true
+		projectView = &value
+	}
+	idToken := nativeCallbackJourneyIDToken(t, key, query.Get("nonce"), projectView, time.Now().UTC())
+	const originalCode = "native-enterprise-original-code"
+	type providerReply struct{ challenge, token string }
+	replies := map[string]providerReply{originalCode: {challenge: query.Get("code_challenge"), token: idToken}}
+	var repliesMu sync.Mutex
 	secret := nativeCallbackJourneyInstalledSecret(t, x)
 	t.Cleanup(func() { clear(secret) })
 	posts := &atomic.Int32{}
@@ -131,16 +151,19 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 			return
 		}
 		challenge := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
-		if r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("code") != "native-enterprise-original-code" ||
+		repliesMu.Lock()
+		reply, registered := replies[r.PostForm.Get("code")]
+		repliesMu.Unlock()
+		if r.PostForm.Get("grant_type") != "authorization_code" || !registered ||
 			r.PostForm.Get("redirect_uri") != x.config.Profiles[0].ProtocolRedirectURI ||
-			base64.RawURLEncoding.EncodeToString(challenge[:]) != query.Get("code_challenge") {
+			base64.RawURLEncoding.EncodeToString(challenge[:]) != reply.challenge {
 			t.Error("provider exchange substituted the original code, redirect or PKCE verifier")
 			http.Error(w, "invalid grant fixture", http.StatusBadRequest)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": nativeCallbackJourneyAccessToken,
-			"refresh_token": nativeCallbackJourneyRefreshToken, "id_token": idToken, "token_type": "Bearer", "expires_in": 3600, "scope": "openid email"})
+			"refresh_token": nativeCallbackJourneyRefreshToken, "id_token": reply.token, "token_type": "Bearer", "expires_in": 3600, "scope": "openid email"})
 	}))
 	certificate, roots := nativeCallbackJourneyTLSCertificate(t)
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
@@ -167,7 +190,7 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 		t.Fatal(err)
 	}
 	profile := x.config.Profiles[0]
-	completion, err := ssopg.NewProviderLoginCompletionService(x.service, ssopg.ProviderLoginCompletionConfig{
+	completionConfig := ssopg.ProviderLoginCompletionConfig{
 		Audience: "native-enterprise-app", PolicyNamespace: "users", CSRFKey: csrf,
 		Issuer: session.IssuerConfig{Clock: clock.System{}, MaximumDuration: 3 * time.Second, LookupKey: lookup, TokenSize: 32, Cookie: cookie},
 		Profiles: []ssopg.StaticOIDCCompletionProfile{{OrganizationID: profile.OrganizationID, ProviderID: profile.ProviderID,
@@ -175,17 +198,80 @@ func newNativeCallbackJourneyFixture(t *testing.T, mode string) nativeCallbackJo
 				TokenEndpoint: nativeCallbackJourneyIssuer + "/token", JWKSURI: nativeCallbackJourneyIssuer + "/keys"},
 			ClientAuthentication: oauth.ClientSecretBasic, Algorithms: []string{"ES256"},
 			Keys: &coreoidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&key.PublicKey}}, HTTPClient: &http.Client{Transport: transport}}},
-	})
+	}
+	var completion *ssopg.ProviderLoginCompletionService
+	if rolesSelected {
+		completionConfig.Profiles[0].ClaimNames = []string{"project_view"}
+		completion, err = ssopg.NewProviderLoginCompletionServiceWithRoleSync(x.service, completionConfig, []ssopg.StaticOIDCRoleMapping{{
+			OrganizationID: profile.OrganizationID, ProviderID: profile.ProviderID, MappingVersion: profile.MappingVersion,
+			Rules: []ssopg.StaticOIDCRoleRule{{ClaimName: "project_view", RoleID: roleGrant}},
+		}})
+	} else {
+		completion, err = ssopg.NewProviderLoginCompletionService(x.service, completionConfig)
+	}
 	if err != nil {
 		t.Fatal("compose native existing-member completion using the pinned provider", err)
 	}
-	input, err := identity.NewOAuthCallbackInput([]byte("native-enterprise-original-code"), query.Get("state"), identity.OAuthCallbackLimits{MaxCodeBytes: 4096, StateBytes: 32})
+	input, err := identity.NewOAuthCallbackInput([]byte(originalCode), query.Get("state"), identity.OAuthCallbackLimits{MaxCodeBytes: 4096, StateBytes: 32})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(input.Destroy)
-	return nativeCallbackJourneyFixture{start: x, completion: completion, csrf: csrf, lookup: lookup, started: started, posts: posts, idToken: idToken,
+	newAttempt := func(t *testing.T, code string, projectView *bool, assertedAt time.Time) ssopg.ProviderLoginCallbackRequest {
+		t.Helper()
+		browser, attempt := newNativeCallbackJourneyAttempt(t, x, code)
+		authorize := attempt.RedirectURI.Query()
+		if assertedAt.IsZero() {
+			assertedAt = time.Now().UTC()
+		}
+		reply := providerReply{challenge: authorize.Get("code_challenge"), token: nativeCallbackJourneyIDToken(t, key, authorize.Get("nonce"), projectView, assertedAt)}
+		repliesMu.Lock()
+		replies[code] = reply
+		repliesMu.Unlock()
+		input, err := identity.NewOAuthCallbackInput([]byte(code), authorize.Get("state"), identity.OAuthCallbackLimits{MaxCodeBytes: 4096, StateBytes: 32})
+		if err != nil {
+			t.Fatal("bind new native provider callback", err)
+		}
+		t.Cleanup(input.Destroy)
+		return ssopg.ProviderLoginCallbackRequest{Input: input, Browser: browser, ReceivedRedirectURI: profile.ProtocolRedirectURI}
+	}
+	return nativeCallbackJourneyFixture{start: x, completion: completion, csrf: csrf, lookup: lookup, started: started, posts: posts, idToken: idToken, newAttempt: newAttempt,
 		request: ssopg.ProviderLoginCallbackRequest{Input: input, Browser: x.browser, ReceivedRedirectURI: profile.ProtocolRedirectURI}}
+}
+
+func newNativeCallbackJourneyAttempt(t *testing.T, x providerLoginStartFixture, code string) (ssopg.ProviderLoginBrowser, sso.SigninStartResult) {
+	t.Helper()
+	ctx := x.enable.f.ctx
+	prepared, err := x.flowIssuer.Prepare(session.PreAuthPrepareInput{CommandID: commandID(t), TenantID: x.config.TenantID,
+		CorrelationID: code, Remember: x.originalFlow.Intent.Remember})
+	if err != nil {
+		t.Fatal("prepare second real browser", err)
+	}
+	issued, err := x.flowIssuer.Issue(ctx, prepared)
+	if err != nil || issued.CommitOutcome != identity.CommitOutcomeCommitted || issued.Replayed {
+		t.Fatal("issue second real browser", err)
+	}
+	flow, err := issued.Flow.Bindings()
+	if err != nil {
+		t.Fatal("read issued browser", err)
+	}
+	secret, err := issued.Token.Reveal()
+	if err != nil {
+		t.Fatal("deliver issued browser", err)
+	}
+	browser := x.browser
+	browser.FlowID, browser.FlowCookie = flow.Binding.ID, authentication.NewBearerCredential(secret)
+	request := x.request
+	request.CommandID = commandID(t)
+	request.IdempotencyKey, err = identity.NewIdempotencyKey([]byte(code))
+	if err != nil {
+		t.Fatal("bind distinct login start key", err)
+	}
+	attempt, err := x.service.SigninStart(ctx, request, browser)
+	if err != nil || attempt.Completion.Outcome != identity.CommitOutcomeCommitted {
+		t.Fatal("commit second native provider start", err)
+	}
+	return browser, attempt
 }
 
 func prepareNativeCallbackJourneyProvider(t *testing.T, x *providerLoginStartFixture) {
@@ -300,6 +386,7 @@ func installNativeCallbackJourneyMigrations(t *testing.T, f *orgFixture) {
 			t.Fatal("install and replay native callback migration composition", err)
 		}
 	}
+	f.history = append(migrationList(nil), history...)
 }
 
 func nativeCallbackJourneyExec(t *testing.T, x providerLoginStartFixture, sql string, args ...any) {
@@ -362,11 +449,14 @@ func nativeCallbackJourneyInstalledSecret(t *testing.T, x providerLoginStartFixt
 	return secret
 }
 
-func nativeCallbackJourneyIDToken(t *testing.T, key *ecdsa.PrivateKey, nonce string) string {
+func nativeCallbackJourneyIDToken(t *testing.T, key *ecdsa.PrivateKey, nonce string, projectView *bool, assertedAt time.Time) string {
 	t.Helper()
-	now := time.Now().UTC()
-	claims, err := json.Marshal(map[string]any{"iss": nativeCallbackJourneyIssuer, "sub": nativeCallbackJourneySubject, "aud": "native-sso-client",
-		"iat": now.Unix(), "exp": now.Add(5 * time.Minute).Unix(), "nonce": nonce})
+	claimSet := map[string]any{"iss": nativeCallbackJourneyIssuer, "sub": nativeCallbackJourneySubject, "aud": "native-sso-client",
+		"iat": assertedAt.Unix(), "exp": assertedAt.Add(5 * time.Minute).Unix(), "nonce": nonce}
+	if projectView != nil {
+		claimSet["project_view"] = *projectView
+	}
+	claims, err := json.Marshal(claimSet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,25 +563,32 @@ func (p nativeCallbackJourneyLogoutPolicy) Decide(ctx context.Context, c authori
 	return decision, nil
 }
 
-func assertNativeCallbackJourneyLocalSessionAndLogout(t *testing.T, x nativeCallbackJourneyFixture, issued ssopg.ProviderLoginCallbackResult, bearer, csrfWire string) {
+func nativeCallbackJourneySessionReader(t *testing.T, x nativeCallbackJourneyFixture, audience string) (*session.SessionService, sessionpg.SSOOIDCSessionAdmission) {
 	t.Helper()
-	f, ctx := x.start.enable.f, x.start.enable.f.ctx
-	spec, _ := issued.Issuance.Session.Bindings()
+	f := x.start.enable.f
 	organizations, err := organizationpg.NewRepository(f.pool, organizationpg.Config{MaximumDuration: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	profile := sessionpg.IdentifierAdmissionConfig{GlobalAuthorityID: x.start.config.GlobalAuthorityID, PolicyNamespace: "users",
-		Audience: spec.Audience, AuthenticationMethod: "sso-oidc", CredentialKind: identity.CredentialProvider, CredentialOwner: "sso"}
+		Audience: audience, AuthenticationMethod: "sso-oidc", CredentialKind: identity.CredentialProvider, CredentialOwner: "sso"}
 	selection := sessionpg.SSOOIDCSessionAdmission{Profile: profile, Authority: organizations}
 	reader, err := sessionpg.NewSelectedSessionService(f.pool, sessionpg.SelectedSessionServiceConfig{
 		Repository: x.start.config.Session, Admission: sessionpg.SelectedSessionAdmissionConfig{SSOOIDC: &selection},
-		Validation: session.ServiceConfig{Profile: session.StorageStatefulOpaque, Audience: spec.Audience, Clock: clock.System{},
+		Validation: session.ServiceConfig{Profile: session.StorageStatefulOpaque, Audience: audience, Clock: clock.System{},
 			MaximumDuration: time.Second, ClockUncertainty: time.Millisecond, LookupKeys: []session.DigestKey{x.lookup}},
 	})
 	if err != nil {
 		t.Fatal("compose exact enterprise session reader with the actual organization owner", err)
 	}
+	return reader, selection
+}
+
+func assertNativeCallbackJourneyLocalSessionAndLogout(t *testing.T, x nativeCallbackJourneyFixture, issued ssopg.ProviderLoginCallbackResult, bearer, csrfWire string) {
+	t.Helper()
+	f, ctx := x.start.enable.f, x.start.enable.f.ctx
+	spec, _ := issued.Issuance.Session.Bindings()
+	reader, selection := nativeCallbackJourneySessionReader(t, x, spec.Audience)
 	token, err := session.ParseToken(bearer)
 	if err != nil {
 		t.Fatal(err)
@@ -511,7 +608,7 @@ func assertNativeCallbackJourneyLocalSessionAndLogout(t *testing.T, x nativeCall
 		t.Fatal("native cookie access selected another session or enterprise account", err)
 	}
 	policy := nativeCallbackJourneyLogoutPolicy{tenant: spec.TenantID, user: spec.UserID}
-	execution := sessionpg.IssueExecutorConfig{Repository: x.start.config.Session, Profile: sessionpg.IssueAdmissionConfig(profile),
+	execution := sessionpg.IssueExecutorConfig{Repository: x.start.config.Session, Profile: sessionpg.IssueAdmissionConfig(selection.Profile),
 		Coordinator: kernel.CoordinatorConfig{MaximumDuration: 3 * time.Second, LeaseDuration: time.Minute,
 			CurrentFingerprintKeyVersion: 1, RetainedFingerprintKeys: map[uint32][32]byte{1: {0xc4}}},
 		Authorization: policy, Clock: clock.System{}, PolicyID: "native-enterprise-session", PolicyVersion: 1, AuditRetentionVersion: 1}

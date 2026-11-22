@@ -12,16 +12,17 @@ require (
 	github.com/faustbrian/go-capability/v2 v2.0.2-0.20261015044219-caab644d2fec
 	github.com/faustbrian/go-clock v1.2.0
 	github.com/faustbrian/go-identity v0.0.0-20261122023921-087c28e1764c
+	github.com/faustbrian/go-identity/mfa/postgres v0.0.0-20261122101054-6f354486dfa8
 	github.com/faustbrian/go-identity/oauth v0.0.0-20261122100431-97d15e4b29a5
 	github.com/faustbrian/go-identity/password/postgres v0.0.0-20261028082559-7ca5d4db76d2
 	github.com/faustbrian/go-identity/postgres v0.0.0-20261122115638-03eecbdd5e31
 	github.com/faustbrian/go-identity/risk v0.0.0-20261122065216-9bb9f634fca0
 	github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261122024644-105adde9ae64
 	github.com/faustbrian/go-identity/session v0.0.0-20261122113133-8255a0f3eea8
-	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261122113751-50e01abd6105
+	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261122134834-c860522257a2
 	github.com/faustbrian/go-migrations/v3 v3.1.1-0.20261015110643-ca105f265cfc
-	github.com/faustbrian/go-organization v0.0.0-20261029043426-3ab7798be548
-	github.com/faustbrian/go-organization/postgres v0.0.0-20261122054917-c492ad64121c
+	github.com/faustbrian/go-organization v0.0.0-20261122135635-30af6abd1547
+	github.com/faustbrian/go-organization/postgres v0.0.0-20261122144101-c63e0c53630e
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
@@ -43,7 +44,6 @@ require (
 	github.com/faustbrian/go-identity/delivery/postgres v0.0.0-20261015104034-f16881100907 // indirect
 	github.com/faustbrian/go-identity/email v0.0.0-20261018110349-e38aa409e7d8 // indirect
 	github.com/faustbrian/go-identity/mfa v0.0.0-20261025081547-dcd89dfc3e34 // indirect
-	github.com/faustbrian/go-identity/mfa/postgres v0.0.0-20261122101054-6f354486dfa8 // indirect
 	github.com/faustbrian/go-identity/otp v0.0.0-20261020141901-5c1b01401fc6 // indirect
 	github.com/faustbrian/go-identity/otp/postgres v0.0.0-20261020215141-387cc56b91f6 // indirect
 	github.com/faustbrian/go-identity/password v0.0.0-20261027053124-3051d2cd42b5 // indirect

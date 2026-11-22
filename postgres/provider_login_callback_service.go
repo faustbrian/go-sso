@@ -100,6 +100,7 @@ type ProviderLoginCompletionService struct {
 	start            *ProviderLoginService
 	profiles         map[providerLoginProfileKey]providerLoginCallbackTransport
 	protocolProfiles map[providerLoginProfileKey]oauth.ProviderProfile
+	roleMappings     map[providerLoginProfileKey]providerLoginRoleMapping
 	policy           sessionpg.IdentifierAdmissionConfig
 	effect           *sessionpg.SSOOIDCSigninEffect
 	issuer           session.IssuerConfig
@@ -153,6 +154,36 @@ func NewProviderLoginCompletionService(start *ProviderLoginService, config Provi
 	return &ProviderLoginCompletionService{start: start, profiles: owners, protocolProfiles: protocolProfiles, policy: policy, effect: effect, issuer: config.Issuer, csrfKey: config.CSRFKey}, nil
 }
 
+// NewProviderLoginCompletionServiceWithRoleSync explicitly selects repeat-login
+// custom role synchronization for configured static OIDC profiles. Mappings
+// must match the installed login mapping versions and selected claim projection.
+// Install the organization grant and native provider source migrations first.
+// Unselected providers retain ordinary existing-linked-member sign-in.
+func NewProviderLoginCompletionServiceWithRoleSync(start *ProviderLoginService, config ProviderLoginCompletionConfig, mappings []StaticOIDCRoleMapping) (*ProviderLoginCompletionService, error) {
+	if len(mappings) == 0 || len(mappings) > len(config.Profiles) {
+		return nil, sso.ErrInvalidInput
+	}
+	service, err := NewProviderLoginCompletionService(start, config)
+	if err != nil {
+		return nil, err
+	}
+	service.roleMappings = make(map[providerLoginProfileKey]providerLoginRoleMapping, len(mappings))
+	for _, selection := range mappings {
+		key := providerLoginProfileKey{organization: selection.OrganizationID, provider: selection.ProviderID}
+		transport, available := service.profiles[key]
+		_, duplicate := service.roleMappings[key]
+		if !available || duplicate || selection.MappingVersion != start.profiles[key].MappingVersion {
+			return nil, sso.ErrInvalidInput
+		}
+		mapping, err := newProviderLoginRoleMapping(selection, transport.claims)
+		if err != nil {
+			return nil, err
+		}
+		service.roleMappings[key] = mapping
+	}
+	return service, nil
+}
+
 // SigninCallback processes the original query authorization code natively.
 // It authenticates the original browser and state, then delegates admission,
 // one-use reservation, generation, final Work and acknowledgment to the owning
@@ -192,6 +223,13 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 	if !available || transport.metadata.Issuer != found.Binding.Metadata.Input.Issuer {
 		return out, sso.ErrForbidden
 	}
+	var assignedRoles *providerLoginRoleMapping
+	if mapping, selected := s.roleMappings[key]; selected {
+		if mapping.mappingVersion != found.Row.MappingVersion {
+			return out, sso.ErrForbidden
+		}
+		assignedRoles = &mapping
+	}
 	command, err := s.start.prepareProviderLoginCallbackCommand(ctx, found, request.ReceivedRedirectURI, request.Browser, request.Input)
 	if err != nil {
 		return out, err
@@ -214,7 +252,7 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 	}
 	phase := &providerLoginCallbackPhase{
 		providerLoginCallbackInvocation: providerLoginCallbackInvocation{service: s.start, found: found, original: original, authority: authority, flow: flow, browser: request.Browser, command: command},
-		grant:                           grant, transport: transport, input: request.Input, effect: s.effect, policy: s.policy,
+		grant:                           grant, transport: transport, input: request.Input, effect: s.effect, policy: s.policy, roleMapping: assignedRoles,
 	}
 	defer func() {
 		if phase.refusal != nil {
