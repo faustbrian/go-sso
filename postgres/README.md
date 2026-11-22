@@ -1,4 +1,4 @@
-# Native SSO challenge custody
+# Native SSO PostgreSQL adapter
 
 Experimental optional adapter for DNS/opt-in HTTPS domain proof and disabled static-OIDC
 provider metadata registration.
@@ -7,9 +7,10 @@ and original safe organization recovery scope. It has no proof/result table,
 transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata; a separate opt-in credential service stores
 only configured-envelope client-secret custody. A separate opt-in enables a
-static OIDC provider after verified readiness. Trusted native routing and
-anonymous discovery are separate opt-ins; enforcement, protocol login, JIT
-and optional wire-protocol modules are not part of this adapter profile.
+static OIDC provider after verified readiness. Trusted routing, anonymous
+discovery and static OIDC sign-in start are separate opt-ins. This profile
+does not process protocol callbacks, issue sessions, enforce federation or
+perform JIT provisioning.
 
 ### Static OIDC login custody schema
 
@@ -27,6 +28,35 @@ binding and verifier custody. The verifier column must be absent once a row is
 terminal. The second table retains the selected drain or revoke disposition
 and its original bounded active count for one exact provider version. Applying
 this migration does not enable sign-in, execute disablement, or start cleanup.
+
+### Native static OIDC sign-in start
+
+Before constructing `NewProviderLoginService`, install the existing native
+provider and login custody migrations, the session pre-auth and issuer
+migrations, the risk counter and audit/outbox histories, and
+`identity/postgres.SSOOIDCPreparationErasureMigrationSource` after the prior
+OAuth provider refresh erasure. The last migration is required to finalize a
+successful start and erase the temporary coordinator copy. It does not erase
+the separate native login transaction or its callback verifier.
+
+Configure one tenant, its trusted service actor and browser origin, exact
+allowed HTTPS return URLs, and the installed provider/mapping/credential
+versions with client ID, provider callback URL and `openid` scopes. The risk
+evaluator must count and durably audit `identity.sso.signin-start`; supply
+retained flow, preparation, state, replay and PKCE keys for their original
+lifetimes. The provider holds current credentials, but start does not retrieve
+or use a client secret to contact the provider.
+
+First issue an original pre-auth flow through the existing session owner for
+`identity.sso.oidc-callback`, the exact successful return URL and resolved
+remember policy. Pass that flow and its opaque browser cookie to `SigninStart`
+with a network address and device identity from the trusted transport. Keep
+the full request and idempotency key for retries. The request command ID is
+correlation input; the coordinator chooses the durable command ID returned as
+`TransactionID`. An acknowledged, still-admitted retry returns the original
+code/S256 authorization redirect and never renews state or the pre-auth flow.
+An unknown commit or stale current authority returns no redirect. Start
+installs no HTTP route, exchanges no code and creates no user or session.
 
 ### Static OIDC provider enablement
 

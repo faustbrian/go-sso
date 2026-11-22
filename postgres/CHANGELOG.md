@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add opt-in native static OIDC sign-in start. An original browser flow binds
+  the selected provider and the persisted code/S256 redirect; state issuance,
+  required audit and lifecycle effects commit together. The same request
+  recovers the original redirect without another grant or a renewed lifetime.
+  No callback processing or session issuance is included.
+
 - Add the forward-only `LoginTransactionMigrationSource` for static OIDC
   transaction custody and versioned provider disposition. Install it after
   provider enablement schema and before activating later native writers.
