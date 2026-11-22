@@ -12,7 +12,7 @@ require (
 	github.com/faustbrian/go-identity v0.0.0-20261113182449-aa4bb5fcfafb
 	github.com/faustbrian/go-identity/password/postgres v0.0.0-20261028082559-7ca5d4db76d2
 	github.com/faustbrian/go-identity/postgres v0.0.0-20261113234404-7672e7aa715a
-	github.com/faustbrian/go-identity/risk v0.0.0-20261113235539-163f9ee59da2
+	github.com/faustbrian/go-identity/risk v0.0.0-20261122030339-5cf0c7d3ea71
 	github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261028092233-945b17fc88c4
 	github.com/faustbrian/go-identity/session v0.0.0-20261027053124-3051d2cd42b5
 	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261027044816-80f08eb82bb9
@@ -22,7 +22,7 @@ require (
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
-	github.com/faustbrian/go-sso v0.0.0-20261114033432-ed1db895fe45
+	github.com/faustbrian/go-sso v0.0.0-20261122030741-6edaaa799cdc
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734
 	github.com/faustbrian/go-transactional-outbox/postgres/identity v0.0.0-20261020135213-493107bf82af
 	github.com/faustbrian/go-transactional-outbox/v2 v2.0.2-0.20261015062550-37ea15436ae9

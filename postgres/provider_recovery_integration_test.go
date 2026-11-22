@@ -124,7 +124,7 @@ func providerLossService(t *testing.T, f *orgFixture, config ssopg.ProviderServi
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service, fault
+	return withProviderUpdateOwner(t, service), fault
 }
 
 func TestNativeProviderAmbiguousCommitRecoversOriginalOnly(t *testing.T) {

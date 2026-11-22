@@ -28,6 +28,10 @@ import (
 )
 
 func newProviderFixture(t *testing.T) (*orgFixture, *ssopg.ProviderService, ssopg.ProviderServiceConfig) {
+	return newProviderFixtureWithUpdates(t, true)
+}
+
+func newProviderFixtureWithUpdates(t *testing.T, updates bool) (*orgFixture, *ssopg.ProviderService, ssopg.ProviderServiceConfig) {
 	t.Helper()
 	// Compose real optional kernel migrations without duplicating the already
 	// installed kernel base or changing the accepted DNS fixture's history.
@@ -42,6 +46,9 @@ func newProviderFixture(t *testing.T) (*orgFixture, *ssopg.ProviderService, ssop
 		}
 	}
 	f := newOrgFixtureWithIdentities(t, []identity.TenantID{"org-test-basic", "org-test-other"}, []identity.UserID{"owner"}, additions, organizationpg.CredentialAuthorityMigrationSource{Version: 315}, ssopg.ProviderMigrationSource{Version: 320})
+	if updates {
+		installProviderUpdates(t, f)
+	}
 	f.create(t, "org-test-basic")
 	repository, err := organizationpg.NewRepository(f.pool, organizationpg.Config{MaximumDuration: time.Second})
 	if err != nil {
@@ -75,7 +82,7 @@ func newProviderFixture(t *testing.T) (*orgFixture, *ssopg.ProviderService, ssop
 	if err != nil {
 		t.Fatal("actual provider composition", err)
 	}
-	return f, service, config
+	return f, withProviderUpdateOwner(t, service), config
 }
 
 func providerRequest(t *testing.T, issuer, key string) sso.ProviderRegisterOidcRequest {

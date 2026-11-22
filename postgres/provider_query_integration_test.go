@@ -206,7 +206,7 @@ func tracedProviderService(t *testing.T, f *orgFixture, config ssopg.ProviderSer
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service
+	return withProviderUpdateOwner(t, service)
 }
 
 // Query scale is a bounded isolated cost proof, not production latency or

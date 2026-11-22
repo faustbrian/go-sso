@@ -8,6 +8,77 @@ transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata only; provider enable, protocol login, JIT
 and every optional wire-protocol module remain unselected.
 
+### Disabled provider metadata updates
+
+Apply the unchanged `ProviderMigrationSource`, then the independently versioned
+`ProviderUpdateMigrationSource`, before starting update-aware provider service
+code (including its Get/List projection). The extension adds a constant-default
+numeric metadata version and nullable successor envelope/mapping columns. It
+does not backfill or rewrite historical provider rows. The single bounded
+`ALTER TABLE` uses a five-second lock timeout and an unvalidated check that
+enforces every subsequent write without scanning the populated table. It needs
+a brief exclusive metadata lock; retry the migration through the migration
+runner if that bounded acquisition fails. There is no data-changing backfill
+or destructive rollback. Reverting code retains successor state.
+
+The original version/configuration/mapping columns remain a consistent disabled
+v1 projection for old readers and old registration writers. New registrations
+still produce v1 receipts. An original registration retry still returns its v1
+receipt after an update; ordinary scoped Get/List observe the current successor.
+An old binary does not observe successors and must not administer update-aware
+state. This is read/write schema compatibility, not a downgrade of successors.
+
+The canonical native risk owner must explicitly select
+`identity.sso.provider.update` as privileged before callers enable updates;
+an unselected pinned catalog fails closed, never borrowing registration's
+operation or bypassing counters. All existing session, organization, risk,
+request-key, preparation, audit and outbox owners remain required.
+
+Select `service.WithProviderUpdateAuthorization(owner)`, then bind the native
+service using `service.ForOrganization(organizationID)` before calling
+`ProviderUpdate(ctx, request)`. The update-only policy owner must return an Allow
+decision for the exact detached context, native actor authorization epoch and
+an absolute `ValidUntil`: the earliest activation/condition boundary that could
+change that decision. Invalidating changes before this deadline must advance
+the existing native actor authorization epoch. A generic authorization service
+returning only a decision/revision is insufficient; there is no inferred TTL.
+Missing, denied, expired or mismatched evidence fails closed.
+
+The owner evaluates once outside Work at the original primary database admission
+time. Its deadline caps that admission's existing minimum validity horizon.
+Preparation/final commit use authoritative database time and the existing
+unchanged actor/organization authority checks; they never call arbitrary policy
+code while locks are held or renew the original deadline. Successful response
+and original-key recovery disclosure may separately reauthorize current access.
+An expired mutation cannot become committed by that later disclosure check.
+Registration and ordinary Get/List retain their existing authorization contract.
+
+Trusted composition or transport supplies
+that separate organization selector because the catalog request contains none.
+The selector is not an ownership assertion: current authenticated tenant/actor,
+native organization owner/admin authority and `org:sso-write` are checked on
+every call and rechecked in coordinator Work. An unbound service rejects updates;
+the adapter never globally resolves the provider ID or accepts caller-vouched
+ownership. Every provider read and compare-and-set uses tenant, organization
+and provider together.
+
+The selected profile replaces explicit static-OIDC endpoints and a complete
+flat attribute mapping only while disabled. Issuer, stable subject claim and
+pending domains remain unchanged; provider and mapping versions advance without
+wraparound. Configuration is envelope-encrypted with exact tenant, organization,
+provider, protocol, purpose and successor version. The same native transaction
+commits the successor, command effect, required audit and lifecycle outbox event.
+Original-key retries recover the original receipt without another update;
+changed input conflicts, and unknown completion exposes no provider result.
+Credential, enablement, discovery-network and routing profiles remain excluded.
+
+The complete successor JSON, including retained pending domains and JSON escaping,
+is limited to 48KiB before any keyed custody is retained. The same bound controls
+stored-configuration decoding. Update preparation allows 96KiB JSON to hold the
+base64-encoded encrypted configuration (itself capped at 64KiB) and scalar frame;
+the matching encrypted outer-wire limit is 96KiB plus 4096 bytes of envelope
+overhead. Original registration's 64KiB preparation profile stays unchanged.
+
 ## Setup and ownership
 
 Apply the existing identity/kernel/session/risk/authorization/audit/outbox and

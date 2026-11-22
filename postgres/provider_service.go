@@ -26,8 +26,9 @@ import (
 
 // ProviderServiceConfig selects the existing native session, organization,
 // policy, counter, command and envelope owners. No provider HTTP client or
-// credentials are accepted. Install ProviderMigrationSource and the selected
-// owners' request-key/preparation, audit, outbox and authority migrations first.
+// credentials are accepted. Install ProviderMigrationSource,
+// ProviderUpdateMigrationSource and the selected owners' request-key/preparation,
+// audit, outbox and authority migrations first.
 // The caller retains the pool and keys for the entire service/recovery lifetime.
 type ProviderServiceConfig struct {
 	Clock           clock.Clock
@@ -48,15 +49,17 @@ type ProviderServiceConfig struct {
 }
 
 // ProviderService authenticates each invocation and exposes only disabled
-// metadata registration and scoped safe reads. The service is concurrency-safe;
+// metadata registration, non-secret update and scoped safe reads. The service is concurrency-safe;
 // each mutation gets a separate native contributor and immutable admission.
 // Authentication and network are trusted transport inputs, not request fields.
 type ProviderService struct {
-	pool           *database.Pool
-	config         ProviderServiceConfig
-	authentication organization.Authentication
-	network        string
-	directory      *kernel.Repository
+	pool                *database.Pool
+	config              ProviderServiceConfig
+	authentication      organization.Authentication
+	network             string
+	directory           *kernel.Repository
+	updateOrganization  string
+	updateAuthorization ProviderUpdateAuthorization
 }
 
 func (ProviderService) Format(s fmt.State, _ rune) {
@@ -195,7 +198,7 @@ func (s *ProviderService) admit(ctx context.Context, organizationID, action stri
 }
 
 func (s *ProviderService) read(ctx context.Context, organizationID string, cursor sso.ProviderID, limit uint32) ([]sso.Provider, error) {
-	rows, err := s.pool.Raw().Query(ctx, `SELECT provider_id,mapping_version::text FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id>$3 ORDER BY provider_id LIMIT $4`, string(s.authentication.TenantID), organizationID, string(cursor), int32(limit))
+	rows, err := s.pool.Raw().Query(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id>$3 ORDER BY provider_id LIMIT $4`, string(s.authentication.TenantID), organizationID, string(cursor), int32(limit))
 	if err != nil {
 		return nil, providerError(ctx, err)
 	}
@@ -203,14 +206,17 @@ func (s *ProviderService) read(ctx context.Context, organizationID string, curso
 	providers := make([]sso.Provider, 0, limit)
 	for rows.Next() {
 		var p sso.Provider
-		var version string
-		if err := rows.Scan(&p.ID, &version); err != nil {
+		var version, providerVersion string
+		if err := rows.Scan(&p.ID, &version, &providerVersion); err != nil {
 			return nil, providerError(ctx, err)
 		}
 		if p.MappingVersion, err = strconv.ParseUint(version, 10, 64); err != nil || p.MappingVersion == 0 {
 			return nil, sso.ErrUnavailable
 		}
-		p.OrganizationID, p.Protocol, p.Version, p.VerifiedDomains = organizationID, "oidc", 1, []string{}
+		if p.Version, err = strconv.ParseUint(providerVersion, 10, 64); err != nil || p.Version == 0 {
+			return nil, sso.ErrUnavailable
+		}
+		p.OrganizationID, p.Protocol, p.VerifiedDomains = organizationID, "oidc", []string{}
 		providers = append(providers, p)
 	}
 	if err = rows.Err(); err != nil {
@@ -231,8 +237,8 @@ func (s *ProviderService) ProviderGet(ctx context.Context, r sso.ProviderGetRequ
 		return sso.ProviderGetResult{}, err
 	}
 	var p sso.Provider
-	var version string
-	err := s.pool.Raw().QueryRow(ctx, `SELECT provider_id,mapping_version::text FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`, string(s.authentication.TenantID), r.OrganizationID, string(r.ProviderID)).Scan(&p.ID, &version)
+	var version, providerVersion string
+	err := s.pool.Raw().QueryRow(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`, string(s.authentication.TenantID), r.OrganizationID, string(r.ProviderID)).Scan(&p.ID, &version, &providerVersion)
 	if err != nil {
 		return sso.ProviderGetResult{}, providerError(ctx, err)
 	}
@@ -240,10 +246,14 @@ func (s *ProviderService) ProviderGet(ctx context.Context, r sso.ProviderGetRequ
 	if err != nil || p.MappingVersion == 0 {
 		return sso.ProviderGetResult{}, sso.ErrUnavailable
 	}
+	p.Version, err = strconv.ParseUint(providerVersion, 10, 64)
+	if err != nil || p.Version == 0 {
+		return sso.ProviderGetResult{}, sso.ErrUnavailable
+	}
 	if _, err = s.admit(ctx, r.OrganizationID, "org:sso-read"); err != nil {
 		return sso.ProviderGetResult{}, err
 	}
-	p.OrganizationID, p.Protocol, p.Version, p.VerifiedDomains = r.OrganizationID, "oidc", 1, []string{}
+	p.OrganizationID, p.Protocol, p.VerifiedDomains = r.OrganizationID, "oidc", []string{}
 	return sso.ProviderGetResult{Provider: p}, nil
 }
 

@@ -27,17 +27,29 @@ import (
 	lifecyclepg "github.com/faustbrian/go-transactional-outbox/postgres/identity"
 )
 
+const (
+	providerConfigurationMaximumBytes         = 48 << 10
+	providerConfigurationEnvelopeMaximumBytes = 64 << 10
+	providerLegacyPreparationMaximumBytes     = 64 << 10
+	// Update preparation JSON base64-encodes a bounded configuration envelope.
+	// Its 96KiB limit leaves room for that expansion plus the scalar frame,
+	// while the original registration preparation profile remains unchanged.
+	providerUpdatePreparationMaximumBytes = 96 << 10
+	providerEnvelopeOverheadMaximumBytes  = 4096
+)
+
 func providerOperation() identity.FeatureOperation {
 	return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.register-oidc", SchemaID: "sso-disabled-static-oidc-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 }
 
-// ProviderContributor is the versioned native disabled-registration owner.
+// ProviderContributor is the versioned native disabled-provider mutation owner.
 // ProviderService constructs invocation-local instances from real session and
 // organization observations. It borrows only generation-bound Work supplied by
 // the existing coordinator and never begins, commits or retains a transaction.
 // It implements the open native interfaces, not a competing command journal.
 type ProviderContributor struct {
 	service       *ProviderService
+	update        *sso.ProviderUpdateRequest
 	request       sso.ProviderRegisterOidcRequest
 	admission     providerAdmission
 	intent        identity.RequestIntent
@@ -60,8 +72,8 @@ var _ kernel.FeatureCommitContributor = (*ProviderContributor)(nil)
 func (*ProviderContributor) Descriptor() kernel.ContributorDescriptor {
 	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "identity.sso.providers", Version: 1}
 }
-func (*ProviderContributor) FeatureOperations() []identity.FeatureOperation {
-	return []identity.FeatureOperation{providerOperation()}
+func (p *ProviderContributor) FeatureOperations() []identity.FeatureOperation {
+	return []identity.FeatureOperation{p.operation()}
 }
 func (ProviderContributor) Format(s fmt.State, _ rune) {
 	_, _ = s.Write([]byte("sso.postgres.ProviderContributor(redacted)"))
@@ -112,7 +124,7 @@ func (s *ProviderService) ProviderRegisterOidc(ctx context.Context, r sso.Provid
 	metadata, _ := r.StaticMetadata.Spec()
 	mapping, _ := r.Mapping.Spec()
 	configuration, err := json.Marshal(providerConfiguration{Metadata: metadata, Mapping: mapping, Domains: append([]string(nil), r.Domains...)})
-	if err != nil || len(configuration) > 48<<10 {
+	if err != nil || len(configuration) > providerConfigurationMaximumBytes {
 		return out, sso.ErrInvalidInput
 	}
 	defer clear(configuration)
@@ -219,7 +231,7 @@ func (s *ProviderService) kernelDecision(actor identity.UserID, kind, id string)
 }
 
 func (p *ProviderContributor) requestContext(b kernel.RequestKeyPreparationBinding) (envelope.Context, error) {
-	if p == nil || p.service == nil || b.Namespace != p.service.config.RequestKeys.Namespace || b.Scope.RouteID != providerOperation().OperationID || b.Scope.Method != "POST" || b.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: providerOperation()}) || b.PolicyVersion != p.service.config.PolicyVersion || b.Admission.CommandID == "" || b.IntentDigest == ([32]byte{}) {
+	if p == nil || p.service == nil || b.Namespace != p.service.config.RequestKeys.Namespace || b.Scope.RouteID != p.operation().OperationID || b.Scope.Method != "POST" || b.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) || b.PolicyVersion != p.service.config.PolicyVersion || b.Admission.CommandID == "" || b.IntentDigest == ([32]byte{}) {
 		return envelope.Context{}, sso.ErrInvalidInput
 	}
 	// The native type deliberately rejects implicit serialization. This explicit
@@ -237,7 +249,11 @@ func (p *ProviderContributor) requestContext(b kernel.RequestKeyPreparationBindi
 		return envelope.Context{}, sso.ErrInvalidInput
 	}
 	digest := sha256.Sum256(frame)
-	return envelope.NewContext(map[string]string{"owner": "sso/provider-registration", "profile": "static-disabled-v1", "binding": hex.EncodeToString(digest[:])})
+	owner, profile := "sso/provider-registration", "static-disabled-v1"
+	if p.update != nil {
+		owner, profile = "sso/provider-update", "static-disabled-update-v1"
+	}
+	return envelope.NewContext(map[string]string{"owner": owner, "profile": profile, "binding": hex.EncodeToString(digest[:])})
 }
 
 func (p *ProviderContributor) seal(ctx context.Context, aad envelope.Context, plain []byte) ([]byte, error) {
@@ -248,7 +264,7 @@ func (p *ProviderContributor) seal(ctx context.Context, aad envelope.Context, pl
 	return sealed.MarshalBinary()
 }
 func (p *ProviderContributor) open(ctx context.Context, aad envelope.Context, wire []byte, maximum int) ([]byte, error) {
-	if len(wire) == 0 || len(wire) > maximum+4096 {
+	if len(wire) == 0 || len(wire) > maximum+providerEnvelopeOverheadMaximumBytes {
 		return nil, sso.ErrUnavailable
 	}
 	sealed, err := envelope.ParseEnvelope(wire)
@@ -304,7 +320,13 @@ func (p *ProviderContributor) prepare(ctx context.Context, b kernel.RequestKeyPr
 	if err != nil {
 		return sso.ErrUnavailable
 	}
-	op := providerOperation()
+	if p.update != nil {
+		provider = identity.SubjectID(p.update.ProviderID)
+		if err := p.prepareUpdate(ctx); err != nil {
+			return err
+		}
+	}
+	op := p.operation()
 	p.binding = identity.CommandBinding{CommandID: b.Admission.CommandID, TenantID: bound.TenantID, UserID: bound.UserID, ActorID: identity.ActorID(bound.UserID), ActorKind: authorization.SubjectUser, OperationID: op.OperationID, RecordID: string(provider), SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion, PolicyID: s.config.PolicyID, PolicyVersion: s.config.PolicyVersion, CorrelationID: string(p.request.CommandID)}
 	if p.binding.ValidateFor(op) != nil {
 		return sso.ErrInvalidInput
@@ -352,18 +374,18 @@ func (p *ProviderContributor) RestoreRequestKey(ctx context.Context, b kernel.Re
 	}
 	canonical, _ := json.Marshal(saved)
 	original := identity.CommandBinding(saved)
-	if !bytes.Equal(canonical, plain) || original.ValidateFor(providerOperation()) != nil || original.CommandID != b.Admission.CommandID || original.TenantID != b.Scope.TenantID || original.UserID != identity.UserID(b.Scope.ActorID) || original.ActorID != b.Scope.ActorID || original.ActorKind != b.Scope.ActorKind || original.PolicyID != p.service.config.PolicyID || original.PolicyVersion != b.PolicyVersion || original.CorrelationID != string(p.request.CommandID) {
+	if !bytes.Equal(canonical, plain) || original.ValidateFor(p.operation()) != nil || original.CommandID != b.Admission.CommandID || original.TenantID != b.Scope.TenantID || original.UserID != identity.UserID(b.Scope.ActorID) || original.ActorID != b.Scope.ActorID || original.ActorKind != b.Scope.ActorKind || original.PolicyID != p.service.config.PolicyID || original.PolicyVersion != b.PolicyVersion || original.CorrelationID != string(p.request.CommandID) {
 		return identity.CommandBinding{}, sso.ErrUnavailable
 	}
 	return original, nil
 }
 
 func (p *ProviderContributor) ValidateFeatureCommand(c identity.Command, plan kernel.CommandPlan) error {
-	if p == nil || p.service == nil || p.command != c || p.binding.ValidateFor(providerOperation()) != nil || plan.Feature == nil || *plan.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: providerOperation()}) || plan.SubjectType != "sso_provider" || plan.CommandCounters == nil || *plan.CommandCounters != p.counter || plan.Lifecycle == nil || *plan.Lifecycle != (kernel.LifecyclePlan{EventType: "sso.provider_registered.v1", AfterVersion: 1}) || len(plan.Audits) != 1 || plan.Audits[0].EventType != "identity.sso.provider.register-oidc" || !plan.Audits[0].Required || plan.Audits[0].RequiredRecordCount != 1 || plan.Audits[0].RetentionClass != "protected" || plan.Capability != nil || plan.CapabilityIssuance != nil || plan.OTP != nil || plan.Delivery != nil {
+	if p == nil || p.service == nil || p.command != c || p.binding.ValidateFor(p.operation()) != nil || plan.Feature == nil || *plan.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) || plan.SubjectType != "sso_provider" || plan.CommandCounters == nil || *plan.CommandCounters != p.counter || plan.Lifecycle == nil || *plan.Lifecycle != p.lifecycle() || len(plan.Audits) != 1 || plan.Audits[0].EventType != p.operation().OperationID || !plan.Audits[0].Required || plan.Audits[0].RequiredRecordCount != 1 || plan.Audits[0].RetentionClass != "protected" || plan.Capability != nil || plan.CapabilityIssuance != nil || plan.OTP != nil || plan.Delivery != nil {
 		return sso.ErrInvalidInput
 	}
 	spec, ok := c.Feature()
-	if !ok || spec.Binding != p.binding || spec.Operation != providerOperation() {
+	if !ok || spec.Binding != p.binding || spec.Operation != p.operation() {
 		return sso.ErrInvalidInput
 	}
 	for _, field := range spec.Fields {
@@ -383,15 +405,16 @@ func (p *ProviderContributor) plan(final bool) (kernel.CommandPlan, error) {
 	if err != nil {
 		return kernel.CommandPlan{}, sso.ErrUnavailable
 	}
-	seed, err := builder.Build(audit.RecordInput{OccurredAt: p.admission.verified, Action: providerOperation().OperationID, Outcome: audit.OutcomeSucceeded, Actor: audit.ActorInput{Kind: audit.ActorHuman, ID: string(b.ActorID)}, Subject: audit.SubjectInput{Type: "sso_provider", ID: b.RecordID}, Context: audit.ContextInput{TenantID: string(b.TenantID), CorrelationID: b.CorrelationID}, Policy: audit.PolicyMetadata{PolicyID: b.PolicyID, Version: strconv.FormatUint(b.PolicyVersion, 10)}, Changes: audit.ChangeSetInput{Redacted: true}, Attributes: map[string]string{"command.id": string(b.CommandID), "aggregate.type": "sso_provider", "aggregate.id": b.RecordID, "aggregate.before_version": "0", "aggregate.after_version": "1", "retention.class": "protected"}})
+	seed, err := builder.Build(audit.RecordInput{OccurredAt: p.admission.verified, Action: p.operation().OperationID, Outcome: audit.OutcomeSucceeded, Actor: audit.ActorInput{Kind: audit.ActorHuman, ID: string(b.ActorID)}, Subject: audit.SubjectInput{Type: "sso_provider", ID: b.RecordID}, Context: audit.ContextInput{TenantID: string(b.TenantID), CorrelationID: b.CorrelationID}, Policy: audit.PolicyMetadata{PolicyID: b.PolicyID, Version: strconv.FormatUint(b.PolicyVersion, 10)}, Changes: audit.ChangeSetInput{Redacted: true}, Attributes: map[string]string{"command.id": string(b.CommandID), "aggregate.type": "sso_provider", "aggregate.id": b.RecordID, "aggregate.before_version": strconv.FormatUint(p.beforeVersion(), 10), "aggregate.after_version": strconv.FormatUint(p.afterVersion(), 10), "retention.class": "protected"}})
 	if err != nil {
 		return kernel.CommandPlan{}, sso.ErrInvalidInput
 	}
-	digest, err := kernel.FeatureAuditBindingDigest(b, providerOperation(), "sso_provider", seed)
+	digest, err := kernel.FeatureAuditBindingDigest(b, p.operation(), "sso_provider", seed)
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
-	plan := kernel.CommandPlan{Contributors: p.registry.Descriptors(), Feature: &kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: providerOperation()}, SubjectType: "sso_provider", Lifecycle: &kernel.LifecyclePlan{EventType: "sso.provider_registered.v1", AfterVersion: 1}, CommandCounters: &p.counter, Audits: []kernel.AuditPlan{{EventType: providerOperation().OperationID, SchemaVersion: 1, Required: true, RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384, RetentionPolicyVersion: 1, RetentionClass: "protected", BindingDigest: digest}}}
+	lifecycle := p.lifecycle()
+	plan := kernel.CommandPlan{Contributors: p.registry.Descriptors(), Feature: &kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}, SubjectType: "sso_provider", Lifecycle: &lifecycle, CommandCounters: &p.counter, Audits: []kernel.AuditPlan{{EventType: p.operation().OperationID, SchemaVersion: 1, Required: true, RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384, RetentionPolicyVersion: 1, RetentionClass: "protected", BindingDigest: digest}}}
 	if final {
 		return p.coordinator.PrepareCommandPlan(b, p.command, plan)
 	}
@@ -403,7 +426,7 @@ func (p *ProviderContributor) admit(ctx context.Context, w kernel.Work, c identi
 		return identity.ForbiddenError{}
 	}
 	b, feature, _, err := w.FeatureScope(p)
-	if err != nil || b != p.binding || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: providerOperation()}) {
+	if err != nil || b != p.binding || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) {
 		return identity.ForbiddenError{}
 	}
 	a := p.admission
@@ -467,7 +490,7 @@ func (p *ProviderContributor) CheckFeatureCommit(ctx context.Context, w kernel.W
 }
 
 func (p *ProviderContributor) configurationContext() (envelope.Context, error) {
-	return envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(p.binding.TenantID), "organization": p.request.OrganizationID, "provider": p.binding.RecordID, "protocol": "oidc", "purpose": "static-configuration", "version": "1"})
+	return envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(p.binding.TenantID), "organization": p.request.OrganizationID, "provider": p.binding.RecordID, "protocol": "oidc", "purpose": "static-configuration", "version": strconv.FormatUint(p.afterVersion(), 10)})
 }
 func (p *ProviderContributor) outputContext(generation uint64) (envelope.Context, error) {
 	frame, err := json.Marshal(struct {
@@ -493,6 +516,9 @@ func (p *ProviderContributor) GenerateFeaturePreparation(ctx context.Context, c 
 	if err != nil {
 		return nil, err
 	}
+	if p.update != nil && len(configuration) > providerConfigurationEnvelopeMaximumBytes {
+		return nil, sso.ErrUnavailable
+	}
 	plain, err := json.Marshal(struct {
 		Generation    uint64
 		Commitment    [32]byte
@@ -502,11 +528,29 @@ func (p *ProviderContributor) GenerateFeaturePreparation(ctx context.Context, c 
 	if err != nil {
 		return nil, sso.ErrUnavailable
 	}
+	if p.update != nil && len(plain) > p.preparationMaximumBytes() {
+		return nil, sso.ErrUnavailable
+	}
 	aad, err = p.outputContext(generation)
 	if err != nil {
 		return nil, err
 	}
-	return p.seal(ctx, aad, plain)
+	wire, err := p.seal(ctx, aad, plain)
+	if err != nil {
+		return nil, err
+	}
+	if p.update != nil && len(wire) > p.preparationMaximumBytes()+providerEnvelopeOverheadMaximumBytes {
+		clear(wire)
+		return nil, sso.ErrUnavailable
+	}
+	return wire, nil
+}
+
+func (p *ProviderContributor) preparationMaximumBytes() int {
+	if p.update != nil {
+		return providerUpdatePreparationMaximumBytes
+	}
+	return providerLegacyPreparationMaximumBytes
 }
 func (p *ProviderContributor) RestoreFeaturePreparation(ctx context.Context, c identity.Command, generation uint64, wire []byte) (identity.Command, kernel.CommandPlan, error) {
 	if p == nil || p.service == nil || ctx == nil || c != p.command || generation == 0 {
@@ -516,7 +560,7 @@ func (p *ProviderContributor) RestoreFeaturePreparation(ctx context.Context, c i
 	if err != nil {
 		return identity.Command{}, kernel.CommandPlan{}, err
 	}
-	plain, err := p.open(ctx, aad, wire, 64<<10)
+	plain, err := p.open(ctx, aad, wire, p.preparationMaximumBytes())
 	defer clear(plain)
 	if err != nil {
 		return identity.Command{}, kernel.CommandPlan{}, err
@@ -526,7 +570,7 @@ func (p *ProviderContributor) RestoreFeaturePreparation(ctx context.Context, c i
 		Commitment    [32]byte
 		Configuration []byte
 	}
-	if json.Unmarshal(plain, &output) != nil || output.Generation != generation || output.Commitment != p.commitment || len(output.Configuration) == 0 || len(output.Configuration) > 64<<10 {
+	if json.Unmarshal(plain, &output) != nil || output.Generation != generation || output.Commitment != p.commitment || len(output.Configuration) == 0 || len(output.Configuration) > providerConfigurationEnvelopeMaximumBytes {
 		return identity.Command{}, kernel.CommandPlan{}, sso.ErrUnavailable
 	}
 	p.configuration = output.Configuration
@@ -552,32 +596,26 @@ func (p *ProviderContributor) ApplyFeature(ctx context.Context, w kernel.Work, c
 	if err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	issuer := sha256.Sum256([]byte(p.request.Issuer))
-	mapping, _ := p.request.Mapping.Spec()
-	n, err := w.Exec(ctx, `INSERT INTO sso_providers.providers(tenant_id,organization_id,provider_id,issuer_digest,configuration_envelope,mapping_version,pending_domains) VALUES($1,$2,$3,$4,$5,$6::numeric,$7) ON CONFLICT DO NOTHING`, string(b.TenantID), p.request.OrganizationID, b.RecordID, issuer[:], p.configuration, strconv.FormatUint(mapping.Version, 10), int32(len(p.request.Domains)))
-	if err != nil {
+	if err = p.writeProvider(ctx, w, b); err != nil {
 		return identity.FeatureReceipt{}, err
-	}
-	if n != 1 {
-		return identity.FeatureReceipt{}, identity.ConflictError{}
 	}
 	bound, err := json.Marshal(providerStoredBinding(b))
 	if err != nil {
 		return identity.FeatureReceipt{}, sso.ErrUnavailable
 	}
-	n, err = w.Exec(ctx, `INSERT INTO sso_providers.command_effects(command_id,tenant_id,organization_id,provider_id,binding,fingerprint,generation) VALUES($1,$2,$3,$4,$5,$6,$7::numeric)`, string(b.CommandID), string(b.TenantID), p.request.OrganizationID, b.RecordID, bound, fingerprint[:], strconv.FormatUint(executionGeneration, 10))
+	n, err := w.Exec(ctx, `INSERT INTO sso_providers.command_effects(command_id,tenant_id,organization_id,provider_id,binding,fingerprint,generation) VALUES($1,$2,$3,$4,$5,$6,$7::numeric)`, string(b.CommandID), string(b.TenantID), p.request.OrganizationID, b.RecordID, bound, fingerprint[:], strconv.FormatUint(executionGeneration, 10))
 	if err != nil {
 		return identity.FeatureReceipt{}, err
 	}
 	if n != 1 {
 		return identity.FeatureReceipt{}, sso.ErrUnavailable
 	}
-	return identity.FeatureReceipt{Operation: providerOperation(), AfterVersion: 1}, nil
+	return identity.FeatureReceipt{Operation: p.operation(), BeforeVersion: p.beforeVersion(), AfterVersion: p.afterVersion()}, nil
 }
 
 func (p *ProviderContributor) RecoverParticipant(ctx context.Context, w kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
 	b, feature, life, err := w.FeatureScope(p)
-	if err != nil || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: providerOperation()}) || life != (kernel.LifecyclePlan{EventType: "sso.provider_registered.v1", AfterVersion: 1}) {
+	if err != nil || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) || life != p.lifecycle() {
 		return kernel.RecoveryUnknown, sso.ErrUnavailable
 	}
 	rows, err := w.Query(ctx, `SELECT binding,organization_id,provider_id FROM sso_providers.command_effects WHERE command_id=$1 AND tenant_id=$2`, string(b.CommandID), string(b.TenantID))
