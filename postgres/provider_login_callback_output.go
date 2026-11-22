@@ -44,6 +44,9 @@ const providerLoginCallbackCipherLimit = 192 << 10
 const providerLoginCallbackPlainLimit = 128 << 10
 
 func (p *providerLoginCallbackPhase) outputContext(generation uint64) (envelope.Context, error) {
+	if p.oauth2 != nil {
+		return p.callbackOutputContext(generation, "oauth2-callback-output-v1")
+	}
 	return p.callbackOutputContext(generation, "oidc-callback-output-v1")
 }
 
@@ -51,6 +54,21 @@ func (p *providerLoginCallbackPhase) callbackOutputContext(generation uint64, pu
 	f, ok := p.command.Feature()
 	if !ok || generation == 0 {
 		return envelope.Context{}, identity.ForbiddenError{}
+	}
+	if p.oauth2 != nil {
+		encoded, err := providerLoginPayloadEncode(struct {
+			Original                  identity.FeatureCommandSpec
+			StartProfile              [32]byte
+			Generation                uint64
+			Audience, PolicyNamespace string
+			Profile                   oauth.OAuth2UserInfoProfile
+		}{f, p.service.oauthDigest, generation, p.policy.Audience, p.policy.PolicyNamespace, p.oauth2.Profile})
+		defer clear(encoded)
+		if err != nil {
+			return envelope.Context{}, identity.ForbiddenError{}
+		}
+		digest := sha256.Sum256(encoded)
+		return envelope.NewContext(map[string]string{"owner": "sso/postgres", "purpose": purpose, "binding": base64.RawURLEncoding.EncodeToString(digest[:])})
 	}
 	var roleMappingDigest *[32]byte
 	if p.roleMapping != nil {
@@ -86,18 +104,27 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 	if err != nil {
 		return nil, err
 	}
-	result, err := p.exchangeAcknowledged(ctx, p.input, p.transport, admission)
+	var result providerLoginCallbackExchange
+	if p.oauth2 != nil {
+		if p.oauthInputRefused || p.oauthCallback.Denied() {
+			return p.sealProviderLoginCallbackRefusal(ctx, generation)
+		}
+		result, err = p.exchangeOAuth2Acknowledged(ctx, p.oauthCallback, *p.oauth2, admission)
+	} else {
+		result, err = p.exchangeAcknowledged(ctx, p.input, p.transport, admission)
+	}
 	defer result.Tokens.Destroy()
 	if err != nil {
 		var disposition *oauth.Error
-		if ctx.Err() == nil && errors.As(err, &disposition) && disposition.Kind() == oauth.Refused {
+		if ctx.Err() == nil && errors.As(err, &disposition) && (disposition.Kind() == oauth.Refused || p.oauth2 != nil && disposition.Kind() == oauth.InvalidProof) {
 			return p.sealProviderLoginCallbackRefusal(ctx, generation)
 		}
 		return nil, err
 	}
 	recipient, jitWire, err := p.callbackRecipient(ctx, result)
 	if err != nil {
-		if ctx.Err() == nil && errors.Is(err, errProviderLoginRecipientIneligible) {
+		var forbidden identity.ForbiddenError
+		if ctx.Err() == nil && (errors.Is(err, errProviderLoginRecipientIneligible) || p.oauth2 != nil && (errors.Is(err, sso.ErrForbidden) || errors.As(err, &forbidden))) {
 			return p.sealProviderLoginCallbackRefusal(ctx, generation)
 		}
 		return nil, err
@@ -148,7 +175,7 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 		return nil, err
 	}
 	defer clear(tokens.Ciphertext)
-	terminal, err := p.service.payload.sealProviderLoginCallbackTerminal(ctx, p.found)
+	terminal, err := p.sealCallbackTerminal(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +187,20 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 		return nil, identity.UnavailableError{}
 	}
 	return p.service.payload.seal(ctx, aad, plain, providerLoginCallbackCipherLimit)
+}
+
+func (p *providerLoginCallbackPhase) sealCallbackTerminal(ctx context.Context) ([]byte, error) {
+	if p.oauth2 != nil {
+		return p.service.payload.sealProviderOAuth2LoginCallbackTerminal(ctx, p.found)
+	}
+	return p.service.payload.sealProviderLoginCallbackTerminal(ctx, p.found)
+}
+
+func (p *providerLoginCallbackPhase) openCallbackTerminal(ctx context.Context, wire []byte) (providerLoginStoredBinding, error) {
+	if p.oauth2 != nil {
+		return p.service.payload.openProviderOAuth2LoginCallbackTerminal(ctx, p.found.Row, wire)
+	}
+	return p.service.payload.openProviderLoginCallbackTerminal(ctx, p.found.Row, wire)
 }
 
 func earliestProviderLoginCallbackTime(first time.Time, rest ...time.Time) time.Time {
@@ -191,15 +232,25 @@ func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLo
 		return deny(err)
 	}
 	original, _ := p.command.Feature()
+	method := "sso-oidc"
+	if p.oauth2 != nil {
+		method = "sso-oauth2"
+	}
 	proof := authentication.Proof{ID: authentication.ProofID(original.Binding.CommandID), Tenant: string(account.Account.TenantID), Subject: string(account.Account.UserID),
-		Method: "sso-oidc", Assurance: authentication.AssuranceSingleFactor, Purpose: "session-issue", Audience: p.policy.Audience, IssuedAt: now, ExpiresAt: until}
+		Method: method, Assurance: authentication.AssuranceSingleFactor, Purpose: "session-issue", Audience: p.policy.Audience, IssuedAt: now, ExpiresAt: until}
 	credential := account.Credential.Credential
-	prepared, err := p.issuer.PrepareSSOOIDC(original.Binding, session.SSOOIDCIssuanceSpec{Credential: credential, Session: session.SessionSpec{
+	issuance := session.SSOOIDCIssuanceSpec{Credential: credential, Session: session.SessionSpec{
 		SessionID: string(id), FamilyID: string(family), TenantID: account.Account.TenantID, UserID: account.Account.UserID, Audience: p.policy.Audience,
 		Version: 1, FamilyVersion: 1, Remember: flow.Binding.Intent.Remember, Authority: vector, IssuedAt: now, LastActivityAt: now,
 		Authentication: session.AuthenticationMetadata{Kind: session.AuthenticationVerified, Proof: proof, ProofVersion: p.found.Row.ProviderVersion,
 			CredentialID: string(credential.ID), CredentialVersion: credential.Version},
-	}})
+	}}
+	var prepared session.PreparedIssuance
+	if p.oauth2 != nil {
+		prepared, err = p.issuer.PrepareSSOOAuth2(original.Binding, session.SSOOAuth2IssuanceSpec(issuance))
+	} else {
+		prepared, err = p.issuer.PrepareSSOOIDC(original.Binding, issuance)
+	}
 	if err != nil {
 		return deny(err)
 	}
@@ -207,7 +258,7 @@ func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLo
 	if !ok {
 		return deny(identity.ForbiddenError{})
 	}
-	fields, err := callbackAccountSessionFields(record, account)
+	fields, err := p.callbackAccountSessionFields(record, account)
 	if err != nil {
 		return deny(err)
 	}
@@ -220,16 +271,20 @@ func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLo
 	return fields, command, nil
 }
 
-func callbackAccountSessionFields(record session.Session, account kernel.ProviderAccountAdmission) ([]identity.FeatureField, error) {
-	fields, err := sessionpg.SSOOIDCSigninSessionFields(record)
+func (p *providerLoginCallbackPhase) callbackAccountSessionFields(record session.Session, account kernel.ProviderAccountAdmission) ([]identity.FeatureField, error) {
+	sessionFields, accountFields := sessionpg.SSOOIDCSigninSessionFields, kernel.SSOOIDCSigninAccountFields
+	if p.oauth2 != nil {
+		sessionFields, accountFields = sessionpg.SSOOAuth2SigninSessionFields, kernel.SSOOAuth2SigninAccountFields
+	}
+	fields, err := sessionFields(record)
 	if err != nil {
 		return nil, err
 	}
-	accountFields, err := kernel.SSOOIDCSigninAccountFields(account)
+	wantedAccount, err := accountFields(account)
 	if err != nil {
 		return nil, err
 	}
-	return append(fields, accountFields...), nil
+	return append(fields, wantedAccount...), nil
 }
 
 func (p *providerLoginCallbackPhase) callbackCommandWithOutput(fields []identity.FeatureField) (identity.Command, error) {
@@ -314,22 +369,26 @@ func (p *providerLoginCallbackPhase) restoreAccepted(ctx context.Context, genera
 		owned = true
 		return nil
 	}
-	if saved.Link != nil {
+	if saved.Link != nil || p.oauth2 != nil && (saved.JIT != nil || saved.RoleUpdate != nil) {
 		return identity.ForbiddenError{}
 	}
 	command, err := p.callbackCommandWithOutput(saved.Fields)
 	if err != nil {
 		return err
 	}
-	record, err := sessionpg.SSOOIDCSigninSession(command)
+	decodeSession, decodeAccount := sessionpg.SSOOIDCSigninSession, kernel.SSOOIDCSigninAccount
+	if p.oauth2 != nil {
+		decodeSession, decodeAccount = sessionpg.SSOOAuth2SigninSession, kernel.SSOOAuth2SigninAccount
+	}
+	record, err := decodeSession(command)
 	if err != nil {
 		return err
 	}
-	account, err := kernel.SSOOIDCSigninAccount(command)
+	account, err := decodeAccount(command)
 	if err != nil {
 		return err
 	}
-	fields, err := callbackAccountSessionFields(record, account)
+	fields, err := p.callbackAccountSessionFields(record, account)
 	if err != nil || account.Account != saved.Tokens.Account || account.SocialLinkVersion != saved.Tokens.SocialLinkVersion {
 		return identity.ForbiddenError{}
 	}
@@ -370,7 +429,7 @@ func (p *providerLoginCallbackPhase) restoreAccepted(ctx context.Context, genera
 	if err := p.checkRestoredSession(record, account, saved, organizationVersion); err != nil {
 		return err
 	}
-	terminal, err := p.service.payload.openProviderLoginCallbackTerminal(ctx, p.found.Row, saved.Terminal)
+	terminal, err := p.openCallbackTerminal(ctx, saved.Terminal)
 	if err != nil || terminal.Metadata != p.found.Binding.Metadata {
 		return identity.ForbiddenError{}
 	}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	ssopg "github.com/faustbrian/go-sso/postgres"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestProviderLoginCallbackTerminalCustodyRollsBackAndCommitsWithoutExecutionProof(t *testing.T) {
@@ -53,6 +54,23 @@ func TestProviderLoginCallbackTerminalCustodyRollsBackAndCommitsWithoutExecution
 func TestProviderLoginCallbackTerminalCutoffIsCheckedAfterPendingRowWait(t *testing.T) {
 	x := newProviderLoginStartFixture(t)
 	state, command := startProviderLoginCallbackLookup(t, x)
+	assertProviderLoginCallbackTerminalCutoffAfterWait(t, x, state, command, ssopg.StageProviderLoginCallbackTerminalForTest, ssopg.LookupProviderLoginCallbackForTest)
+}
+
+func TestProviderOAuth2LoginCallbackTerminalCutoffIsCheckedAfterPendingRowWait(t *testing.T) {
+	x := newProviderOAuthLoginStartFixture(t)
+	started, err := x.service.SigninStartOAuth2(x.enable.f.ctx, x.request, x.browser)
+	if err != nil {
+		t.Fatal("commit original OAuth2 browser start", err)
+	}
+	assertProviderLoginCallbackTerminalCutoffAfterWait(t, x.providerLoginStartFixture, started.RedirectURI.Query().Get("state"), started.TransactionID,
+		ssopg.StageProviderOAuth2LoginCallbackTerminalForTest, ssopg.LookupProviderOAuth2LoginCallbackForTest)
+}
+
+func assertProviderLoginCallbackTerminalCutoffAfterWait(t *testing.T, x providerLoginStartFixture, state, command string,
+	stage func(context.Context, pgx.Tx, *ssopg.ProviderLoginService, string, time.Time) (int64, error),
+	lookup func(context.Context, *ssopg.ProviderLoginService, string) (ssopg.ProviderLoginCallbackLookupForTest, error)) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(x.enable.f.ctx, 5*time.Second)
 	defer cancel()
 	pool := x.enable.f.pool.Raw()
@@ -80,7 +98,7 @@ func TestProviderLoginCallbackTerminalCutoffIsCheckedAfterPendingRowWait(t *test
 	}
 	done := make(chan result, 1)
 	go func() {
-		n, err := ssopg.StageProviderLoginCallbackTerminalForTest(ctx, callback, x.service, state, deadline)
+		n, err := stage(ctx, callback, x.service, state, deadline)
 		done <- result{n, err}
 	}()
 	if err := waitForLoginFenceWait(ctx, pool.QueryRow, callback.Conn().PgConn().PID()); err != nil {
@@ -104,7 +122,7 @@ func TestProviderLoginCallbackTerminalCutoffIsCheckedAfterPendingRowWait(t *test
 	if err := callback.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := ssopg.LookupProviderLoginCallbackForTest(ctx, x.service, state)
+	pending, err := lookup(ctx, x.service, state)
 	if err != nil || pending.CompletedAt != nil || !pending.HasPlan || !pending.HasProof {
 		t.Fatal("expired terminal attempt changed pending custody", err)
 	}

@@ -327,6 +327,10 @@ func (s *ProviderLoginCompletionService) SigninCallback(ctx context.Context, req
 }
 
 func (s *ProviderLoginCompletionService) callbackCoordinator(phase *providerLoginCallbackPhase) (*kernel.Coordinator, error) {
+	return providerLoginCallbackCoordinator(s.start, phase)
+}
+
+func providerLoginCallbackCoordinator(start *ProviderLoginService, phase *providerLoginCallbackPhase) (*kernel.Coordinator, error) {
 	auditing, err := auditpg.NewIdentityContributor(auditpg.Config{})
 	if err != nil {
 		return nil, err
@@ -335,10 +339,10 @@ func (s *ProviderLoginCompletionService) callbackCoordinator(phase *providerLogi
 	if err != nil {
 		return nil, err
 	}
-	registry, err := kernel.NewContributorRegistry([]kernel.Contributor{s.start.directory, auditing, lifecycle, phase, capabilitypg.NewParticipant()})
+	registry, err := kernel.NewContributorRegistry([]kernel.Contributor{start.directory, auditing, lifecycle, phase, capabilitypg.NewParticipant()})
 	if err != nil {
 		return nil, err
 	}
 	phase.registry = registry
-	return kernel.NewCoordinatorWithRequestKeys(s.start.router.pool, registry, s.start.config.Coordinator, s.start.config.RequestKeys)
+	return kernel.NewCoordinatorWithRequestKeys(start.router.pool, registry, start.config.Coordinator, start.config.RequestKeys)
 }

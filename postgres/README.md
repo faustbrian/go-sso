@@ -85,6 +85,40 @@ expanded check without that exclusive lock. Existing encrypted grants,
 command/account foreign keys and indexes stay intact. Leave the expansion
 installed on code rollback; applying it alone enables no callback or API.
 
+### Native static OAuth 2.0 callback for an existing linked member
+
+Install the selected OAuth start and token-vault histories above. Append the
+kernel's OAuth callback preparation erasure migration after its OIDC erasure
+history, and apply the session adapter's OAuth issuance expansion and
+validation after its OIDC issuance history. Install the retained MFA, CSRF,
+audit, and lifecycle owners before selecting the callback.
+
+Select `NewProviderOAuth2LoginCompletionService` with trusted static profiles
+and cookie issuer keys. Each profile selects the exact installed provider
+version, client, HTTPS endpoints, trusted identity subject field and encoding,
+and original scope set. The logical OAuth profile ID is the value from
+`SSOOAuth2AccountProviderNamespace` with dots replaced by hyphens. Arm the
+same exact `sso-oauth2` authority profile when composing native cookie reads
+and strict local logout through the session adapter.
+
+Pass the untouched query, trusted local redirect URI and original browser to
+`SigninCallbackOAuth2`. The original state selects the profile; the provider's
+`iss` proves exact agreement, never a new selection. After acknowledged
+reservation the adapter sends the code and PKCE verifier once, then reads the
+configured authenticated identity endpoint. It accepts no ID token or
+unverified access token as identity. This profile looks up an already linked
+member under the OAuth2-specific account namespace. It does not create a
+user, link, member, or role. This native service does not expose an HTTP route.
+An invalid issuer terminalizes only a uniquely selected state whose original
+browser and trusted local redirect authenticate; foreign or unidentified
+browser custody cannot cancel another callback.
+
+The original transaction writes the session, encrypted token deposit,
+successful audit and lifecycle event and erases the executable preparation.
+Only an acknowledged new commit returns the cookie credential and CSRF token.
+Definitive refusal terminalizes original custody; an ambiguous exchange retains
+the original lease and cannot resubmit the code. No provider token is returned.
+
 ### Native static OIDC callback for an existing linked member
 
 Before opting in, install the native callback account, capability, MFA,

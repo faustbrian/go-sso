@@ -11,6 +11,7 @@ import (
 	"github.com/faustbrian/go-audit"
 	"github.com/faustbrian/go-authorization/v3"
 	identity "github.com/faustbrian/go-identity"
+	"github.com/faustbrian/go-identity/oauth"
 	kernel "github.com/faustbrian/go-identity/postgres"
 	"github.com/faustbrian/go-identity/risk"
 	"github.com/faustbrian/go-identity/session"
@@ -20,20 +21,24 @@ import (
 
 type providerLoginCallbackPhase struct {
 	providerLoginCallbackInvocation
-	refusal      *providerLoginCallbackRefusal
-	registry     *kernel.ContributorRegistry
-	grant        kernel.CapabilityPlan
-	transport    providerLoginCallbackTransport
-	input        identity.OAuthCallbackInput
-	issuer       *session.SessionIssuer
-	effect       *sessionpg.SSOOIDCSigninEffect
-	policy       sessionpg.IdentifierAdmissionConfig
-	prepared     session.PreparedIssuance
-	execution    *providerLoginCallbackExecution
-	roleMapping  *providerLoginRoleMapping
-	jitPolicy    *providerLoginJITPolicy
-	acknowledged identity.CommandResult
-	canDisclose  bool
+	refusal           *providerLoginCallbackRefusal
+	registry          *kernel.ContributorRegistry
+	grant             kernel.CapabilityPlan
+	transport         providerLoginCallbackTransport
+	oauth2            *StaticOAuth2CompletionProfile
+	oauthCallback     oauth.QueryCallback
+	oauthInputRefused bool
+	input             identity.OAuthCallbackInput
+	issuer            *session.SessionIssuer
+	effect            *sessionpg.SSOOIDCSigninEffect
+	oauthEffect       *sessionpg.SSOOAuth2SigninEffect
+	policy            sessionpg.IdentifierAdmissionConfig
+	prepared          session.PreparedIssuance
+	execution         *providerLoginCallbackExecution
+	roleMapping       *providerLoginRoleMapping
+	jitPolicy         *providerLoginJITPolicy
+	acknowledged      identity.CommandResult
+	canDisclose       bool
 }
 
 type providerLoginCallbackExecution struct {
@@ -54,6 +59,10 @@ func providerLoginCallbackDescriptor() kernel.ContributorDescriptor {
 	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oidc-login-callback", Version: 1}
 }
 
+func providerOAuth2LoginCallbackDescriptor() kernel.ContributorDescriptor {
+	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oauth2-login-callback", Version: 1}
+}
+
 func providerLoginCallbackLifecycle() kernel.LifecyclePlan {
 	return kernel.LifecyclePlan{EventType: "session.created.v1", BeforeVersion: 1, AfterVersion: 2}
 }
@@ -66,6 +75,11 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 	registration := providerLoginCallbackRegistration()
 	lifecycle := providerLoginCallbackLifecycle()
 	action, retention, actor := "identity.sso.login", "protected", audit.ActorService
+	purpose := providerOIDCCallback
+	if op := kernel.SSOOAuth2SigninOperation(); binding.SchemaID == op.SchemaID {
+		registration = kernel.FeatureRegistration{Contributor: providerOAuth2LoginCallbackDescriptor(), Operation: op}
+		purpose = op.OperationID
+	}
 	if op := kernel.SSOOIDCExplicitLinkCallbackOperation(); binding.SchemaID == op.SchemaID {
 		if binding.ActorKind != authorization.SubjectUser || string(binding.ActorID) != string(binding.UserID) {
 			return kernel.CommandPlan{}, identity.ForbiddenError{}
@@ -75,7 +89,7 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 		action, retention, actor = "identity.account.link", "standard", audit.ActorHuman
 	}
 	oneUse := kernel.ContributorDescriptor{Owner: "capability/postgres", ContractID: "capability.one-use", Version: 1}
-	if binding.ValidateFor(registration.Operation) != nil || occurred.IsZero() || auditRetention == 0 || grant.Purpose != providerOIDCCallback ||
+	if binding.ValidateFor(registration.Operation) != nil || occurred.IsZero() || auditRetention == 0 || string(grant.Purpose) != purpose ||
 		grant.MaxUses != 1 || !occurred.Before(grant.ExpiresAt) || len(contributors) != 5 || contributors[3] != registration.Contributor || contributors[4] != oneUse {
 		return kernel.CommandPlan{}, identity.ForbiddenError{}
 	}
@@ -103,7 +117,10 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 			Required: true, RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384}}}, nil
 }
 
-func (*providerLoginCallbackPhase) Descriptor() kernel.ContributorDescriptor {
+func (p *providerLoginCallbackPhase) Descriptor() kernel.ContributorDescriptor {
+	if p != nil && p.oauth2 != nil {
+		return providerOAuth2LoginCallbackDescriptor()
+	}
 	return providerLoginCallbackDescriptor()
 }
 
@@ -123,7 +140,22 @@ func (p *providerLoginCallbackPhase) plan() (kernel.CommandPlan, error) {
 }
 
 func (p *providerLoginCallbackPhase) ValidateSSOOIDCSigninConsumption(command identity.Command, grant kernel.CapabilityPlan) error {
-	if p == nil || p.service == nil || p.member != nil || command == (identity.Command{}) || grant != p.grant {
+	if p == nil || p.oauth2 != nil {
+		return identity.ForbiddenError{}
+	}
+	return p.validateSigninConsumption(command, grant, sessionpg.SSOOIDCSigninSession, sessionpg.SSOOIDCSigninSessionFields)
+}
+
+func (p *providerLoginCallbackPhase) ValidateSSOOAuth2SigninConsumption(command identity.Command, grant kernel.CapabilityPlan) error {
+	if p == nil || p.oauth2 == nil || p.found.Row.Protocol != providerProtocolOAuth2 {
+		return identity.ForbiddenError{}
+	}
+	return p.validateSigninConsumption(command, grant, sessionpg.SSOOAuth2SigninSession, sessionpg.SSOOAuth2SigninSessionFields)
+}
+
+func (p *providerLoginCallbackPhase) validateSigninConsumption(command identity.Command, grant kernel.CapabilityPlan,
+	decode func(identity.Command) (session.Session, error), fields func(session.Session) ([]identity.FeatureField, error)) error {
+	if p.service == nil || p.member != nil || command == (identity.Command{}) || grant != p.grant {
 		return identity.ForbiddenError{}
 	}
 	if command == p.command {
@@ -132,8 +164,8 @@ func (p *providerLoginCallbackPhase) ValidateSSOOIDCSigninConsumption(command id
 	if p.execution == nil || command != p.execution.command {
 		return identity.ForbiddenError{}
 	}
-	record, err := sessionpg.SSOOIDCSigninSession(command)
-	if err != nil || !equalProviderLoginSession(record, p.execution.record) {
+	record, err := decode(command)
+	if err != nil || !equalProviderLoginSessionWithFields(record, p.execution.record, fields) {
 		return identity.ForbiddenError{}
 	}
 	return nil
@@ -150,8 +182,12 @@ func (p *providerLoginCallbackPhase) ValidateSSOOIDCExplicitLinkConsumption(comm
 }
 
 func equalProviderLoginSession(a, b session.Session) bool {
-	af, aErr := sessionpg.SSOOIDCSigninSessionFields(a)
-	bf, bErr := sessionpg.SSOOIDCSigninSessionFields(b)
+	return equalProviderLoginSessionWithFields(a, b, sessionpg.SSOOIDCSigninSessionFields)
+}
+
+func equalProviderLoginSessionWithFields(a, b session.Session, fields func(session.Session) ([]identity.FeatureField, error)) bool {
+	af, aErr := fields(a)
+	bf, bErr := fields(b)
 	return aErr == nil && bErr == nil && reflect.DeepEqual(af, bf)
 }
 
@@ -164,6 +200,9 @@ func (p *providerLoginCallbackPhase) ValidateFeatureCommand(command identity.Com
 	}
 	if p.member != nil {
 		return p.ValidateSSOOIDCExplicitLinkConsumption(command, *plan.Capability)
+	}
+	if p.oauth2 != nil {
+		return p.ValidateSSOOAuth2SigninConsumption(command, *plan.Capability)
 	}
 	return p.ValidateSSOOIDCSigninConsumption(command, *plan.Capability)
 }
@@ -247,7 +286,7 @@ func (p *providerLoginCallbackPhase) RestoreFeaturePreparation(ctx context.Conte
 }
 
 func (p *providerLoginCallbackPhase) checkExecutionAt(ctx context.Context, work kernel.Work, command identity.Command) error {
-	if p == nil || p.execution == nil || p.member == nil && p.effect == nil || command != p.execution.command {
+	if p == nil || p.execution == nil || p.member == nil && p.effect == nil && p.oauthEffect == nil || command != p.execution.command {
 		return identity.ForbiddenError{}
 	}
 	now, err := work.DatabaseTime(ctx)
@@ -279,7 +318,7 @@ func (p *providerLoginCallbackPhase) checkProviderCurrent(ctx context.Context, w
 	if err := p.service.router.organizations.RequireCredentialAuthority(ctx, work, p, owner); err != nil {
 		return err
 	}
-	if p.execution.jit != nil {
+	if p.oauth2 != nil || p.execution.jit != nil {
 		return requireProviderLoginCallbackDispositionAt(ctx, work, p.found, p.execution.validUntil, false)
 	}
 	return requireProviderLoginCallbackDisposition(ctx, work, p.found, p.execution.validUntil)
@@ -303,7 +342,9 @@ func (p *providerLoginCallbackPhase) ApplyFeature(ctx context.Context, work kern
 		}
 	}
 	var receipt identity.FeatureReceipt
-	if p.roleMapping == nil && p.execution.jit == nil {
+	if p.oauth2 != nil {
+		receipt, err = p.oauthEffect.Apply(ctx, work, p, command, p.flow)
+	} else if p.roleMapping == nil && p.execution.jit == nil {
 		receipt, err = p.effect.Apply(ctx, work, p, command, p.flow)
 	} else {
 		receipt, err = p.effect.ApplyWithOrganizationUpdate(ctx, work, p, command, p.flow, p)
@@ -349,7 +390,13 @@ func (p *providerLoginCallbackPhase) CheckFeatureCommit(ctx context.Context, wor
 			return err
 		}
 	}
-	if err := p.effect.CheckCurrent(ctx, work, p, command); err != nil {
+	var err error
+	if p.oauth2 != nil {
+		err = p.oauthEffect.CheckCurrent(ctx, work, p, command)
+	} else {
+		err = p.effect.CheckCurrent(ctx, work, p, command)
+	}
+	if err != nil {
 		return err
 	}
 	if err := p.checkProviderCurrent(ctx, work); err != nil {
@@ -359,6 +406,9 @@ func (p *providerLoginCallbackPhase) CheckFeatureCommit(ctx context.Context, wor
 }
 
 func (p *providerLoginCallbackPhase) RecoverParticipant(ctx context.Context, work kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
+	if p != nil && p.oauth2 != nil && p.oauthEffect != nil {
+		return p.oauthEffect.Recover(ctx, work, p)
+	}
 	if p == nil || p.effect == nil {
 		return 0, identity.ForbiddenError{}
 	}
@@ -369,8 +419,13 @@ func (p *providerLoginCallbackPhase) ExecuteIssue(ctx context.Context, request s
 	if ctx == nil || p == nil || !p.canDisclose || p.execution == nil || ctx.Err() != nil {
 		return session.IssueExecution{}, identity.ForbiddenError{}
 	}
-	command, record, selected := request.SSOOIDCCommand()
-	if !selected || command != p.execution.command || !equalProviderLoginSession(record, p.execution.record) ||
+	selectCommand := request.SSOOIDCCommand
+	fields := sessionpg.SSOOIDCSigninSessionFields
+	if p.oauth2 != nil {
+		selectCommand, fields = request.SSOOAuth2Command, sessionpg.SSOOAuth2SigninSessionFields
+	}
+	command, record, selected := selectCommand()
+	if !selected || command != p.execution.command || !equalProviderLoginSessionWithFields(record, p.execution.record, fields) ||
 		p.acknowledged.Outcome != identity.CommitOutcomeCommitted || p.acknowledged.Validate() != nil {
 		return session.IssueExecution{}, identity.ForbiddenError{}
 	}
@@ -385,5 +440,6 @@ func (*providerLoginCallbackPhase) RecoverIssue(context.Context, session.IssueRe
 var (
 	_ kernel.FeatureAdmissionPreparationContributor = (*providerLoginCallbackPhase)(nil)
 	_ kernel.SSOOIDCSigninContributor               = (*providerLoginCallbackPhase)(nil)
+	_ kernel.SSOOAuth2SigninContributor             = (*providerLoginCallbackPhase)(nil)
 	_ session.IssueExecutor                         = (*providerLoginCallbackPhase)(nil)
 )

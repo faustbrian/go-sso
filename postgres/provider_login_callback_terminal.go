@@ -172,6 +172,29 @@ const completeProviderLoginCallbackSQL = `WITH pending AS MATERIALIZED (
  AND cutoff.at>=$13::timestamptz AND cutoff.at<LEAST($14::timestamptz,$15::timestamptz)
  AND octet_length($16::bytea) BETWEEN 1 AND 65536`
 
+// Lock only the exact state primary key before applying the original scope
+// and expiry. The provider's active-row index is intentionally not a
+// candidate: a hot provider may have many unrelated pending transactions.
+// The pending predicates run on the locked row in cutoff, not again on the
+// update target, so the update also uses only its exact unique key.
+const completeProviderOAuth2LoginCallbackSQL = `WITH exact_login AS MATERIALIZED (
+ SELECT tenant_id,state_key_version,state_digest,organization_id,provider_id,provider_version,credential_generation,mapping_version,
+ start_command_id,callback_command_id,protocol,pkce_key_version,pkce_commitment,issued_at,expires_at,completed_at,verifier_envelope IS NOT NULL AS has_verifier
+ FROM sso_providers.login_transactions
+ WHERE tenant_id=$1 AND state_key_version=$9 AND state_digest=$10 FOR UPDATE
+ ), cutoff AS MATERIALIZED (
+ SELECT tenant_id,state_key_version,state_digest,clock_timestamp() AS at FROM exact_login
+ WHERE organization_id=$2 AND provider_id=$3 AND protocol='oauth2'
+ AND provider_version=$4::numeric AND credential_generation=$5::numeric AND mapping_version=$6::numeric
+ AND start_command_id=$7 AND callback_command_id=$8 AND pkce_key_version=$11 AND pkce_commitment=$12
+ AND issued_at=$13::timestamptz AND expires_at=$14::timestamptz AND completed_at IS NULL AND has_verifier
+ )
+ UPDATE sso_providers.login_transactions l
+ SET completed_at=cutoff.at,verifier_envelope=NULL,binding_envelope=$16
+ FROM cutoff WHERE l.tenant_id=cutoff.tenant_id AND l.state_key_version=cutoff.state_key_version AND l.state_digest=cutoff.state_digest
+ AND cutoff.at>=$13::timestamptz AND cutoff.at<LEAST($14::timestamptz,$15::timestamptz)
+ AND octet_length($16::bytea) BETWEEN 1 AND 65536`
+
 func providerLoginCallbackTerminalArgs(found providerLoginCallbackLookup, deadline time.Time, wire []byte) []any {
 	row, metadata := found.Row, found.Binding.Metadata
 	return []any{string(row.TenantID), row.OrganizationID, row.ProviderID,
@@ -207,7 +230,15 @@ func eraseProviderLoginCallbackCustody(ctx context.Context, w kernel.Work, found
 	if _, err := envelope.ParseEnvelope(terminalWire); err != nil {
 		return identity.ForbiddenError{}
 	}
-	n, err := w.Exec(ctx, completeProviderLoginCallbackSQL, providerLoginCallbackTerminalArgs(found, deadline, terminalWire)...)
+	statement := completeProviderLoginCallbackSQL
+	switch found.Row.Protocol {
+	case "":
+	case providerProtocolOAuth2:
+		statement = completeProviderOAuth2LoginCallbackSQL
+	default:
+		return identity.ForbiddenError{}
+	}
+	n, err := w.Exec(ctx, statement, providerLoginCallbackTerminalArgs(found, deadline, terminalWire)...)
 	if err != nil {
 		return err
 	}

@@ -41,6 +41,28 @@ func testNativeOriginalOAuth2CallbackState(t *testing.T) {
 	if _, err := ssopg.LookupProviderLoginCallbackForTest(ctx, x.service, state); !errors.Is(err, sso.ErrForbidden) {
 		t.Fatal("OIDC lookup accepted original OAuth custody", err)
 	}
+	if err := ssopg.VerifyProviderOAuth2CallbackGrantForTest(ctx, x.service, state, ""); err != nil {
+		t.Fatal("original OAuth start did not retain its exact signed replay plan", err)
+	}
+	for _, changed := range []string{"issuer", "fingerprint", "OIDC-domain"} {
+		if err := ssopg.VerifyProviderOAuth2CallbackGrantForTest(ctx, x.service, state, changed); !errors.Is(err, sso.ErrForbidden) {
+			t.Fatal("OAuth grant accepted changed original custody", changed, err)
+		}
+	}
+	if err := ssopg.AuthenticateOriginalOAuth2CallbackForTest(ctx, x.service, state, x.browser); err != nil {
+		t.Fatal("could not authenticate the original browser and recover its OAuth start", err)
+	}
+	wrongBrowser := x.browser
+	wrongBrowser.FlowCookie = x.oidcBrowser.FlowCookie
+	if err := ssopg.AuthenticateOriginalOAuth2CallbackForTest(ctx, x.service, state, wrongBrowser); !errors.Is(err, sso.ErrForbidden) {
+		t.Fatal("original OAuth state authenticated a different browser", err)
+	}
+	material, err := ssopg.ReadProviderOAuth2CallbackMaterialForTest(ctx, x.service, state, x.browser)
+	if err != nil || material.Proof.Issuer != "https://provider.example.com/Enterprise" || material.Mapping.SubjectClaim != "stable_id" ||
+		material.Mapping.Version != x.profile.MappingVersion || material.AuthorizationEndpoint != "https://provider.example.com/authorize" ||
+		len(material.Domains) != 1 || material.Domains[0] != x.profile.Domain || material.CredentialVersion != 2 || !material.HasCredential || !material.HasVerifier {
+		t.Fatal("material could not authenticate exact installed OAuth configuration and pending custody", err)
+	}
 }
 
 func testNativeOAuth2RejectsOriginalOIDCCallbackState(t *testing.T) {

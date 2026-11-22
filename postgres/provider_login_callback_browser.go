@@ -6,6 +6,7 @@ import (
 
 	"github.com/faustbrian/go-authorization/v3"
 	identity "github.com/faustbrian/go-identity"
+	kernel "github.com/faustbrian/go-identity/postgres"
 	"github.com/faustbrian/go-identity/session"
 	sessionpg "github.com/faustbrian/go-identity/session/postgres"
 	"github.com/faustbrian/go-sso"
@@ -21,8 +22,16 @@ func (s *ProviderLoginService) authenticateProviderLoginCallbackBrowser(ctx cont
 	}
 	input := found.Binding.Metadata.Input
 	original := input.Command
+	op := providerSigninOperation()
+	if found.Row.Protocol == providerProtocolOAuth2 {
+		op = kernel.SSOOAuth2SigninStartOperation()
+	}
+	_, action := providerLoginCryptoProtocol(found.Row.Protocol)
+	if action == "" || input.Protocol != found.Row.Protocol || input.Link != nil {
+		return session.PreAuthTransaction{}, sso.ErrForbidden
+	}
 	flowID, err := identity.ParsePreAuthTransactionID(original.AnonymousFlowID)
-	if err != nil || original.ValidateFor(providerSigninOperation()) != nil || original.ActorKind != authorization.SubjectServiceAccount || original.ActorID != s.config.ActorID ||
+	if err != nil || original.ValidateFor(op) != nil || original.ActorKind != authorization.SubjectServiceAccount || original.ActorID != s.config.ActorID ||
 		original.CommandID != found.Row.StartCommandID || original.TenantID != s.config.TenantID || found.Row.TenantID != s.config.TenantID ||
 		original.PolicyID != s.config.PolicyID || original.PolicyVersion != s.policyVersion || flowID != browser.FlowID {
 		return session.PreAuthTransaction{}, sso.ErrForbidden
@@ -55,7 +64,7 @@ func (s *ProviderLoginService) authenticateProviderLoginCallbackBrowser(ctx cont
 	if now.Before(found.ObservedAt) || !now.Before(found.ObservedAt.Add(20*time.Second)) || !now.Before(found.Row.ExpiresAt) {
 		return session.PreAuthTransaction{}, sso.ErrForbidden
 	}
-	if err := s.requireProviderLoginBrowser(flow, now.UTC(), browser, input.SuccessCallback, remember); err != nil {
+	if err := s.requireProviderLoginBrowserForAction(flow, now.UTC(), browser, input.SuccessCallback, remember, action); err != nil {
 		return session.PreAuthTransaction{}, providerError(ctx, err)
 	}
 	return flow, nil

@@ -29,6 +29,21 @@ func StageProviderLoginCallbackTerminalForTest(ctx context.Context, tx pgx.Tx, s
 	return result.RowsAffected(), err
 }
 
+func StageProviderOAuth2LoginCallbackTerminalForTest(ctx context.Context, tx pgx.Tx, service *ProviderLoginService, state string, deadline time.Time) (int64, error) {
+	found, err := service.lookupProviderOAuth2LoginCallback(ctx, state)
+	if err != nil {
+		return 0, err
+	}
+	defer clear(found.Binding.Proof)
+	wire, err := service.payload.sealProviderOAuth2LoginCallbackTerminal(ctx, found)
+	if err != nil {
+		return 0, err
+	}
+	defer clear(wire)
+	result, err := tx.Exec(ctx, completeProviderOAuth2LoginCallbackSQL, providerLoginCallbackTerminalArgs(found, deadline, wire)...)
+	return result.RowsAffected(), err
+}
+
 func RecordProviderLoginCallbackTerminalForTest(ctx context.Context, service *ProviderLoginService, state string) (time.Time, error) {
 	found, err := service.lookupProviderLoginCallback(ctx, state)
 	if err != nil {

@@ -26,6 +26,18 @@ const providerLoginCallbackDispositionFenceSQL = `WITH eligible_provider AS MATE
 )
 SELECT enabled FROM eligible_provider WHERE clock_timestamp() < $7::timestamptz`
 
+// OAuth2 completes only the exact active installation; it never borrows the
+// OIDC drain transition or a provider of another protocol.
+const providerOAuth2LoginCallbackDispositionFenceSQL = `WITH eligible_provider AS MATERIALIZED (
+ SELECT p.enabled FROM sso_providers.providers p
+ JOIN sso_providers.credentials c USING(tenant_id,organization_id,provider_id)
+ WHERE p.tenant_id=$1 AND p.organization_id=$2 AND p.provider_id=$3 AND p.protocol='oauth2'
+ AND c.generation=$5::numeric AND COALESCE(p.metadata_mapping_version,p.mapping_version)=$6::numeric
+ AND p.enabled AND p.metadata_version=$4::numeric AND p.enablement_credential_generation=$5::numeric
+ FOR SHARE OF p
+)
+SELECT enabled FROM eligible_provider WHERE clock_timestamp() < $7::timestamptz`
+
 const providerLoginCallbackDrainSQL = `SELECT e.command_id,e.binding
  FROM sso_providers.provider_login_dispositions d
  JOIN sso_providers.command_effects e
@@ -54,7 +66,11 @@ func requireProviderLoginCallbackDispositionAt(ctx context.Context, work kernel.
 		return identity.ForbiddenError{}
 	}
 	args := providerLoginCallbackDispositionArgs(found.Row, deadline)
-	rows, err := work.Query(ctx, providerLoginCallbackDispositionFenceSQL, args...)
+	fence := providerLoginCallbackDispositionFenceSQL
+	if found.Row.Protocol == providerProtocolOAuth2 {
+		fence, allowDrain = providerOAuth2LoginCallbackDispositionFenceSQL, false
+	}
+	rows, err := work.Query(ctx, fence, args...)
 	if err != nil {
 		return err
 	}
@@ -123,7 +139,7 @@ func providerLoginCallbackDispositionArgs(row providerLoginRowIdentity, deadline
 func validProviderLoginCallbackDispositionScope(binding identity.CommandBinding, found providerLoginCallbackLookup, deadline time.Time) bool {
 	input := found.Binding.Metadata.Input
 	original := input.Command
-	operation := providerOIDCCallbackOperation()
+	operation := providerLoginCallbackPayloadOperation(input)
 	if input.validate() != nil || found.Row != input.rowIdentity() || found.CompletedAt != nil ||
 		found.ObservedAt.IsZero() || found.ObservedAt.Before(found.Row.IssuedAt) || !found.ObservedAt.Before(found.Row.ExpiresAt) {
 		return false

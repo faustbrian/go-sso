@@ -20,9 +20,9 @@ import (
 	"github.com/faustbrian/go-sso"
 )
 
-// This finite native static-OIDC profile retains access/refresh custody only.
-// The ID token has already supplied validated assertion evidence; retaining its
-// raw bytes would add a second recoverable protocol-evidence owner.
+// The finite native profiles retain access/refresh custody only. OIDC's ID
+// token has already supplied validated assertion evidence; retaining its raw
+// bytes would add a second recoverable protocol-evidence owner. OAuth has none.
 const providerLoginTokenHeader = "sso-tokens-v1\x00"
 const providerLoginTokenMaximumBytes = 16 << 10 // identity/oauth.OIDCConfig token bound.
 const providerLoginTokenMaximumFrame = len(providerLoginTokenHeader) + 8 + 2*providerLoginTokenMaximumBytes
@@ -62,6 +62,9 @@ func providerLoginTokenCallback(input providerLoginPayloadInput, callback identi
 }
 
 func providerLoginCallbackPayloadOperation(input providerLoginPayloadInput) identity.FeatureOperation {
+	if input.Protocol == providerProtocolOAuth2 {
+		return kernel.SSOOAuth2SigninOperation()
+	}
 	if input.Link != nil {
 		return kernel.SSOOIDCExplicitLinkCallbackOperation()
 	}
@@ -98,12 +101,21 @@ func (s *ProviderLoginService) validateProviderLoginTokenMetadata(p providerLogi
 	if p.Input.Link != nil && (p.Account.UserID != p.Callback.UserID || p.Account.Version != 1 || p.SocialLinkVersion != 2) {
 		return identity.ForbiddenError{}
 	}
-	profile, ok := s.profiles[providerLoginProfileKey{organization: organization.ID(p.Input.OrganizationID), provider: sso.ProviderID(p.Input.ProviderID)}]
+	key := providerLoginProfileKey{organization: organization.ID(p.Input.OrganizationID), provider: sso.ProviderID(p.Input.ProviderID)}
+	profile, ok := s.profiles[key]
+	if p.Input.Protocol == providerProtocolOAuth2 {
+		selected, found := s.oauthProfiles[key]
+		profile, ok = StaticOIDCLoginProfile(selected), found
+	}
+	hasOpenID := slices.Contains(profile.Scopes, "openid")
+	if p.Input.Protocol == providerProtocolOAuth2 && hasOpenID || p.Input.Protocol == "" && !hasOpenID {
+		return identity.ForbiddenError{}
+	}
 	if !ok || string(profile.OrganizationID) != p.Input.OrganizationID || string(profile.ProviderID) != p.Input.ProviderID ||
 		profile.ClientID != p.Input.ClientID || profile.ProtocolRedirectURI != p.Input.RedirectURI ||
 		profile.ProviderVersion != p.Input.ProviderVersion || profile.CredentialGeneration != p.Input.CredentialGeneration ||
 		profile.MappingVersion != p.Input.MappingVersion || !providerLoginTokenScopes(profile.Scopes) ||
-		!slices.Contains(profile.Scopes, "openid") || !slices.Equal(p.RequestedScopes, profile.Scopes) ||
+		!slices.Equal(p.RequestedScopes, profile.Scopes) ||
 		!providerLoginTokenScopes(p.RequestedScopes) || !providerLoginTokenScopes(p.GrantedScopes) ||
 		!p.ScopeReported && !slices.Equal(p.GrantedScopes, p.RequestedScopes) {
 		return identity.ForbiddenError{}
@@ -123,6 +135,14 @@ func (s *ProviderLoginService) validateProviderLoginTokenMetadata(p providerLogi
 }
 
 func providerLoginTokenAAD(p providerLoginPreparedTokens) (envelope.Context, error) {
+	profile := "native-static-oidc-token-v1"
+	switch p.Input.Protocol {
+	case "":
+	case providerProtocolOAuth2:
+		profile = "native-static-oauth2-token-v1"
+	default:
+		return envelope.Context{}, identity.ForbiddenError{}
+	}
 	metadata := p
 	metadata.Ciphertext = nil
 	plain, err := json.Marshal(metadata)
@@ -132,7 +152,7 @@ func providerLoginTokenAAD(p providerLoginPreparedTokens) (envelope.Context, err
 	}
 	digest := sha256.Sum256(plain)
 	return envelope.NewContext(map[string]string{
-		"owner": "sso", "profile": "native-static-oidc-token-v1", "purpose": "enterprise-provider-tokens",
+		"owner": "sso", "profile": profile, "purpose": "enterprise-provider-tokens",
 		"tenant": string(p.Input.Command.TenantID), "organization": p.Input.OrganizationID,
 		"provider": p.Input.ProviderID, "subject": p.Account.Subject, "version": strconv.FormatUint(p.Version, 10),
 		"callback": string(p.Callback.CommandID), "callback_generation": strconv.FormatUint(p.CallbackGeneration, 10),
@@ -151,7 +171,11 @@ func providerLoginTokenFailure(ctx context.Context) error {
 // on rejection. The command already freezes the resolved existing account;
 // this helper performs no lookup, network, authorization or transaction work.
 func (s *ProviderLoginService) prepareProviderLoginTokens(ctx context.Context, found providerLoginCallbackLookup, command identity.Command, generation uint64, tokens oauth.TokenSet) (providerLoginPreparedTokens, error) {
-	account, err := kernel.SSOOIDCSigninAccount(command)
+	decode := kernel.SSOOIDCSigninAccount
+	if found.Binding.Metadata.Input.Protocol == providerProtocolOAuth2 {
+		decode = kernel.SSOOAuth2SigninAccount
+	}
+	account, err := decode(command)
 	if err != nil || found.Binding.Metadata.Input.Link != nil {
 		tokens.Destroy()
 		return providerLoginPreparedTokens{}, identity.ForbiddenError{}
@@ -201,7 +225,10 @@ func (s *ProviderLoginService) prepareProviderLoginAccountTokens(ctx context.Con
 	}
 	err = tokens.Use(ctx, func(ctx context.Context, borrowed oauth.TokenBytes) error {
 		if len(borrowed.AccessToken) < 1 || len(borrowed.AccessToken) > providerLoginTokenMaximumBytes ||
-			len(borrowed.RefreshToken) > providerLoginTokenMaximumBytes || len(borrowed.IDToken) < 1 || len(borrowed.IDToken) > providerLoginTokenMaximumBytes {
+			len(borrowed.RefreshToken) > providerLoginTokenMaximumBytes || len(borrowed.IDToken) > providerLoginTokenMaximumBytes {
+			return identity.ForbiddenError{}
+		}
+		if p.Input.Protocol == "" && len(borrowed.IDToken) == 0 || p.Input.Protocol == providerProtocolOAuth2 && len(borrowed.IDToken) != 0 {
 			return identity.ForbiddenError{}
 		}
 		// Exact capacity prevents append from abandoning a bearer-bearing array.
@@ -313,15 +340,23 @@ func (s *ProviderLoginService) persistProviderLoginAccountTokens(ctx context.Con
 		return identity.ForbiddenError{}
 	}
 	if linked == nil {
-		consumed, err := work.SSOOIDCSigninConsumption(owner)
+		consumption := work.SSOOIDCSigninConsumption
+		decode := kernel.SSOOIDCSigninAccount
+		requireAccount := work.RequireSSOOIDCSigninProviderAccount
+		if p.Input.Protocol == providerProtocolOAuth2 {
+			consumption = work.SSOOAuth2SigninConsumption
+			decode = kernel.SSOOAuth2SigninAccount
+			requireAccount = work.RequireSSOOAuth2SigninProviderAccount
+		}
+		consumed, err := consumption(owner)
 		if err != nil || consumed.Command != binding || consumed.Generation != generation {
 			return identity.ForbiddenError{}
 		}
-		account, err := kernel.SSOOIDCSigninAccount(command)
+		account, err := decode(command)
 		if err != nil || account.Account != p.Account || account.SocialLinkVersion != p.SocialLinkVersion {
 			return identity.ForbiddenError{}
 		}
-		if _, err := work.RequireSSOOIDCSigninProviderAccount(ctx, owner, command); err != nil {
+		if _, err := requireAccount(ctx, owner, command); err != nil {
 			return err
 		}
 	} else if p.Input.Link == nil || linked.Account != p.Account || linked.SocialLinkVersion != p.SocialLinkVersion {
@@ -333,7 +368,11 @@ func (s *ProviderLoginService) persistProviderLoginAccountTokens(ctx context.Con
 	if len(p.Ciphertext) < 1 || len(p.Ciphertext) > 65536 {
 		return identity.ForbiddenError{}
 	}
-	rows, err := work.Query(ctx, providerLoginTokenOriginalSQL, string(p.Input.Command.TenantID), int64(p.StateKey), p.StateDigest[:])
+	originalSQL, insertSQL := providerLoginTokenOriginalSQL, providerLoginTokenInsertSQL
+	if p.Input.Protocol == providerProtocolOAuth2 {
+		originalSQL, insertSQL = providerLoginOAuth2TokenOriginalSQL, providerLoginOAuth2TokenInsertSQL
+	}
+	rows, err := work.Query(ctx, originalSQL, string(p.Input.Command.TenantID), int64(p.StateKey), p.StateDigest[:])
 	if err != nil {
 		return err
 	}
@@ -352,6 +391,7 @@ func (s *ProviderLoginService) persistProviderLoginAccountTokens(ctx context.Con
 		return identity.ForbiddenError{}
 	}
 	row.TenantID, row.StartCommandID = identity.TenantID(tenant), identity.CommandID(start)
+	row.Protocol = p.Input.Protocol
 	row.IssuedAt, row.ExpiresAt = row.IssuedAt.UTC(), row.ExpiresAt.UTC()
 	row.ProviderVersion, row.CredentialGeneration, row.MappingVersion = p.Input.ProviderVersion, p.Input.CredentialGeneration, p.Input.MappingVersion
 	if row != p.Input.rowIdentity() || callback != string(binding.CommandID) ||
@@ -366,7 +406,7 @@ func (s *ProviderLoginService) persistProviderLoginAccountTokens(ctx context.Con
 	if err != nil || len(origin) != 16 {
 		return identity.ForbiddenError{}
 	}
-	n, err := work.Exec(ctx, providerLoginTokenInsertSQL,
+	n, err := work.Exec(ctx, insertSQL,
 		string(binding.TenantID), p.Input.OrganizationID, p.Input.ProviderID, string(p.Input.Command.CommandID), string(binding.CommandID), p.CallbackGeneration,
 		string(p.Account.UserID), string(p.Account.ID), p.Account.Provider, p.Account.Issuer, p.Account.Subject,
 		p.Account.Version, p.SocialLinkVersion, p.Input.ProviderVersion, p.Input.CredentialGeneration, p.Input.MappingVersion,
@@ -393,4 +433,20 @@ const providerLoginTokenInsertSQL = `INSERT INTO sso_providers.provider_login_to
  received_at_seconds,received_at_nanoseconds,access_expires_at_seconds,access_expires_at_nanoseconds,token_ciphertext,origin_operation,origin_command_id)
  VALUES($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12::numeric,$13::numeric,$14::numeric,$15::numeric,$16::numeric,1,
  string_to_array($17,' '),string_to_array($18,' '),$19,$20,$21,$22,$23,$24,'identity.sso.oidc-callback',$25)
+ ON CONFLICT DO NOTHING`
+
+// The selected protocol and durable callback purpose are closed SQL variants;
+// neither comes from inbound callback fields. Keep the published OIDC SQL intact.
+const providerLoginOAuth2TokenOriginalSQL = `SELECT tenant_id,organization_id,provider_id,provider_version::text,credential_generation::text,mapping_version::text,start_command_id,callback_command_id,issued_at,expires_at,binding_envelope
+ FROM sso_providers.login_transactions
+ WHERE tenant_id=$1 AND state_key_version=$2 AND state_digest=$3 AND protocol='oauth2' AND completed_at IS NULL
+ FOR SHARE`
+
+const providerLoginOAuth2TokenInsertSQL = `INSERT INTO sso_providers.provider_login_token_sets(
+ tenant_id,organization_id,provider_id,start_command_id,callback_command_id,callback_generation,
+ user_id,account_id,account_provider,issuer,subject,account_version,social_link_version,
+ provider_version,credential_generation,mapping_version,token_version,requested_scopes,granted_scopes,scope_reported,
+ received_at_seconds,received_at_nanoseconds,access_expires_at_seconds,access_expires_at_nanoseconds,token_ciphertext,origin_operation,origin_command_id)
+ VALUES($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10,$11,$12::numeric,$13::numeric,$14::numeric,$15::numeric,$16::numeric,1,
+ string_to_array($17,' '),string_to_array($18,' '),$19,$20,$21,$22,$23,$24,'identity.sso.oauth-callback',$25)
  ON CONFLICT DO NOTHING`

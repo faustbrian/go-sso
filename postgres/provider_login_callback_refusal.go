@@ -11,6 +11,8 @@ import (
 
 const providerLoginRefusalKind = "sso-oidc-callback-refused-v1\x00"
 const providerLoginRefusalPurpose = "oidc-callback-refused-v1"
+const providerOAuth2LoginRefusalKind = "sso-oauth2-callback-refused-v1\x00"
+const providerOAuth2LoginRefusalPurpose = "oauth2-callback-refused-v1"
 
 // Refusal retains only timing and original terminal correlation, never the
 // provider error/body, original proof or verifier, recipient, or token material.
@@ -24,11 +26,15 @@ func (p *providerLoginCallbackPhase) sealProviderLoginCallbackRefusal(ctx contex
 	if err := p.checkOriginal(now); err != nil {
 		return nil, err
 	}
-	aad, err := p.callbackOutputContext(generation, providerLoginRefusalPurpose)
+	kind, purpose := providerLoginRefusalKind, providerLoginRefusalPurpose
+	if p.oauth2 != nil {
+		kind, purpose = providerOAuth2LoginRefusalKind, providerOAuth2LoginRefusalPurpose
+	}
+	aad, err := p.callbackOutputContext(generation, purpose)
 	if err != nil {
 		return nil, err
 	}
-	terminal, err := p.service.payload.sealProviderLoginCallbackTerminal(ctx, p.found)
+	terminal, err := p.sealCallbackTerminal(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -44,20 +50,34 @@ func (p *providerLoginCallbackPhase) sealProviderLoginCallbackRefusal(ctx contex
 		return nil, err
 	}
 	defer clear(wire)
-	return append([]byte(providerLoginRefusalKind), wire...), nil
+	return append([]byte(kind), wire...), nil
 }
 
 func (p *providerLoginCallbackPhase) RestoreSSOOIDCPreparationRefusal(ctx context.Context, original identity.Command, generation uint64, wire []byte) (bool, error) {
+	if p == nil || p.oauth2 != nil {
+		return false, identity.ForbiddenError{}
+	}
+	return p.restorePreparationRefusal(ctx, original, generation, wire, providerLoginRefusalKind, providerLoginRefusalPurpose)
+}
+
+func (p *providerLoginCallbackPhase) RestoreSSOOAuth2PreparationRefusal(ctx context.Context, original identity.Command, generation uint64, wire []byte) (bool, error) {
+	if p == nil || p.oauth2 == nil || p.found.Row.Protocol != providerProtocolOAuth2 {
+		return false, identity.ForbiddenError{}
+	}
+	return p.restorePreparationRefusal(ctx, original, generation, wire, providerOAuth2LoginRefusalKind, providerOAuth2LoginRefusalPurpose)
+}
+
+func (p *providerLoginCallbackPhase) restorePreparationRefusal(ctx context.Context, original identity.Command, generation uint64, wire []byte, kind, purpose string) (bool, error) {
 	// The kind is only a dispatch hint. The dedicated authenticated context
 	// must verify before it can select any irreversible terminal action.
-	sealed, marked := bytes.CutPrefix(wire, []byte(providerLoginRefusalKind))
+	sealed, marked := bytes.CutPrefix(wire, []byte(kind))
 	if !marked {
 		return false, nil
 	}
 	if p == nil || p.service == nil || p.refusal != nil || p.execution != nil || original != p.command {
 		return false, identity.ForbiddenError{}
 	}
-	aad, err := p.callbackOutputContext(generation, providerLoginRefusalPurpose)
+	aad, err := p.callbackOutputContext(generation, purpose)
 	if err != nil {
 		return false, err
 	}
@@ -79,7 +99,7 @@ func (p *providerLoginCallbackPhase) RestoreSSOOIDCPreparationRefusal(ctx contex
 		clear(refused.Terminal)
 		return false, identity.ForbiddenError{}
 	}
-	terminal, err := p.service.payload.openProviderLoginCallbackTerminal(ctx, row, refused.Terminal)
+	terminal, err := p.openCallbackTerminal(ctx, refused.Terminal)
 	if err != nil || !equalProviderLoginBindingMetadata(terminal.Metadata, p.found.Binding.Metadata) {
 		clear(refused.Terminal)
 		return false, identity.ForbiddenError{}
@@ -89,6 +109,20 @@ func (p *providerLoginCallbackPhase) RestoreSSOOIDCPreparationRefusal(ctx contex
 }
 
 func (p *providerLoginCallbackPhase) CleanupSSOOIDCPreparationRefusal(ctx context.Context, w kernel.Work) error {
+	if p == nil || p.oauth2 != nil {
+		return identity.ForbiddenError{}
+	}
+	return p.cleanupPreparationRefusal(ctx, w)
+}
+
+func (p *providerLoginCallbackPhase) CleanupSSOOAuth2PreparationRefusal(ctx context.Context, w kernel.Work) error {
+	if p == nil || p.oauth2 == nil || p.found.Row.Protocol != providerProtocolOAuth2 {
+		return identity.ForbiddenError{}
+	}
+	return p.cleanupPreparationRefusal(ctx, w)
+}
+
+func (p *providerLoginCallbackPhase) cleanupPreparationRefusal(ctx context.Context, w kernel.Work) error {
 	if p == nil || p.service == nil || p.refusal == nil || p.execution != nil || ctx == nil {
 		return identity.ForbiddenError{}
 	}
@@ -103,3 +137,4 @@ func (p *providerLoginCallbackPhase) CleanupSSOOIDCPreparationRefusal(ctx contex
 }
 
 var _ kernel.SSOOIDCPreparationRefusalContributor = (*providerLoginCallbackPhase)(nil)
+var _ kernel.SSOOAuth2PreparationRefusalContributor = (*providerLoginCallbackPhase)(nil)

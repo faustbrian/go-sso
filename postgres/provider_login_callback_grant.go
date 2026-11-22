@@ -23,6 +23,13 @@ func (s *ProviderLoginService) prepareProviderLoginCallbackGrant(ctx context.Con
 		return kernel.CapabilityPlan{}, err
 	}
 	stored := found.Binding
+	metadata := stored.Metadata
+	_, purposeText := providerLoginCryptoProtocol(found.Row.Protocol)
+	if purposeText == "" || metadata.Input.Protocol != found.Row.Protocol ||
+		(found.Row.Protocol == providerProtocolOAuth2 && metadata.Input.Link != nil) {
+		return kernel.CapabilityPlan{}, sso.ErrForbidden
+	}
+	purpose := capability.Purpose(purposeText)
 	proof, err := capability.ParseProof(string(stored.Proof), s.callbackLimits)
 	if err != nil {
 		return kernel.CapabilityPlan{}, sso.ErrForbidden
@@ -30,7 +37,7 @@ func (s *ProviderLoginService) prepareProviderLoginCallbackGrant(ctx context.Con
 	defer func() {
 		_ = proof.Transfer(context.WithoutCancel(ctx), func(context.Context, []byte) error { return nil })
 	}()
-	grant, err := s.callbackVerifier.Verify(ctx, proof, providerOIDCCallback, s.payload.Audience)
+	grant, err := s.callbackVerifier.Verify(ctx, proof, purpose, s.payload.Audience)
 	if err != nil {
 		if ctx.Err() != nil {
 			return kernel.CapabilityPlan{}, ctx.Err()
@@ -40,7 +47,6 @@ func (s *ProviderLoginService) prepareProviderLoginCallbackGrant(ctx context.Con
 		}
 		return kernel.CapabilityPlan{}, sso.ErrForbidden
 	}
-	metadata := stored.Metadata
 	frame, err := providerLoginPayloadEncode(metadata)
 	if err != nil {
 		return kernel.CapabilityPlan{}, sso.ErrForbidden
@@ -51,14 +57,16 @@ func (s *ProviderLoginService) prepareProviderLoginCallbackGrant(ctx context.Con
 	payload := grant.Payload()
 	subject := original.AnonymousFlowID
 	prepare := s.payload.Issuer.PrepareSSOOIDCSigninConsumption
-	if metadata.Input.Link != nil {
+	if found.Row.Protocol == providerProtocolOAuth2 {
+		prepare = s.payload.Issuer.PrepareSSOOAuth2SigninConsumption
+	} else if metadata.Input.Link != nil {
 		subject = string(original.UserID)
 		prepare = s.payload.Issuer.PrepareSSOOIDCExplicitLinkConsumption
 	}
 	use := capability.Use{
 		Issuer: s.payload.CapabilityIssuer, Audience: s.payload.Audience,
 		Subject: subject, Tenant: string(s.config.TenantID),
-		Resource: original.RecordID, Operation: providerOIDCCallback,
+		Resource: original.RecordID, Operation: purposeText,
 		Caveats: map[string]string{"identity.sso.rp.binding": base64.RawURLEncoding.EncodeToString(digest[:])},
 	}
 	if len(payload.Caveats) != 1 || !payload.IssuedAt.Equal(metadata.Input.IssuedAt) || !payload.ExpiresAt.Equal(metadata.Input.ExpiresAt) || grant.Authorize(use) != nil {

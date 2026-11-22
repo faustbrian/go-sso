@@ -33,6 +33,9 @@ type providerLoginCallbackInvocation struct {
 }
 
 func (p *providerLoginCallbackInvocation) operation() identity.FeatureOperation {
+	if p.found.Row.Protocol == providerProtocolOAuth2 {
+		return kernel.SSOOAuth2SigninOperation()
+	}
 	if p.member != nil {
 		return kernel.SSOOIDCExplicitLinkCallbackOperation()
 	}
@@ -55,10 +58,11 @@ func (p *providerLoginCallbackInvocation) riskScope() (risk.Context, risk.Subjec
 	row := p.found.Row
 	// Before identity resolution, bound identifier velocity to the selected
 	// tenant/organization/provider, never to a user or a claim from the reply.
-	bucket := sha256.Sum256([]byte("sso-oidc-callback-provider\x00" + string(row.TenantID) + "\x00" + row.OrganizationID + "\x00" + row.ProviderID))
+	protocol, action := providerLoginCryptoProtocol(row.Protocol)
+	bucket := sha256.Sum256([]byte("sso-" + protocol + "-callback-provider\x00" + string(row.TenantID) + "\x00" + row.OrganizationID + "\x00" + row.ProviderID))
 	// Use the same closed authentication counter dimensions for both modes.
 	// The authenticated member is attributed separately in the decision audit.
-	return risk.Context{Tenant: string(row.TenantID), Operation: risk.Action(providerOIDCCallback), Attempt: string(p.found.Binding.Metadata.CallbackCommand)},
+	return risk.Context{Tenant: string(row.TenantID), Operation: risk.Action(action), Attempt: string(p.found.Binding.Metadata.CallbackCommand)},
 		risk.Subject{Network: p.browser.Network.String(), Device: p.browser.Device, IdentifierDigest: hex.EncodeToString(bucket[:])}
 }
 
@@ -73,7 +77,8 @@ func (p *providerLoginCallbackInvocation) checkOriginal(now time.Time) error {
 	if err != nil {
 		return identity.ForbiddenError{}
 	}
-	return p.service.requireProviderLoginBrowser(p.flow, now, p.browser, p.original.SuccessCallback, remember)
+	_, action := providerLoginCryptoProtocol(p.found.Row.Protocol)
+	return p.service.requireProviderLoginBrowserForAction(p.flow, now, p.browser, p.original.SuccessCallback, remember, action)
 }
 
 // admitPrimary is used only in pre-generation Work. In final Apply the

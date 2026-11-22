@@ -46,18 +46,29 @@ func (providerLoginCallbackRecipient) Format(s fmt.State, _ rune) {
 // bound even when both input IDs have maximum length. Tenant isolation remains
 // the account owner's independent tenant key; this value is not a secret.
 func SSOOIDCAccountProviderNamespace(organizationID organization.ID, provider sso.ProviderID) (string, error) {
+	return ssoAccountProviderNamespace(organizationID, provider, "oidc")
+}
+
+// SSOOAuth2AccountProviderNamespace identifies an existing enterprise OAuth2
+// link under its exact organization/provider pair. It cannot select an OIDC
+// or social account, and creates neither a link nor authentication authority.
+func SSOOAuth2AccountProviderNamespace(organizationID organization.ID, provider sso.ProviderID) (string, error) {
+	return ssoAccountProviderNamespace(organizationID, provider, "oauth2")
+}
+
+func ssoAccountProviderNamespace(organizationID organization.ID, provider sso.ProviderID, protocol string) (string, error) {
 	if !providerID(string(organizationID)) || !providerID(string(provider)) {
 		return "", sso.ErrInvalidInput
 	}
 	h := sha256.New()
-	_, _ = h.Write([]byte("golib.sso.oidc.account-provider.v1\x00"))
+	_, _ = h.Write([]byte("golib.sso." + protocol + ".account-provider.v1\x00"))
 	for _, id := range []string{string(organizationID), string(provider)} {
 		var size [2]byte
 		binary.BigEndian.PutUint16(size[:], uint16(len(id)))
 		_, _ = h.Write(size[:])
 		_, _ = h.Write([]byte(id))
 	}
-	return "sso.oidc.v1." + hex.EncodeToString(h.Sum(nil)), nil
+	return "sso." + protocol + ".v1." + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // These are preliminary immutable observations for the original callback, not
@@ -75,15 +86,27 @@ func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context
 	now := s.router.config.Clock.Now().UTC()
 	observedAt := now
 	protocolID, protocolErr := ssoOIDCTransportProviderID(original.Proof.OrganizationID, original.ProviderID)
+	accountNamespace := SSOOIDCAccountProviderNamespace
+	accountFields := kernel.SSOOIDCSigninAccountFields
+	readFactors := mfapg.ReadSSOOIDCSigninFactors
+	validEvidence := !verified.IDTokenIssuedAt().IsZero() && !verified.IDTokenExpiresAt().IsZero()
+	if original.Protocol == providerProtocolOAuth2 {
+		protocolID, protocolErr = ssoOAuth2TransportProviderID(original.Proof.OrganizationID, original.ProviderID)
+		accountNamespace = SSOOAuth2AccountProviderNamespace
+		accountFields = kernel.SSOOAuth2SigninAccountFields
+		readFactors = mfapg.ReadSSOOAuth2SigninFactors
+		_, hasAuthenticationTime := verified.AuthenticationTime()
+		validEvidence = verified.IDTokenIssuedAt().IsZero() && verified.IDTokenExpiresAt().IsZero() && !hasAuthenticationTime
+	}
 	if original.Command.TenantID != s.config.TenantID || original.Proof.TenantID != s.config.TenantID ||
 		original.Organization.TenantID != s.config.TenantID || original.Organization.OrganizationID != original.Proof.OrganizationID ||
 		original.Organization.Version == 0 || original.Organization.CredentialVersion == 0 ||
 		original.Issued.IsZero() || now.Before(original.Issued) || !now.Before(original.Expires) ||
 		protocolErr != nil || verified.ProviderID() != protocolID || verified.Issuer() != original.Issuer || verified.Subject() == "" ||
-		verified.IDTokenIssuedAt().IsZero() || verified.IDTokenExpiresAt().IsZero() || !now.Before(verified.EvidenceExpiresAt()) {
+		!validEvidence || !now.Before(verified.EvidenceExpiresAt()) {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	provider, err := SSOOIDCAccountProviderNamespace(original.Proof.OrganizationID, original.ProviderID)
+	provider, err := accountNamespace(original.Proof.OrganizationID, original.ProviderID)
 	if err != nil {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
@@ -110,7 +133,7 @@ func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context
 		}
 		return providerLoginCallbackRecipient{}, providerError(ctx, err)
 	}
-	if _, err := kernel.SSOOIDCSigninAccountFields(account); err != nil || account.Account.TenantID != query.TenantID ||
+	if _, err := accountFields(account); err != nil || account.Account.TenantID != query.TenantID ||
 		account.Account.Provider != query.Provider || account.Account.Issuer != query.Issuer || account.Account.Subject != query.Subject {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
@@ -122,7 +145,7 @@ func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context
 		}
 		return providerLoginCallbackRecipient{}, providerError(ctx, err)
 	}
-	factors, err := mfapg.ReadSSOOIDCSigninFactors(ctx, s.router.pool, query.TenantID, account.Account.UserID, maximumDuration)
+	factors, err := readFactors(ctx, s.router.pool, query.TenantID, account.Account.UserID, maximumDuration)
 	if err != nil {
 		return providerLoginCallbackRecipient{}, providerError(ctx, err)
 	}

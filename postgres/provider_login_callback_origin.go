@@ -20,7 +20,7 @@ func (s *ProviderLoginService) readProviderLoginCallbackOrigin(ctx context.Conte
 	if err != nil {
 		return providerLoginStartInput{}, sso.ErrForbidden
 	}
-	phase := &providerLoginPhase{service: s, browser: ProviderLoginBrowser{FlowID: flow.Binding.ID}}
+	phase := &providerLoginPhase{service: s, browser: ProviderLoginBrowser{FlowID: flow.Binding.ID}, protocol: found.Row.Protocol}
 	return s.readProviderLoginCallbackStart(ctx, found, phase)
 }
 

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Complete native enterprise OAuth2 sign-in for already linked members.
+  Reserve the original OAuth state before exchange, confirm identity through
+  the installed TLS endpoint, and commit the session, encrypted token vault,
+  and custody erasure together. Definitive refusals erase executable custody;
+  ambiguous outcomes keep original custody without resubmitting the code.
+
+- Support OAuth2-only deposits in the existing enterprise token vault. Bind
+  access/refresh tokens to exact scopes, callback generation and linked
+  account, use a separate encryption profile, and require no ID token.
+  The vault alone does not enable OAuth callback completion.
+
 - Allow the existing enterprise token vault schema to accept native OAuth
   callback origins without rewriting grants or relaxing command and account
   provenance. Keep OAuth callback state and verifier custody separate from OIDC.
