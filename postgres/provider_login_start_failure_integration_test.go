@@ -100,6 +100,16 @@ func nativeProviderLoginSuccessAudits(t *testing.T, x providerLoginStartFixture)
 
 func providerLoginLossService(t *testing.T, x providerLoginStartFixture) (*ssopg.ProviderLoginService, *providerCommitFault) {
 	t.Helper()
+	router, fault := providerLoginLossRouter(t, x)
+	service, err := ssopg.NewProviderLoginService(router, x.config)
+	if err != nil {
+		t.Fatal("compose native login on commit-response fault pool", err)
+	}
+	return service, fault
+}
+
+func providerLoginLossRouter(t *testing.T, x providerLoginStartFixture) (*ssopg.ProviderRouter, *providerCommitFault) {
+	t.Helper()
 	f := x.enable.f
 	fault := &providerCommitFault{target: "INSERT INTO sso_providers.login_transactions"}
 	pool, err := database.Connect(f.ctx, database.Config{DSN: f.dsn, MaxConns: 2, Configure: func(c *database.PoolConfig) error {
@@ -127,11 +137,7 @@ func providerLoginLossService(t *testing.T, x providerLoginStartFixture) (*ssopg
 	faultFixture.pool = pool
 	enable := x.enable
 	enable.f = &faultFixture
-	service, err := ssopg.NewProviderLoginService(newProviderRouter(t, enable, 4), x.config)
-	if err != nil {
-		t.Fatal("compose native login on commit-response fault pool", err)
-	}
-	return service, fault
+	return newProviderRouter(t, enable, 4), fault
 }
 
 type providerLoginStoredCustody struct {

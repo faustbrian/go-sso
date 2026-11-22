@@ -15,7 +15,7 @@ import (
 // native coordinator has acknowledged reservation. This custody operation
 // checks the original cryptographic binding; it does not reserve or renew it.
 func (c providerLoginPayloadConfig) withCallbackVerifier(ctx context.Context, metadata providerLoginBindingMetadata, now time.Time, wire []byte, use func(context.Context, []byte) error) error {
-	if ctx == nil || c.Envelope == nil || use == nil || now.IsZero() || now.Before(metadata.Input.IssuedAt) || !now.Before(metadata.Input.ExpiresAt) {
+	if ctx == nil || c.Envelope == nil || use == nil || metadata.Input.Protocol != "" || now.IsZero() || now.Before(metadata.Input.IssuedAt) || !now.Before(metadata.Input.ExpiresAt) {
 		return identity.ForbiddenError{}
 	}
 	if err := ctx.Err(); err != nil {

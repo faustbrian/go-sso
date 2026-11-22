@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/faustbrian/go-capability/v2"
 	identity "github.com/faustbrian/go-identity"
 	kernel "github.com/faustbrian/go-identity/postgres"
 	envelope "github.com/faustbrian/go-secret-envelope/v2"
@@ -24,6 +25,9 @@ type providerLoginCallbackTerminalBinding struct {
 }
 
 func providerLoginCallbackTerminalAAD(row providerLoginRowIdentity) (envelope.Context, error) {
+	if row.Protocol != "" { // Terminal callback custody remains OIDC-only.
+		return envelope.Context{}, identity.ForbiddenError{}
+	}
 	if _, err := row.aad(); err != nil {
 		return envelope.Context{}, err
 	}
@@ -92,7 +96,13 @@ func (c providerLoginPayloadConfig) validProviderLoginBindingMetadata(row provid
 	if _, err := identity.ParseCommandID(string(m.CallbackCommand)); err != nil {
 		return false
 	}
-	for _, value := range []string{m.Public.State, m.Public.Nonce, m.Public.Challenge} {
+	values := []string{m.Public.State, m.Public.Challenge}
+	if row.Protocol == "" {
+		values = append(values, m.Public.Nonce)
+	} else if m.Public.Nonce != "" {
+		return false
+	}
+	for _, value := range values {
 		if len(value) != 43 {
 			return false
 		}
@@ -105,7 +115,7 @@ func (c providerLoginPayloadConfig) validProviderLoginBindingMetadata(row provid
 	}
 	rawState, _ := base64.RawURLEncoding.Strict().DecodeString(m.Public.State)
 	defer clear(rawState)
-	digest, err := providerLoginStateDigest(c.StateKeys[m.StateKey], m.StateKey, row.TenantID, rawState)
+	digest, err := providerLoginProtocolStateDigest(c.StateKeys[m.StateKey], m.StateKey, row.TenantID, row.Protocol, rawState)
 	return err == nil && hmac.Equal(digest[:], m.StateDigest[:])
 }
 
@@ -114,7 +124,8 @@ func (c providerLoginPayloadConfig) validProviderLoginPendingBinding(row provide
 		return false
 	}
 	grant := kernel.CapabilityPlan(stored.Plan.Grant)
-	return stored.Plan.Contributor == c.Issuer.Descriptor() && grant.Purpose == "identity.sso.oidc-callback" && grant.MaxUses == 1 && grant.ReplayKeyVersion != 0 && grant.ReplayDigest != ([32]byte{}) && grant.ProofFingerprint != ([32]byte{}) && grant.ExpiresAt.Equal(row.ExpiresAt) && len(stored.Proof) > 0 && len(stored.Proof) <= 32768 && sha256.Sum256(stored.Proof) == grant.ProofFingerprint
+	_, purpose := providerLoginCryptoProtocol(row.Protocol)
+	return purpose != "" && stored.Plan.Contributor == c.Issuer.Descriptor() && grant.Purpose == capability.Purpose(purpose) && grant.MaxUses == 1 && grant.ReplayKeyVersion != 0 && grant.ReplayDigest != ([32]byte{}) && grant.ProofFingerprint != ([32]byte{}) && grant.ExpiresAt.Equal(row.ExpiresAt) && len(stored.Proof) > 0 && len(stored.Proof) <= 32768 && sha256.Sum256(stored.Proof) == grant.ProofFingerprint
 }
 
 // Lock the exact pending primary key before evaluating the exclusive completion

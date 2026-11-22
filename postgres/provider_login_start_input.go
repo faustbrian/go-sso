@@ -48,14 +48,22 @@ type providerLoginStartInput struct {
 	Link                                          *providerLoginMemberIntent                   `json:",omitempty"`
 	MemberAuthority                               *organization.CredentialAuthorityObservation `json:",omitempty"`
 	MemberReadUntil                               time.Time                                    `json:",omitzero"`
+	Protocol                                      string                                       `json:",omitempty"`
 }
 
 func (i providerLoginStartInput) authority() (providerLoginAuthority, error) {
 	proof := sso.DomainProofCheckpoint{Key: i.Proof, ProofVersion: i.Proof.ProofVersion}
-	route, err := sso.NewDomainRoute(sso.DomainRouteBinding{
+	binding := sso.DomainRouteBinding{
 		ProviderID: i.ProviderID, ProviderVersion: i.ProviderVersion, CredentialGeneration: i.Generation,
 		PolicyVersion: i.RoutePolicy, Proof: proof, ObservedAt: i.RouteObservedAt, ValidUntil: i.RouteValidUntil,
-	})
+	}
+	create := sso.NewDomainRoute
+	if i.Protocol == providerProtocolOAuth2 {
+		create = sso.NewOAuth2DomainRoute
+	} else if i.Protocol != "" {
+		return providerLoginAuthority{}, identity.ForbiddenError{}
+	}
+	route, err := create(binding)
 	if err != nil {
 		return providerLoginAuthority{}, identity.ForbiddenError{}
 	}
@@ -68,7 +76,7 @@ func (i providerLoginStartInput) payload() providerLoginPayloadInput {
 		ProviderID: string(i.ProviderID), ProviderVersion: i.ProviderVersion, CredentialGeneration: i.Generation, MappingVersion: i.MappingVersion,
 		Issuer: i.Issuer, ClientID: i.ClientID, RedirectURI: i.ProtocolRedirectURI,
 		BrowserOrigin: i.BrowserOrigin, SuccessCallback: i.SuccessCallback, ErrorCallback: i.ErrorCallback, Remember: i.Remember,
-		InputFingerprint: i.Intent, IssuedAt: i.Issued, ExpiresAt: i.Expires, Link: i.Link,
+		InputFingerprint: i.Intent, IssuedAt: i.Issued, ExpiresAt: i.Expires, Link: i.Link, Protocol: i.Protocol,
 	}
 }
 
@@ -77,6 +85,7 @@ type providerLoginPhase struct {
 	request  sso.SigninStartRequest
 	browser  ProviderLoginBrowser
 	member   *providerLoginMemberAdmission
+	protocol string // empty preserves the existing OIDC profile and persisted bytes
 	flow     session.PreAuthTransaction
 	intent   [32]byte
 	input    *providerLoginStartInput
@@ -113,10 +122,15 @@ func (p *providerLoginPhase) requireBrowser(flow session.PreAuthTransaction, now
 	if err != nil {
 		return identity.ForbiddenError{}
 	}
-	return p.service.requireProviderLoginBrowser(flow, now, p.browser, p.request.SuccessCallback.String(), remember)
+	_, action := providerLoginCryptoProtocol(p.protocol)
+	return p.service.requireProviderLoginBrowserForAction(flow, now, p.browser, p.request.SuccessCallback.String(), remember, action)
 }
 
 func (s *ProviderLoginService) requireProviderLoginBrowser(flow session.PreAuthTransaction, now time.Time, browser ProviderLoginBrowser, successCallback string, remember session.RememberPolicy) error {
+	return s.requireProviderLoginBrowserForAction(flow, now, browser, successCallback, remember, providerOIDCCallback)
+}
+
+func (s *ProviderLoginService) requireProviderLoginBrowserForAction(flow session.PreAuthTransaction, now time.Time, browser ProviderLoginBrowser, successCallback string, remember session.RememberPolicy, action string) error {
 	spec, err := flow.Bindings()
 	if err != nil {
 		return identity.ForbiddenError{}
@@ -124,7 +138,7 @@ func (s *ProviderLoginService) requireProviderLoginBrowser(flow session.PreAuthT
 	b, c := spec.Binding, s.config
 	i := b.Intent
 	if b.ID != browser.FlowID || i.TenantID != c.TenantID || i.Purpose != session.PreAuthSessionIssuance ||
-		i.Action != providerOIDCCallback || i.IdentifierBinding != ([32]byte{}) || i.Origin != browser.Origin ||
+		action == "" || i.Action != action || i.IdentifierBinding != ([32]byte{}) || i.Origin != browser.Origin ||
 		i.CallbackURL != successCallback || i.PolicyID != c.PolicyID || i.PolicyVersion != s.policyVersion || i.Remember != remember {
 		return identity.ForbiddenError{}
 	}
@@ -149,6 +163,10 @@ func (p *providerLoginPhase) requestIntent() (identity.RequestIntent, error) {
 	if err != nil {
 		return identity.RequestIntent{}, err
 	}
+	profileDigest := p.service.profileDigest
+	if p.protocol == providerProtocolOAuth2 {
+		profileDigest = p.service.oauthDigest
+	}
 	b, i, r := flow.Binding, flow.Binding.Intent, p.request
 	remember, err := i.Remember.Bindings()
 	if err != nil {
@@ -168,7 +186,7 @@ func (p *providerLoginPhase) requestIntent() (identity.RequestIntent, error) {
 		Remember                            session.RememberPolicySpec
 		Provider, Domain, Callback, Failure string
 		Origin, Network, Device             string
-	}{p.service.profileDigest, r.CommandID, b.ID, flow.Version, i.Nonce, flow.Cookie.KeyVersion, flow.Cookie.Sum,
+	}{profileDigest, r.CommandID, b.ID, flow.Version, i.Nonce, flow.Cookie.KeyVersion, flow.Cookie.Sum,
 		b.IssuedAt, b.ExpiresAt, remember, r.ProviderID, r.Domain, r.SuccessCallback.String(), r.ErrorCallback.String(),
 		p.browser.Origin, p.browser.Network.String(), p.browser.Device})
 	if err != nil {
@@ -208,7 +226,11 @@ func (p *providerLoginPhase) requestKeyContext(k kernel.RequestKeyPreparationBin
 	}
 	defer clear(frame)
 	digest := sha256.Sum256(frame)
-	return envelope.NewContext(map[string]string{"profile": "sso-oidc-login-request-v1", "binding": base64.RawURLEncoding.EncodeToString(digest[:])})
+	protocol, _ := providerLoginCryptoProtocol(p.protocol)
+	if protocol == "" {
+		return envelope.Context{}, identity.ForbiddenError{}
+	}
+	return envelope.NewContext(map[string]string{"profile": "sso-" + protocol + "-login-request-v1", "binding": base64.RawURLEncoding.EncodeToString(digest[:])})
 }
 
 func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.RequestKeyPreparationBinding, intent identity.RequestIntent) (wire []byte, err error) {
@@ -240,14 +262,18 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 	if !directory.Enabled {
 		return nil, identity.ForbiddenError{}
 	}
-	selected, profile, err := s.selectRoute(ctx, p.request)
+	selected, profile, err := p.selectRoute(ctx)
 	if err != nil {
 		return nil, err
 	}
 	// Check the complete wire-size bound before reserving an irreversible
 	// generation. Real public values use the same fixed base64url length.
 	const publicFieldShape = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	if _, err := profile.authorizationRedirect(providerLoginPublicState{State: publicFieldShape, Nonce: publicFieldShape, Challenge: publicFieldShape}); err != nil {
+	shape := providerLoginPublicState{State: publicFieldShape, Challenge: publicFieldShape}
+	if p.protocol == "" {
+		shape.Nonce = publicFieldShape
+	}
+	if _, err := profile.authorizationRedirect(shape); err != nil {
 		return nil, identity.ForbiddenError{}
 	}
 	authority, err := s.router.observeProviderLoginAuthority(ctx, selected)
@@ -288,7 +314,7 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 		ClientID: profile.configured.ClientID, ProtocolRedirectURI: profile.configured.ProtocolRedirectURI,
 		BrowserOrigin: p.browser.Origin, SuccessCallback: p.request.SuccessCallback.String(), ErrorCallback: p.request.ErrorCallback.String(),
 		Remember: remember,
-		Started:  now, Issued: issued, Expires: expires,
+		Started:  now, Issued: issued, Expires: expires, Protocol: p.protocol,
 	}
 	if p.member != nil {
 		if err := p.freezeMember(ctx, &input, now); err != nil {
@@ -355,13 +381,18 @@ func (p *providerLoginPhase) openOriginalInput(ctx context.Context, k kernel.Req
 		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
 	want := p.commandBinding(k.Admission.CommandID)
-	if identity.CommandBinding(input.Command) != want || want.ValidateFor(p.operation()) != nil ||
+	if input.Protocol != p.protocol || identity.CommandBinding(input.Command) != want || want.ValidateFor(p.operation()) != nil ||
 		input.Proof.TenantID != want.TenantID || input.GlobalVersion == 0 || input.TenantVersion == 0 ||
 		!input.Issued.Equal(input.Started.Truncate(time.Second)) || !input.Expires.After(input.Started) ||
 		input.Expires.After(input.Issued.Add(p.service.config.StateLifetime)) {
 		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
-	profile, ok := p.service.profiles[providerLoginProfileKey{input.Proof.OrganizationID, input.ProviderID}]
+	key := providerLoginProfileKey{input.Proof.OrganizationID, input.ProviderID}
+	profile, ok := p.service.profiles[key]
+	if p.protocol == providerProtocolOAuth2 {
+		selected, found := p.service.oauthProfiles[key]
+		profile, ok = StaticOIDCLoginProfile(selected), found
+	}
 	if !ok || profile.Domain != input.Proof.Domain || profile.ProviderVersion != input.ProviderVersion ||
 		profile.CredentialGeneration != input.Generation || profile.MappingVersion != input.MappingVersion ||
 		profile.ClientID != input.ClientID || profile.ProtocolRedirectURI != input.ProtocolRedirectURI {

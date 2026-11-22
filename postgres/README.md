@@ -58,6 +58,25 @@ code/S256 authorization redirect and never renews state or the pre-auth flow.
 An unknown commit or stale current authority returns no redirect. Start
 installs no HTTP route, exchanges no code and creates no user or session.
 
+### Native static OAuth 2.0 sign-in start
+
+Install the start prerequisites above and both versions of
+`LoginTransactionProtocolMigrationSource`. Pass a router selected with
+`WithProtocolRegistry` and exact `StaticOAuth2LoginProfile` values to
+`NewProviderLoginServiceWithOAuth2`; no OIDC profiles are required. The trusted
+configuration selects the current provider, organization, domain, credential
+and mapping versions, HTTPS protocol redirect, client ID and scopes excluding
+`openid`.
+
+Issue the original pre-auth flow for `identity.sso.oauth-callback` and its exact
+successful return URL. Call `SigninStartOAuth2` with the exact provider and
+domain, original browser evidence, request and idempotency key. The method
+returns a code/S256 redirect without OIDC nonce only after durable state,
+separate encrypted PKCE verifier and one OAuth callback grant commit. An
+admitted retry returns the original redirect without renewing its expiry.
+This entry point installs no HTTP route, exchanges no code and creates no user
+or session. OIDC start and callback do not accept OAuth custody.
+
 ### Native static OIDC callback for an existing linked member
 
 Before opting in, install the native callback account, capability, MFA,

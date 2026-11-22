@@ -50,6 +50,7 @@ type providerLoginPayloadInput struct {
 	BrowserOrigin, SuccessCallback, ErrorCallback             string
 	Remember                                                  session.RememberPolicySpec
 	Link                                                      *providerLoginMemberIntent `json:",omitempty"`
+	Protocol                                                  string                     `json:",omitempty"`
 }
 
 type providerLoginMemberIntent struct {
@@ -82,12 +83,26 @@ type providerLoginRowIdentity struct {
 	ProviderVersion, CredentialGeneration, MappingVersion uint64
 	StartCommandID                                        identity.CommandID
 	IssuedAt, ExpiresAt                                   time.Time
+	Protocol                                              string `json:",omitempty"`
 }
 
 func (i providerLoginPayloadInput) rowIdentity() providerLoginRowIdentity {
 	return providerLoginRowIdentity{TenantID: i.Command.TenantID, OrganizationID: i.OrganizationID,
 		ProviderID: i.ProviderID, ProviderVersion: i.ProviderVersion, CredentialGeneration: i.CredentialGeneration,
-		MappingVersion: i.MappingVersion, StartCommandID: i.Command.CommandID, IssuedAt: i.IssuedAt, ExpiresAt: i.ExpiresAt}
+		MappingVersion: i.MappingVersion, StartCommandID: i.Command.CommandID, IssuedAt: i.IssuedAt, ExpiresAt: i.ExpiresAt, Protocol: i.Protocol}
+}
+
+// The omitted discriminator is the only persisted OIDC representation. Keep
+// its original JSON and authentication domains readable across this upgrade.
+func providerLoginCryptoProtocol(discriminator string) (protocol, callbackPurpose string) {
+	switch discriminator {
+	case "":
+		return "oidc", providerOIDCCallback
+	case providerProtocolOAuth2:
+		return providerProtocolOAuth2, "identity.sso.oauth-callback"
+	default:
+		return "", ""
+	}
 }
 
 type providerLoginPublicState struct {
@@ -176,6 +191,16 @@ func (providerLoginPayloadOutput) Format(s fmt.State, _ rune) {
 
 func (i providerLoginPayloadInput) validate() error {
 	op := identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.signin-start", SchemaID: "identity.sso.signin-start.oidc-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired, SubjectRequirement: identity.FeatureSubjectAnonymousFlow}
+	switch i.Protocol {
+	case providerProtocolOAuth2:
+		if i.Link != nil || i.Command.ActorKind != authorization.SubjectServiceAccount {
+			return identity.ForbiddenError{}
+		}
+		op = kernel.SSOOAuth2SigninStartOperation()
+	case "":
+	default:
+		return identity.ForbiddenError{}
+	}
 	if i.Link != nil {
 		op = providerExplicitLinkStartOperation()
 	}
@@ -273,7 +298,8 @@ func providerLoginPayloadTenant(tenant identity.TenantID) bool {
 }
 
 func (r providerLoginRowIdentity) aad() (envelope.Context, error) {
-	if !providerLoginPayloadTenant(r.TenantID) || !providerLoginPayloadText(r.OrganizationID, 128) || !providerLoginPayloadText(r.ProviderID, 128) || r.ProviderVersion == 0 || r.CredentialGeneration == 0 || r.MappingVersion == 0 || !providerLoginPayloadTime(r.IssuedAt) || !providerLoginPayloadTime(r.ExpiresAt) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.Sub(r.IssuedAt) > 10*time.Minute {
+	protocol, _ := providerLoginCryptoProtocol(r.Protocol)
+	if protocol == "" || !providerLoginPayloadTenant(r.TenantID) || !providerLoginPayloadText(r.OrganizationID, 128) || !providerLoginPayloadText(r.ProviderID, 128) || r.ProviderVersion == 0 || r.CredentialGeneration == 0 || r.MappingVersion == 0 || !providerLoginPayloadTime(r.IssuedAt) || !providerLoginPayloadTime(r.ExpiresAt) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.Sub(r.IssuedAt) > 10*time.Minute {
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
 	if _, err := identity.ParseCommandID(string(r.StartCommandID)); err != nil {
@@ -285,7 +311,7 @@ func (r providerLoginRowIdentity) aad() (envelope.Context, error) {
 	}
 	defer clear(plain)
 	digest := sha256.Sum256(plain)
-	return envelope.NewContext(map[string]string{"profile": "identity-sso-oidc-login-row-binding-v1", "binding": hex.EncodeToString(digest[:])})
+	return envelope.NewContext(map[string]string{"profile": "identity-sso-" + protocol + "-login-row-binding-v1", "binding": hex.EncodeToString(digest[:])})
 }
 
 func providerLoginPayloadText(value string, maximum int) bool {
@@ -324,7 +350,8 @@ func providerLoginPayloadAAD(i providerLoginPayloadInput, purpose string, genera
 	}
 	defer clear(plain)
 	digest := sha256.Sum256(plain)
-	values := map[string]string{"profile": "identity-sso-oidc-login-" + purpose + "-v1", "binding": hex.EncodeToString(digest[:])}
+	protocol, _ := providerLoginCryptoProtocol(i.Protocol)
+	values := map[string]string{"profile": "identity-sso-" + protocol + "-login-" + purpose + "-v1", "binding": hex.EncodeToString(digest[:])}
 	if purpose == "output" {
 		values["generation"] = strconv.FormatUint(generation, 10)
 	}
@@ -350,17 +377,23 @@ func providerLoginVerifierAAD(metadata providerLoginBindingMetadata) (envelope.C
 	}
 	defer clear(plain)
 	digest := sha256.Sum256(plain)
-	return envelope.NewContext(map[string]string{"profile": "identity-sso-oidc-pkce-metadata-v1", "response_mode": "query", "binding": hex.EncodeToString(digest[:])})
+	protocol, _ := providerLoginCryptoProtocol(metadata.Input.Protocol)
+	return envelope.NewContext(map[string]string{"profile": "identity-sso-" + protocol + "-pkce-metadata-v1", "response_mode": "query", "binding": hex.EncodeToString(digest[:])})
 }
 
 // Before any row exists in memory the callback knows only its trusted tenant
 // and opaque state. Retained versions permit bounded primary-key lookups; no
 // callback-supplied issuer or provider participates in authority selection.
 func providerLoginStateDigest(key [32]byte, version uint32, tenant identity.TenantID, state []byte) ([32]byte, error) {
-	if key == ([32]byte{}) || version == 0 || !providerLoginPayloadTenant(tenant) || len(state) != 32 {
+	return providerLoginProtocolStateDigest(key, version, tenant, "", state)
+}
+
+func providerLoginProtocolStateDigest(key [32]byte, version uint32, tenant identity.TenantID, discriminator string, state []byte) ([32]byte, error) {
+	protocol, purpose := providerLoginCryptoProtocol(discriminator)
+	if protocol == "" || key == ([32]byte{}) || version == 0 || !providerLoginPayloadTenant(tenant) || len(state) != 32 {
 		return [32]byte{}, identity.ForbiddenError{}
 	}
-	return providerLoginPayloadMAC(key, version, "identity.sso.oidc.state-lookup.v1", []byte("identity.sso.oidc-callback"), []byte(tenant), state), nil
+	return providerLoginPayloadMAC(key, version, "identity.sso."+protocol+".state-lookup.v1", []byte(purpose), []byte(tenant), state), nil
 }
 
 func providerLoginPayloadMAC(key [32]byte, version uint32, domain string, fields ...[]byte) [32]byte {
@@ -392,10 +425,18 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 	defer clear(state[:])
 	defer clear(nonce[:])
 	defer clear(rawVerifier[:])
-	for _, raw := range [][]byte{state[:], nonce[:], rawVerifier[:]} {
+	for _, raw := range [][]byte{state[:], rawVerifier[:]} {
 		if _, err := rand.Read(raw); err != nil {
 			return nil, identity.UnavailableError{}
 		}
+	}
+	protocol, callbackPurpose := providerLoginCryptoProtocol(input.Protocol)
+	var nonceText string
+	if protocol == "oidc" {
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return nil, identity.UnavailableError{}
+		}
+		nonceText = base64.RawURLEncoding.EncodeToString(nonce[:])
 	}
 	callback, err := identity.NewCommandID()
 	if err != nil {
@@ -404,11 +445,11 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 	verifier := base64.RawURLEncoding.AppendEncode(nil, rawVerifier[:])
 	defer clear(verifier)
 	challenge := sha256.Sum256(verifier)
-	digest, err := providerLoginStateDigest(c.StateKeys[c.CurrentStateKey], c.CurrentStateKey, input.Command.TenantID, state[:])
+	digest, err := providerLoginProtocolStateDigest(c.StateKeys[c.CurrentStateKey], c.CurrentStateKey, input.Command.TenantID, input.Protocol, state[:])
 	if err != nil {
 		return nil, err
 	}
-	metadata := providerLoginBindingMetadata{Schema: 1, Input: input, CallbackCommand: callback, Public: providerLoginPublicState{State: base64.RawURLEncoding.EncodeToString(state[:]), Nonce: base64.RawURLEncoding.EncodeToString(nonce[:]), Challenge: base64.RawURLEncoding.EncodeToString(challenge[:])}, StateKey: c.CurrentStateKey, PKCEKey: c.CurrentPKCEKey, StateDigest: digest}
+	metadata := providerLoginBindingMetadata{Schema: 1, Input: input, CallbackCommand: callback, Public: providerLoginPublicState{State: base64.RawURLEncoding.EncodeToString(state[:]), Nonce: nonceText, Challenge: base64.RawURLEncoding.EncodeToString(challenge[:])}, StateKey: c.CurrentStateKey, PKCEKey: c.CurrentPKCEKey, StateDigest: digest}
 	vaad, err := providerLoginVerifierAAD(metadata)
 	if err != nil {
 		return nil, err
@@ -417,7 +458,7 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 	if err != nil {
 		return nil, err
 	}
-	commitment := providerLoginPayloadMAC(c.PKCEKeys[c.CurrentPKCEKey], c.CurrentPKCEKey, "identity.sso.oidc.pkce-verifier.v1", vaad.AdditionalData(), []byte(input.IssuedAt.Format(time.RFC3339Nano)), []byte(input.ExpiresAt.Format(time.RFC3339Nano)), verifier)
+	commitment := providerLoginPayloadMAC(c.PKCEKeys[c.CurrentPKCEKey], c.CurrentPKCEKey, "identity.sso."+protocol+".pkce-verifier.v1", vaad.AdditionalData(), []byte(input.IssuedAt.Format(time.RFC3339Nano)), []byte(input.ExpiresAt.Format(time.RFC3339Nano)), verifier)
 	metadata.PKCECommitment = commitment
 	plainMetadata, err := providerLoginPayloadEncode(metadata)
 	if err != nil {
@@ -430,7 +471,7 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 	if input.Link != nil {
 		subject = string(b.UserID)
 	}
-	issued, err := c.Issuer.Prepare(ctx, b, []capability.Payload{{Version: 1, Issuer: c.CapabilityIssuer, Audiences: []string{c.Audience}, Subject: subject, Tenant: string(b.TenantID), Resource: b.RecordID, CorrelationID: b.CorrelationID, Operation: "identity.sso.oidc-callback", IssuedAt: input.IssuedAt, NotBefore: input.IssuedAt, ExpiresAt: input.ExpiresAt, MaxUses: 1, Caveats: map[string]string{"identity.sso.rp.binding": base64.RawURLEncoding.EncodeToString(metadataDigest[:])}}})
+	issued, err := c.Issuer.Prepare(ctx, b, []capability.Payload{{Version: 1, Issuer: c.CapabilityIssuer, Audiences: []string{c.Audience}, Subject: subject, Tenant: string(b.TenantID), Resource: b.RecordID, CorrelationID: b.CorrelationID, Operation: callbackPurpose, IssuedAt: input.IssuedAt, NotBefore: input.IssuedAt, ExpiresAt: input.ExpiresAt, MaxUses: 1, Caveats: map[string]string{"identity.sso.rp.binding": base64.RawURLEncoding.EncodeToString(metadataDigest[:])}}})
 	if err != nil {
 		return nil, err
 	}

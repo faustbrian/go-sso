@@ -9,16 +9,33 @@ import (
 	"github.com/faustbrian/go-sso"
 )
 
-const loginStartRedirectSQL = `SELECT binding_envelope FROM sso_providers.login_transactions
+const loginStartExactRowSQL = ` FROM sso_providers.login_transactions
  WHERE start_command_id=$1 AND tenant_id=$2 AND organization_id=$3 AND provider_id=$4
  AND provider_version=$5::numeric AND credential_generation=$6::numeric AND mapping_version=$7::numeric
- AND issued_at=$8 AND expires_at=$9 AND protocol='oidc'
+ AND issued_at=$8 AND expires_at=$9`
+
+const loginStartRedirectPendingSQL = `
  AND completed_at IS NULL AND expires_at>statement_timestamp()`
 
-const loginStartRecoverySQL = `SELECT callback_command_id FROM sso_providers.login_transactions
- WHERE start_command_id=$1 AND tenant_id=$2 AND organization_id=$3 AND provider_id=$4
+const loginStartRedirectSQL = `SELECT binding_envelope` + loginStartExactRowSQL + ` AND protocol='oidc'` + loginStartRedirectPendingSQL
+const loginStartRecoverySQL = `SELECT callback_command_id` + loginStartExactRowSQL + ` AND protocol='oidc'`
+
+// Resolve the unique original command before the remaining scope checks. At
+// high active concurrency the partial provider/expiry index must not turn
+// redirect recovery into a scan of that provider's pending transactions.
+const loginOAuth2StartByCommandSQL = `,tenant_id,organization_id,provider_id,provider_version,credential_generation,mapping_version,issued_at,expires_at,protocol
+ FROM sso_providers.login_transactions WHERE start_command_id=$1
+) `
+
+const loginOAuth2StartScopeSQL = ` FROM exact_oauth_login
+ WHERE tenant_id=$2 AND organization_id=$3 AND provider_id=$4
  AND provider_version=$5::numeric AND credential_generation=$6::numeric AND mapping_version=$7::numeric
- AND issued_at=$8 AND expires_at=$9 AND protocol='oidc'`
+ AND issued_at=$8 AND expires_at=$9 AND protocol='oauth2'`
+
+const loginOAuth2StartRedirectSQL = `WITH exact_oauth_login AS MATERIALIZED (
+ SELECT binding_envelope,completed_at` + loginOAuth2StartByCommandSQL + `SELECT binding_envelope` + loginOAuth2StartScopeSQL + loginStartRedirectPendingSQL
+const loginOAuth2StartRecoverySQL = `WITH exact_oauth_login AS MATERIALIZED (
+ SELECT callback_command_id` + loginOAuth2StartByCommandSQL + `SELECT callback_command_id` + loginOAuth2StartScopeSQL
 
 func (i providerLoginStartInput) transactionArgs() []any {
 	return []any{string(i.Command.CommandID), string(i.Command.TenantID), string(i.Proof.OrganizationID), string(i.ProviderID),
@@ -27,8 +44,12 @@ func (i providerLoginStartInput) transactionArgs() []any {
 
 func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.SigninStartResult) (sso.SigninStartResult, error) {
 	s, input := p.service, p.input
+	query := loginStartRedirectSQL
+	if input.Protocol == providerProtocolOAuth2 {
+		query = loginOAuth2StartRedirectSQL
+	}
 	var wire []byte
-	if err := s.router.pool.Raw().QueryRow(ctx, loginStartRedirectSQL, input.transactionArgs()...).Scan(&wire); err != nil {
+	if err := s.router.pool.Raw().QueryRow(ctx, query, input.transactionArgs()...).Scan(&wire); err != nil {
 		return out, providerError(ctx, err)
 	}
 	defer clear(wire)
@@ -52,7 +73,7 @@ func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.Sign
 	if !directory.Enabled || directory.GlobalVersion != input.GlobalVersion || directory.TenantVersion != input.TenantVersion {
 		return out, sso.ErrForbidden
 	}
-	route, profile, err := s.selectRoute(ctx, p.request)
+	route, profile, err := p.selectRoute(ctx)
 	if err != nil {
 		return out, providerError(ctx, err)
 	}
@@ -81,7 +102,8 @@ func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.Sign
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
-	out.RedirectURI, out.TransactionID, out.ProviderID, out.Protocol = redirect, string(input.Command.CommandID), string(input.ProviderID), "oidc"
+	protocol, _ := providerLoginCryptoProtocol(input.Protocol)
+	out.RedirectURI, out.TransactionID, out.ProviderID, out.Protocol = redirect, string(input.Command.CommandID), string(input.ProviderID), protocol
 	return out, nil
 }
 
@@ -90,7 +112,11 @@ func (p *providerLoginPhase) RecoverParticipant(ctx context.Context, work kernel
 	if err != nil || p.input == nil || binding != identity.CommandBinding(p.input.Command) {
 		return kernel.RecoveryUnknown, identity.ForbiddenError{}
 	}
-	rows, err := work.Query(ctx, loginStartRecoverySQL, p.input.transactionArgs()...)
+	query := loginStartRecoverySQL
+	if p.input.Protocol == providerProtocolOAuth2 {
+		query = loginOAuth2StartRecoverySQL
+	}
+	rows, err := work.Query(ctx, query, p.input.transactionArgs()...)
 	if err != nil {
 		return kernel.RecoveryUnknown, err
 	}

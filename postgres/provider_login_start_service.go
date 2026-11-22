@@ -66,7 +66,7 @@ type ProviderLoginConfig struct {
 	StateLifetime                       time.Duration
 }
 
-// ProviderLoginService owns native anonymous enterprise OIDC initiation. It
+// ProviderLoginService owns native anonymous enterprise sign-in initiation. It
 // borrows the router's primary; it does not issue sessions or own HTTP routes.
 type ProviderLoginService struct {
 	router           *ProviderRouter
@@ -77,6 +77,8 @@ type ProviderLoginService struct {
 	providerDomains  map[sso.ProviderID]string
 	callbacks        map[string]struct{}
 	profileDigest    [32]byte
+	oauthProfiles    map[providerLoginProfileKey]StaticOAuth2LoginProfile
+	oauthDigest      [32]byte
 	payload          providerLoginPayloadConfig
 	callbackVerifier capability.Service
 	callbackLimits   capability.Limits
@@ -92,6 +94,22 @@ type providerLoginProfileKey struct {
 // NewProviderLoginService composes the explicitly selected static OIDC native
 // start profile on the router's primary, without I/O or background work.
 func NewProviderLoginService(router *ProviderRouter, config ProviderLoginConfig) (*ProviderLoginService, error) {
+	return newProviderLoginService(router, config, nil)
+}
+
+// NewProviderLoginServiceWithOAuth2 opts into explicitly selected static OAuth
+// 2.0 profiles on a protocol-aware router. OIDC profiles in config are optional.
+// Install LoginTransactionProtocolMigrationSource before enabling OAuth start.
+// The OAuth browser must carry a pre-authentication flow for the exact
+// identity.sso.oauth-callback action; an OIDC flow cannot substitute for it.
+func NewProviderLoginServiceWithOAuth2(router *ProviderRouter, config ProviderLoginConfig, oauthProfiles []StaticOAuth2LoginProfile) (*ProviderLoginService, error) {
+	if router == nil || !router.protocolRegistry || len(oauthProfiles) == 0 || len(oauthProfiles) > 128 {
+		return nil, sso.ErrInvalidInput
+	}
+	return newProviderLoginService(router, config, oauthProfiles)
+}
+
+func newProviderLoginService(router *ProviderRouter, config ProviderLoginConfig, oauthProfiles []StaticOAuth2LoginProfile) (*ProviderLoginService, error) {
 	if router == nil || router.pool == nil || router.pool.Raw() == nil || config.Envelope == nil ||
 		!providerID(string(config.TenantID)) || !providerID(string(config.ActorID)) || !providerID(config.PolicyID) ||
 		!providerID(config.GlobalAuthorityID) || !providerID(config.ConfigurationID) || !providerID(config.KeyReference) ||
@@ -101,7 +119,7 @@ func NewProviderLoginService(router *ProviderRouter, config ProviderLoginConfig)
 	if config.Coordinator.MaximumDuration < time.Millisecond || config.Coordinator.MaximumDuration > 30*time.Second ||
 		config.StateLifetime < time.Minute || config.StateLifetime > 10*time.Minute || config.StateLifetime%time.Second != 0 ||
 		config.Session.MaximumDuration <= 0 || config.Session.MaximumDuration > config.Coordinator.MaximumDuration ||
-		len(config.FlowKeys) == 0 || len(config.FlowKeys) > 32 || len(config.Profiles) == 0 || len(config.Profiles) > 128 ||
+		len(config.FlowKeys) == 0 || len(config.FlowKeys) > 32 || len(config.Profiles)+len(oauthProfiles) == 0 || len(config.Profiles) > 128 ||
 		len(config.CallbackAllowlist) == 0 || len(config.CallbackAllowlist) > 64 {
 		return nil, sso.ErrInvalidInput
 	}
@@ -210,7 +228,52 @@ func NewProviderLoginService(router *ProviderRouter, config ProviderLoginConfig)
 	if _, _, err := s.coordinator(&providerLoginPhase{service: s}); err != nil {
 		return nil, sso.ErrInvalidInput
 	}
+	if len(oauthProfiles) != 0 {
+		if err := s.snapshotOAuth2StartProfiles(oauthProfiles); err != nil {
+			return nil, err
+		}
+		if _, _, err := s.coordinator(&providerLoginPhase{service: s, protocol: providerProtocolOAuth2}); err != nil {
+			return nil, sso.ErrInvalidInput
+		}
+	}
 	return s, nil
+}
+
+func (s *ProviderLoginService) snapshotOAuth2StartProfiles(configured []StaticOAuth2LoginProfile) error {
+	profiles := make(map[providerLoginProfileKey]StaticOAuth2LoginProfile, len(configured))
+	normalized := make([]StaticOAuth2LoginProfile, 0, len(configured))
+	for _, configured := range configured {
+		profile, err := normalizeStaticOAuth2LoginProfile(configured)
+		if err != nil {
+			return err
+		}
+		key := providerLoginProfileKey{profile.OrganizationID, profile.ProviderID}
+		if _, duplicate := profiles[key]; duplicate {
+			return sso.ErrInvalidInput
+		}
+		if _, mixed := s.profiles[key]; mixed {
+			return sso.ErrInvalidInput
+		}
+		profiles[key] = profile
+		normalized = append(normalized, profile)
+	}
+	slices.SortFunc(normalized, func(a, b StaticOAuth2LoginProfile) int {
+		if c := cmp.Compare(a.OrganizationID, b.OrganizationID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.ProviderID, b.ProviderID)
+	})
+	frame, err := json.Marshal(struct {
+		Profile string
+		Shared  [32]byte
+		OAuth2  []StaticOAuth2LoginProfile
+	}{"native-sso-oauth2-start-v1", s.profileDigest, normalized})
+	if err != nil {
+		return sso.ErrInvalidInput
+	}
+	defer clear(frame)
+	s.oauthProfiles, s.oauthDigest = profiles, sha256.Sum256(frame)
+	return nil
 }
 
 // SigninStart authorizes the original browser and returns a redirect only
@@ -220,6 +283,20 @@ func (s *ProviderLoginService) SigninStart(ctx context.Context, request sso.Sign
 }
 
 func (s *ProviderLoginService) startProviderTransaction(ctx context.Context, request sso.SigninStartRequest, browser ProviderLoginBrowser, member *providerLoginMemberAdmission) (out sso.SigninStartResult, err error) {
+	return s.startProviderTransactionForProtocol(ctx, request, browser, member, "")
+}
+
+// SigninStartOAuth2 commits the exact anonymous OAuth provider selection and
+// encrypted state/PKCE custody before returning a query-code/S256 redirect.
+// It requires both provider and domain; it never falls back to OIDC.
+func (s *ProviderLoginService) SigninStartOAuth2(ctx context.Context, request sso.SigninStartRequest, browser ProviderLoginBrowser) (sso.SigninStartResult, error) {
+	if s == nil || len(s.oauthProfiles) == 0 || request.ProviderID == "" || request.Domain == "" {
+		return sso.SigninStartResult{}, sso.ErrForbidden
+	}
+	return s.startProviderTransactionForProtocol(ctx, request, browser, nil, providerProtocolOAuth2)
+}
+
+func (s *ProviderLoginService) startProviderTransactionForProtocol(ctx context.Context, request sso.SigninStartRequest, browser ProviderLoginBrowser, member *providerLoginMemberAdmission, protocol string) (out sso.SigninStartResult, err error) {
 	if s == nil || s.router == nil || ctx == nil || request.Validate() != nil {
 		return out, sso.ErrInvalidInput
 	}
@@ -240,7 +317,7 @@ func (s *ProviderLoginService) startProviderTransaction(ctx context.Context, req
 			out, err = sso.SigninStartResult{}, sso.ErrUnavailable
 		}
 	}()
-	p := &providerLoginPhase{service: s, request: request, browser: browser, member: member}
+	p := &providerLoginPhase{service: s, request: request, browser: browser, member: member, protocol: protocol}
 	if err := p.readOriginalBrowser(ctx); err != nil {
 		return out, providerError(ctx, err)
 	}
@@ -330,6 +407,35 @@ func (s *ProviderLoginService) selectRoute(ctx context.Context, r sso.SigninStar
 	}
 	profile, err := s.router.readProviderLoginProfile(ctx, route, configured)
 	return route, profile, err
+}
+
+func (p *providerLoginPhase) selectRoute(ctx context.Context) (sso.DomainRoute, providerLoginProfile, error) {
+	s, r := p.service, p.request
+	if p.protocol == "" {
+		return s.selectRoute(ctx, r)
+	}
+	lookup, err := sso.NewDomainRouteRequest(s.config.TenantID, r.Domain, sso.ProviderID(r.ProviderID))
+	if err != nil {
+		return sso.DomainRoute{}, providerLoginProfile{}, sso.ErrForbidden
+	}
+	route, err := s.router.RouteOAuth2(ctx, lookup)
+	if err != nil {
+		return sso.DomainRoute{}, providerLoginProfile{}, err
+	}
+	b, err := route.Bindings()
+	if err != nil {
+		return sso.DomainRoute{}, providerLoginProfile{}, sso.ErrForbidden
+	}
+	configured, ok := s.oauthProfiles[providerLoginProfileKey{b.Proof.Key.OrganizationID, b.ProviderID}]
+	if !ok {
+		return sso.DomainRoute{}, providerLoginProfile{}, sso.ErrForbidden
+	}
+	profile, err := s.router.readProviderOAuth2LoginProfile(ctx, route, configured)
+	if err != nil {
+		return sso.DomainRoute{}, providerLoginProfile{}, err
+	}
+	return route, providerLoginProfile{configured: StaticOIDCLoginProfile(profile.configured), protocol: providerProtocolOAuth2,
+		issuer: profile.issuer, authorizationEndpoint: profile.authorizationEndpoint}, nil
 }
 
 func (s *ProviderLoginService) coordinator(p *providerLoginPhase) (*kernel.Coordinator, *kernel.ContributorRegistry, error) {

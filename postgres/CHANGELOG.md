@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add opt-in native enterprise OAuth sign-in start for an exact installed
+  provider and browser flow. Commit separate encrypted PKCE custody and one
+  OAuth state grant before returning the original code/S256 redirect.
+
 - Resolve one exact activated OAuth 2.0 route from the explicit protocol
   registry. Authenticate its protocol-bound domain proof and installed
   encrypted credential without falling back to OIDC.

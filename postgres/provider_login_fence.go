@@ -52,7 +52,7 @@ func (r *ProviderRouter) requireProviderLoginAuthority(ctx context.Context, work
 	if err := r.organizations.RequireCredentialAuthority(ctx, work, owner, authority.organization); err != nil {
 		return err
 	}
-	return requireProviderLoginAdmission(ctx, work, selected, mappingVersion, providerLoginDeadline(selected, authority.organization))
+	return requireProviderLoginAdmission(ctx, work, selected, authority.route.Protocol(), mappingVersion, providerLoginDeadline(selected, authority.organization))
 }
 
 func providerLoginDeadline(route sso.DomainRouteBinding, owner organization.CredentialAuthorityObservation) time.Time {
@@ -66,19 +66,24 @@ func providerLoginDeadline(route sso.DomainRouteBinding, owner organization.Cred
 // The shared row lock allows concurrent starts while excluding a provider
 // transition. Evaluate the original route deadline outside the materialized
 // lock query: time spent waiting for a writer must never renew that deadline.
-const providerLoginAdmissionFenceSQL = `WITH eligible_provider AS MATERIALIZED (
+const providerLoginAdmissionFencePrefixSQL = `WITH eligible_provider AS MATERIALIZED (
  SELECT 1 FROM sso_providers.providers p
  JOIN sso_providers.credentials c USING(tenant_id,organization_id,provider_id)
  WHERE p.tenant_id=$1 AND p.organization_id=$2 AND p.provider_id=$3 AND p.enabled
  AND p.metadata_version=$4::numeric AND p.enablement_credential_generation=$5::numeric
- AND c.generation=$5::numeric AND COALESCE(p.metadata_mapping_version,p.mapping_version)=$6::numeric
+ AND c.generation=$5::numeric AND COALESCE(p.metadata_mapping_version,p.mapping_version)=$6::numeric`
+
+const providerLoginAdmissionFenceSuffixSQL = `
  FOR SHARE OF p
 )
 SELECT true FROM eligible_provider WHERE clock_timestamp() < $7::timestamptz`
 
+const providerLoginAdmissionFenceSQL = providerLoginAdmissionFencePrefixSQL + providerLoginAdmissionFenceSuffixSQL
+const providerLoginOAuth2AdmissionFenceSQL = providerLoginAdmissionFencePrefixSQL + ` AND p.protocol='oauth2'` + providerLoginAdmissionFenceSuffixSQL
+
 // The provider lock grants neither browser possession nor identity authority.
 // It must follow the organization proof fence in the same Work.
-func requireProviderLoginAdmission(ctx context.Context, work kernel.Work, selected sso.DomainRouteBinding, mappingVersion uint64, deadline time.Time) error {
+func requireProviderLoginAdmission(ctx context.Context, work kernel.Work, selected sso.DomainRouteBinding, protocol string, mappingVersion uint64, deadline time.Time) error {
 	if mappingVersion == 0 || deadline.IsZero() || deadline.After(selected.ValidUntil) {
 		return identity.ForbiddenError{}
 	}
@@ -90,7 +95,21 @@ func requireProviderLoginAdmission(ctx context.Context, work kernel.Work, select
 	if binding.TenantID != proof.TenantID || binding.OperationID != "identity.sso.signin-start" {
 		return identity.ForbiddenError{}
 	}
-	rows, err := work.Query(ctx, providerLoginAdmissionFenceSQL,
+	query := providerLoginAdmissionFenceSQL
+	switch protocol {
+	case "oidc":
+		if binding.SchemaID == kernel.SSOOAuth2SigninStartOperation().SchemaID {
+			return identity.ForbiddenError{}
+		}
+	case providerProtocolOAuth2:
+		if binding.SchemaID != kernel.SSOOAuth2SigninStartOperation().SchemaID {
+			return identity.ForbiddenError{}
+		}
+		query = providerLoginOAuth2AdmissionFenceSQL
+	default:
+		return identity.ForbiddenError{}
+	}
+	rows, err := work.Query(ctx, query,
 		string(proof.TenantID), string(proof.OrganizationID), string(selected.ProviderID),
 		strconv.FormatUint(selected.ProviderVersion, 10), strconv.FormatUint(selected.CredentialGeneration, 10),
 		strconv.FormatUint(mappingVersion, 10), deadline)

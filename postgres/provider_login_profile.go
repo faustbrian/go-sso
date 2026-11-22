@@ -36,6 +36,7 @@ type StaticOIDCLoginProfile struct {
 type providerLoginProfile struct {
 	configured                    StaticOIDCLoginProfile
 	issuer, authorizationEndpoint string
+	protocol                      string
 }
 
 func normalizeStaticOIDCLoginProfile(p StaticOIDCLoginProfile) (StaticOIDCLoginProfile, error) {
@@ -152,6 +153,10 @@ func (r *ProviderRouter) readProviderLoginProfile(ctx context.Context, route sso
 }
 
 func (p providerLoginProfile) authorizationRedirect(state providerLoginPublicState) (url.URL, error) {
+	if p.protocol == providerProtocolOAuth2 {
+		return (providerOAuth2LoginProfile{configured: StaticOAuth2LoginProfile(p.configured), issuer: p.issuer,
+			authorizationEndpoint: p.authorizationEndpoint}).authorizationRedirect(state)
+	}
 	configured, err := normalizeStaticOIDCLoginProfile(p.configured)
 	if err != nil {
 		return url.URL{}, err

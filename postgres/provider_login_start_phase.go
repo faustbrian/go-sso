@@ -31,11 +31,17 @@ var (
 	_ kernel.RequestKeyPreparationContributor       = (*providerLoginPhase)(nil)
 )
 
-func (*providerLoginPhase) Descriptor() kernel.ContributorDescriptor {
+func (p *providerLoginPhase) Descriptor() kernel.ContributorDescriptor {
+	if p.protocol == providerProtocolOAuth2 {
+		return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oauth2-login-start", Version: 1}
+	}
 	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oidc-login-start", Version: 1}
 }
 
 func (p *providerLoginPhase) operation() identity.FeatureOperation {
+	if p.protocol == providerProtocolOAuth2 {
+		return kernel.SSOOAuth2SigninStartOperation()
+	}
 	if p.member != nil {
 		return providerExplicitLinkStartOperation()
 	}
@@ -262,7 +268,8 @@ func (p *providerLoginPhase) riskScope() (risk.Context, risk.Subject) {
 	b := identity.CommandBinding(p.input.Command)
 	// At start no user is known. Give the identifier velocity dimension a stable
 	// provider-scoped bucket without pretending to identify a person.
-	identifier := sha256.Sum256([]byte("sso-oidc-start-provider\x00" + string(b.TenantID) + "\x00" +
+	protocol, _ := providerLoginCryptoProtocol(p.input.Protocol)
+	identifier := sha256.Sum256([]byte("sso-" + protocol + "-start-provider\x00" + string(b.TenantID) + "\x00" +
 		string(p.input.Proof.OrganizationID) + "\x00" + string(p.input.ProviderID)))
 	return risk.Context{Tenant: string(b.TenantID), Operation: risk.Action(b.OperationID), Attempt: string(b.CommandID)},
 		risk.Subject{Network: p.browser.Network.String(), Device: p.browser.Device, IdentifierDigest: hex.EncodeToString(identifier[:])}

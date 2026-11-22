@@ -20,13 +20,18 @@ type providerLoginTransactionState struct {
 	issuedAt, expiresAt         time.Time
 }
 
-const insertProviderLoginTransactionSQL = `INSERT INTO sso_providers.login_transactions
+const insertProviderLoginPrefixSQL = `INSERT INTO sso_providers.login_transactions
  (tenant_id,organization_id,provider_id,provider_version,credential_generation,mapping_version,
  start_command_id,callback_command_id,protocol,state_key_version,state_digest,pkce_key_version,
  pkce_commitment,binding_envelope,verifier_envelope,issued_at,expires_at)
- SELECT $1,$2,$3,$4::numeric,$5::numeric,$6::numeric,$7,$8,'oidc',$9,$10,$11,$12,$13,$14,$15,$16
+ SELECT $1,$2,$3,$4::numeric,$5::numeric,$6::numeric,$7,$8,`
+
+const insertProviderLoginSuffixSQL = `,$9,$10,$11,$12,$13,$14,$15,$16
  WHERE $15::timestamptz<=statement_timestamp()
  AND statement_timestamp()<LEAST($16::timestamptz,$17::timestamptz)`
+
+const insertProviderLoginTransactionSQL = insertProviderLoginPrefixSQL + `'oidc'` + insertProviderLoginSuffixSQL
+const insertProviderLoginOAuth2TransactionSQL = insertProviderLoginPrefixSQL + `'oauth2'` + insertProviderLoginSuffixSQL
 
 // Stage only during the original enrolled Apply. The calling feature also
 // owns pre-auth possession, risk, and capability issuance in this same Work;
@@ -59,7 +64,11 @@ func (r *ProviderRouter) persistProviderLoginStart(ctx context.Context, work ker
 	if err := r.requireProviderLoginAuthority(ctx, work, owner, authority, mapping); err != nil {
 		return err
 	}
-	n, err := work.Exec(ctx, insertProviderLoginTransactionSQL,
+	query := insertProviderLoginTransactionSQL
+	if authority.route.Protocol() == providerProtocolOAuth2 {
+		query = insertProviderLoginOAuth2TransactionSQL
+	}
+	n, err := work.Exec(ctx, query,
 		string(b.TenantID), string(selected.Proof.Key.OrganizationID), string(selected.ProviderID),
 		strconv.FormatUint(selected.ProviderVersion, 10), strconv.FormatUint(selected.CredentialGeneration, 10), strconv.FormatUint(mapping, 10),
 		string(b.CommandID), string(state.callbackCommand), int64(state.stateKey), state.stateDigest[:], int64(state.pkceKey), state.pkceCommitment[:],
