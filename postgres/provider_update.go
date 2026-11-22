@@ -30,6 +30,9 @@ func (s *ProviderService) ForOrganization(organizationID string) (*ProviderServi
 }
 
 func (p *ProviderContributor) operation() identity.FeatureOperation {
+	if p.disable != nil {
+		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.disable", SchemaID: "sso-static-oidc-disable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
+	}
 	if p.enable != nil {
 		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.enable", SchemaID: "sso-static-oidc-enable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 	}
@@ -39,6 +42,9 @@ func (p *ProviderContributor) operation() identity.FeatureOperation {
 	return providerOperation()
 }
 func (p *ProviderContributor) beforeVersion() uint64 {
+	if p.disable != nil {
+		return p.disable.predecessorVersion()
+	}
 	if p.enable != nil {
 		return p.enable.request.ExpectedVersion
 	}
@@ -55,6 +61,9 @@ func (p *ProviderContributor) lifecycle() kernel.LifecyclePlan {
 	}
 	if p.enable != nil {
 		event = "sso.provider_enabled.v1"
+	}
+	if p.disable != nil {
+		event = "enterprise_provider.disabled.v1"
 	}
 	return kernel.LifecyclePlan{EventType: event, BeforeVersion: p.beforeVersion(), AfterVersion: p.afterVersion()}
 }
@@ -209,6 +218,9 @@ func (p *ProviderContributor) openUpdateConfiguration(ctx context.Context, aad e
 }
 
 func (p *ProviderContributor) writeProvider(ctx context.Context, w kernel.Work, b identity.CommandBinding) error {
+	if p.disable != nil {
+		return p.writeDisable(ctx, w, b)
+	}
 	if p.enable != nil {
 		return p.writeEnable(ctx, w, b)
 	}

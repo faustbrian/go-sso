@@ -96,7 +96,7 @@ func expirePendingProviderOriginal(t *testing.T, f *orgFixture, original identit
 	}
 }
 
-func providerLossService(t *testing.T, f *orgFixture, config ssopg.ProviderServiceConfig, target string) (*ssopg.ProviderService, *providerCommitFault) {
+func providerLossPool(t *testing.T, f *orgFixture, target string) (*database.Pool, *providerCommitFault) {
 	t.Helper()
 	fault := &providerCommitFault{target: target}
 	pool, err := database.Connect(f.ctx, database.Config{DSN: f.dsn, MaxConns: 2, Configure: func(c *database.PoolConfig) error {
@@ -120,6 +120,12 @@ func providerLossService(t *testing.T, f *orgFixture, config ssopg.ProviderServi
 			t.Error("provider fault pool cleanup")
 		}
 	})
+	return pool, fault
+}
+
+func providerLossService(t *testing.T, f *orgFixture, config ssopg.ProviderServiceConfig, target string) (*ssopg.ProviderService, *providerCommitFault) {
+	t.Helper()
+	pool, fault := providerLossPool(t, f, target)
 	service, err := ssopg.NewProviderService(pool, config, f.auth("org-test-basic", "owner"), "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)

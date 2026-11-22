@@ -54,14 +54,15 @@ type ProviderServiceConfig struct {
 // each mutation gets a separate native contributor and immutable admission.
 // Authentication and network are trusted transport inputs, not request fields.
 type ProviderService struct {
-	pool                *database.Pool
-	config              ProviderServiceConfig
-	authentication      organization.Authentication
-	network             string
-	directory           *kernel.Repository
-	updateOrganization  string
-	updateAuthorization ProviderUpdateAuthorization
-	enableAuthorization ProviderEnableAuthorization
+	pool                 *database.Pool
+	config               ProviderServiceConfig
+	authentication       organization.Authentication
+	network              string
+	directory            *kernel.Repository
+	updateOrganization   string
+	updateAuthorization  ProviderUpdateAuthorization
+	enableAuthorization  ProviderEnableAuthorization
+	disableAuthorization ProviderDisableAuthorization
 }
 
 func (ProviderService) Format(s fmt.State, _ rune) {

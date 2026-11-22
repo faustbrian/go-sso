@@ -6,8 +6,8 @@ provider metadata registration.
 and original safe organization recovery scope. It has no proof/result table,
 transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata; a separate opt-in credential service stores
-only configured-envelope client-secret custody. A separate opt-in enables a
-static OIDC provider after verified readiness. Trusted routing, anonymous
+only configured-envelope client-secret custody. Separate opt-ins enable or
+disable a static OIDC provider. Trusted routing, anonymous
 discovery and static OIDC sign-in start are separate opt-ins. This profile
 does not process protocol callbacks, issue sessions, enforce federation or
 perform JIT provisioning.
@@ -88,6 +88,39 @@ domain authority. Change, required audit, and lifecycle outbox commit together.
 Keep the exact original key and request for recovery; a committed historical
 result is neither refreshed proof nor permission to start login. Get/List
 expose the persisted `Enabled` flag as administrative configuration only.
+
+### Native static OIDC provider disablement
+
+Install `LoginTransactionMigrationSource` and identity PostgreSQL request-key
+preparation before enabling this operation. Bind `ProviderService` to the
+organization and select `WithProviderDisableAuthorization(owner)` with the
+disable-specific policy callback. The native path requires a fresh password
+bearer session, current `org:sso-write` authority, and the exact privileged risk
+counter policy for `identity.sso.provider.disable`. It adds no HTTP or cookie
+handling.
+
+Use `sso.NewActiveTransactionDisposition` to select `ActiveTransactionDrain`
+or `ActiveTransactionRevoke` for the exact enabled provider version. Pass that
+selection and a nonblank reason to `ProviderDisable`. The operation advances the
+provider version, clears activation evidence, and stops new sign-in starts.
+The organization's domain proof and the installed client credential are not
+changed. The original count includes only nonterminal, unexpired transactions
+at that provider version and is capped at one million. The explicit mode and
+count commit with provider state, required audit and lifecycle outbox. Recording
+a mode is not execution of a callback or proof of cleanup.
+
+Keep the same request-key configuration and retry the exact request after an
+unknown outcome. No client idempotency key is accepted. A matching authorized
+retry returns the original receipt, not a new count; changing the reason or
+mode for the original request conflicts. Keep the reason out of logs. It binds
+the request intent but is not emitted in the audit or outbox.
+
+If the original returns confirmed `NotCommitted`, correct the failure and call
+`RetryProviderDisable` with the same request and the failed result's command ID.
+The adapter checks the original intent and rollback on the primary before
+admitting one fresh attempt. Repeating that failed ID recovers only its single
+successor attempt. Never use a pending, unknown, or committed result as a retry
+anchor; use the original method and request to reconcile an unknown outcome.
 
 ### Verified-domain provider routing
 

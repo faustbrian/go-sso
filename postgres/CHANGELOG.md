@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add opt-in native static OIDC provider disablement. The exact authorized
+  mutation stops new sign-in starts and records the selected drain or revoke
+  mode and original bounded count with required audit and lifecycle outbox.
+  The organization proof and stored credential remain intact. Retries recover
+  the original result; a separate confirmed-failure retry can start one fresh
+  attempt. Callback enforcement and cleanup are not included.
+
 - Add opt-in native static OIDC sign-in start. An original browser flow binds
   the selected provider and the persisted code/S256 redirect; state issuance,
   required audit and lifecycle effects commit together. The same request

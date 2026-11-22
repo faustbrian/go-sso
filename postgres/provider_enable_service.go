@@ -53,15 +53,19 @@ func (s *ProviderService) WithProviderEnableAuthorization(owner ProviderEnableAu
 	return &bound, nil
 }
 
-func (s *ProviderService) admitEnable(ctx context.Context) (a providerAdmission, err error) {
+func (s *ProviderService) admitEnable(ctx context.Context) (providerAdmission, error) {
+	if s.enableAuthorization == nil {
+		return providerAdmission{}, sso.ErrForbidden
+	}
+	return s.admitFreshProviderWrite(ctx, s.enableAuthorization.ObserveProviderEnableAuthorization)
+}
+
+func (s *ProviderService) admitFreshProviderWrite(ctx context.Context, observe func(context.Context, authorization.DecisionContext, uint64) (ProviderUpdateAuthorizationEvidence, error)) (a providerAdmission, err error) {
 	defer func() {
 		if recover() != nil {
 			a, err = providerAdmission{}, sso.ErrUnavailable
 		}
 	}()
-	if s.enableAuthorization == nil {
-		return a, sso.ErrForbidden
-	}
 	a, err = s.admit(ctx, s.updateOrganization, "org:sso-write")
 	if err != nil {
 		return a, err
@@ -80,7 +84,7 @@ func (s *ProviderService) admitEnable(ctx context.Context) (a providerAdmission,
 	}
 	dc := s.decision(bound.UserID, s.updateOrganization, "org:sso-write")
 	dc.Request.Environment.Time = a.verified
-	evidence, err := s.enableAuthorization.ObserveProviderEnableAuthorization(ctx, dc.Clone(), authority.Authorization.Version)
+	evidence, err := observe(ctx, dc.Clone(), authority.Authorization.Version)
 	if err != nil {
 		return providerAdmission{}, providerError(ctx, err)
 	}

@@ -51,6 +51,7 @@ type ProviderContributor struct {
 	service       *ProviderService
 	update        *sso.ProviderUpdateRequest
 	enable        *providerEnable
+	disable       *providerDisable
 	request       sso.ProviderRegisterOidcRequest
 	admission     providerAdmission
 	intent        identity.RequestIntent
@@ -103,7 +104,11 @@ func (s *ProviderService) composeProvider(p *ProviderContributor) error {
 	if err != nil {
 		return sso.ErrInvalidInput
 	}
-	p.coordinator, err = kernel.NewCoordinatorWithRequestKeys(s.pool, p.registry, s.config.Coordinator, s.config.RequestKeys)
+	if p.disable != nil {
+		p.coordinator, err = kernel.NewCoordinatorWithCanonicalPostRequestKeys(s.pool, p.registry, s.config.Coordinator, s.disableRequestKeys())
+	} else {
+		p.coordinator, err = kernel.NewCoordinatorWithRequestKeys(s.pool, p.registry, s.config.Coordinator, s.config.RequestKeys)
+	}
 	return providerError(nil, err)
 }
 
@@ -232,7 +237,14 @@ func (s *ProviderService) kernelDecision(actor identity.UserID, kind, id string)
 }
 
 func (p *ProviderContributor) requestContext(b kernel.RequestKeyPreparationBinding) (envelope.Context, error) {
-	if p == nil || p.service == nil || b.Namespace != p.service.config.RequestKeys.Namespace || b.Scope.RouteID != p.operation().OperationID || b.Scope.Method != "POST" || b.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) || b.PolicyVersion != p.service.config.PolicyVersion || b.Admission.CommandID == "" || b.IntentDigest == ([32]byte{}) {
+	if p == nil || p.service == nil {
+		return envelope.Context{}, sso.ErrInvalidInput
+	}
+	namespace := p.service.config.RequestKeys.Namespace
+	if p.disable != nil {
+		namespace = p.service.disableRequestKeys().Namespace
+	}
+	if b.Namespace != namespace || b.Scope.RouteID != p.operation().OperationID || b.Scope.Method != "POST" || b.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) || b.PolicyVersion != p.service.config.PolicyVersion || b.Admission.CommandID == "" || b.IntentDigest == ([32]byte{}) {
 		return envelope.Context{}, sso.ErrInvalidInput
 	}
 	// The native type deliberately rejects implicit serialization. This explicit
@@ -256,6 +268,9 @@ func (p *ProviderContributor) requestContext(b kernel.RequestKeyPreparationBindi
 	}
 	if p.enable != nil {
 		owner, profile = "sso/provider-enable", "static-oidc-enable-v1"
+	}
+	if p.disable != nil {
+		owner, profile = "sso/provider-disable", "static-oidc-disable-v1"
 	}
 	return envelope.NewContext(map[string]string{"owner": owner, "profile": profile, "binding": hex.EncodeToString(digest[:])})
 }
@@ -300,7 +315,13 @@ func (p *ProviderContributor) PrepareRequestKey(ctx context.Context, b kernel.Re
 	if err != nil {
 		return nil, err
 	}
-	plain, err := json.Marshal(providerStoredBinding(p.binding))
+	var plain []byte
+	if p.disable != nil {
+		plain, err = json.Marshal(p.disable.storedBinding(providerStoredBinding(p.binding)))
+	} else {
+		plain, err = json.Marshal(providerStoredBinding(p.binding))
+	}
+	defer clear(plain)
 	if err != nil {
 		return nil, sso.ErrInvalidInput
 	}
@@ -321,7 +342,12 @@ func (p *ProviderContributor) prepare(ctx context.Context, b kernel.RequestKeyPr
 		return sso.ErrForbidden
 	}
 	var provider identity.SubjectID
-	if p.enable != nil {
+	if p.disable != nil {
+		provider = identity.SubjectID(p.disable.selection.ProviderID)
+		if err := p.prepareDisable(ctx); err != nil {
+			return err
+		}
+	} else if p.enable != nil {
 		provider = identity.SubjectID(p.enable.request.ProviderID)
 		if err := p.prepareEnable(ctx); err != nil {
 			return err
@@ -340,7 +366,7 @@ func (p *ProviderContributor) prepare(ctx context.Context, b kernel.RequestKeyPr
 	}
 	a = p.admission
 	correlation := p.request.CommandID
-	if p.enable != nil {
+	if p.enable != nil || p.disable != nil {
 		correlation = b.Admission.CommandID
 	}
 	op := p.operation()
@@ -360,6 +386,15 @@ func (p *ProviderContributor) prepare(ctx context.Context, b kernel.RequestKeyPr
 			return sso.ErrUnavailable
 		}
 		configurationHash = sha256.Sum256(readiness)
+	}
+	if p.disable != nil {
+		// Bind the exact authenticated predecessor and canonical request intent
+		// to the generated metadata successor before admitting Work.
+		var frame [96]byte
+		copy(frame[:32], b.IntentDigest[:])
+		copy(frame[32:64], configurationHash[:])
+		copy(frame[64:], p.disable.predecessorHash[:])
+		configurationHash = sha256.Sum256(frame[:])
 	}
 	frame, err := json.Marshal(struct {
 		Binding                  providerStoredBinding
@@ -397,12 +432,10 @@ func (p *ProviderContributor) RestoreRequestKey(ctx context.Context, b kernel.Re
 	if err != nil {
 		return identity.CommandBinding{}, err
 	}
-	var saved providerStoredBinding
-	if json.Unmarshal(plain, &saved) != nil {
-		return identity.CommandBinding{}, sso.ErrUnavailable
+	original, err := p.decodeStoredProviderBinding(plain)
+	if err != nil {
+		return identity.CommandBinding{}, err
 	}
-	canonical, _ := json.Marshal(saved)
-	original := identity.CommandBinding(saved)
 	correlation := p.request.CommandID
 	if p.enable != nil {
 		correlation = b.Admission.CommandID
@@ -410,10 +443,45 @@ func (p *ProviderContributor) RestoreRequestKey(ctx context.Context, b kernel.Re
 			return identity.CommandBinding{}, sso.ErrUnavailable
 		}
 	}
-	if !bytes.Equal(canonical, plain) || original.ValidateFor(p.operation()) != nil || original.CommandID != b.Admission.CommandID || original.TenantID != b.Scope.TenantID || original.UserID != identity.UserID(b.Scope.ActorID) || original.ActorID != b.Scope.ActorID || original.ActorKind != b.Scope.ActorKind || original.PolicyID != p.service.config.PolicyID || original.PolicyVersion != b.PolicyVersion || original.CorrelationID != string(correlation) {
+	if p.disable != nil {
+		correlation = b.Admission.CommandID
+		if original.RecordID != string(p.disable.selection.ProviderID) {
+			return identity.CommandBinding{}, sso.ErrUnavailable
+		}
+	}
+	if original.ValidateFor(p.operation()) != nil || original.CommandID != b.Admission.CommandID || original.TenantID != b.Scope.TenantID || original.UserID != identity.UserID(b.Scope.ActorID) || original.ActorID != b.Scope.ActorID || original.ActorKind != b.Scope.ActorKind || original.PolicyID != p.service.config.PolicyID || original.PolicyVersion != b.PolicyVersion || original.CorrelationID != string(correlation) {
 		return identity.CommandBinding{}, sso.ErrUnavailable
 	}
 	return original, nil
+}
+
+func (p *ProviderContributor) decodeStoredProviderBinding(plain []byte) (identity.CommandBinding, error) {
+	var binding providerStoredBinding
+	var canonical []byte
+	if p.disable != nil {
+		var saved storedDisableBinding
+		if json.Unmarshal(plain, &saved) != nil {
+			return identity.CommandBinding{}, sso.ErrUnavailable
+		}
+		canonical, _ = json.Marshal(saved)
+		defer clear(canonical)
+		if !bytes.Equal(canonical, plain) {
+			return identity.CommandBinding{}, sso.ErrUnavailable
+		}
+		if saved != p.disable.storedBinding(saved.Binding) {
+			return identity.CommandBinding{}, sso.ErrConflict
+		}
+		return identity.CommandBinding(saved.Binding), nil
+	}
+	if json.Unmarshal(plain, &binding) != nil {
+		return identity.CommandBinding{}, sso.ErrUnavailable
+	}
+	canonical, _ = json.Marshal(binding)
+	defer clear(canonical)
+	if !bytes.Equal(canonical, plain) {
+		return identity.CommandBinding{}, sso.ErrUnavailable
+	}
+	return identity.CommandBinding(binding), nil
 }
 
 func (p *ProviderContributor) ValidateFeatureCommand(c identity.Command, plan kernel.CommandPlan) error {
@@ -516,7 +584,7 @@ func (p *ProviderContributor) admit(ctx context.Context, w kernel.Work, c identi
 	if a.session.ValidateAt(at) != nil || at.Before(a.verified) || !at.Before(a.until) {
 		return identity.ForbiddenError{}
 	}
-	if p.enable != nil {
+	if p.enable != nil || p.disable != nil {
 		lifetime, err := a.session.Session.Lifetime(at)
 		if err != nil || !lifetime.Fresh {
 			return identity.ForbiddenError{}
@@ -566,7 +634,8 @@ func (p *ProviderContributor) GenerateFeaturePreparation(ctx context.Context, c 
 	if err != nil {
 		return nil, err
 	}
-	if (p.update != nil || p.enable != nil) && len(configuration) > providerConfigurationEnvelopeMaximumBytes {
+	versioned := p.update != nil || p.enable != nil || p.disable != nil
+	if versioned && len(configuration) > providerConfigurationEnvelopeMaximumBytes {
 		return nil, sso.ErrUnavailable
 	}
 	output := providerPreparationOutput{Generation: generation, Commitment: p.commitment, Configuration: configuration}
@@ -581,7 +650,7 @@ func (p *ProviderContributor) GenerateFeaturePreparation(ctx context.Context, c 
 	if err != nil {
 		return nil, sso.ErrUnavailable
 	}
-	if (p.update != nil || p.enable != nil) && len(plain) > p.preparationMaximumBytes() {
+	if versioned && len(plain) > p.preparationMaximumBytes() {
 		return nil, sso.ErrUnavailable
 	}
 	aad, err = p.outputContext(generation)
@@ -592,7 +661,7 @@ func (p *ProviderContributor) GenerateFeaturePreparation(ctx context.Context, c 
 	if err != nil {
 		return nil, err
 	}
-	if (p.update != nil || p.enable != nil) && len(wire) > p.preparationMaximumBytes()+providerEnvelopeOverheadMaximumBytes {
+	if versioned && len(wire) > p.preparationMaximumBytes()+providerEnvelopeOverheadMaximumBytes {
 		clear(wire)
 		return nil, sso.ErrUnavailable
 	}
@@ -605,7 +674,7 @@ func (p *ProviderContributor) preparationMaximumBytes() int {
 		// metadata frame and must fit within the native preparation limit.
 		return 112 << 10
 	}
-	if p.update != nil {
+	if p.update != nil || p.disable != nil {
 		return providerUpdatePreparationMaximumBytes
 	}
 	return providerLegacyPreparationMaximumBytes
@@ -634,6 +703,9 @@ func (p *ProviderContributor) RestoreFeaturePreparation(ctx context.Context, c i
 		p.enable.sealedProof = output.EnableProof
 	} else if len(output.EnableProof) != 0 {
 		return identity.Command{}, kernel.CommandPlan{}, sso.ErrUnavailable
+	}
+	if p.disable != nil {
+		clear(p.configuration)
 	}
 	p.configuration = output.Configuration
 	p.generation = generation
@@ -678,6 +750,11 @@ func (p *ProviderContributor) ApplyFeature(ctx context.Context, w kernel.Work, c
 			return identity.FeatureReceipt{}, sso.ErrUnavailable
 		}
 	}
+	if p.disable != nil {
+		if _, err = recordProviderLoginDisposition(ctx, w, p.request.OrganizationID, p.beforeVersion(), string(p.disable.selection.Mode)); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+	}
 	return identity.FeatureReceipt{Operation: p.operation(), BeforeVersion: p.beforeVersion(), AfterVersion: p.afterVersion()}, nil
 }
 
@@ -685,6 +762,9 @@ func (p *ProviderContributor) RecoverParticipant(ctx context.Context, w kernel.R
 	b, feature, life, err := w.FeatureScope(p)
 	if err != nil || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) || life != p.lifecycle() {
 		return kernel.RecoveryUnknown, sso.ErrUnavailable
+	}
+	if p.disable != nil {
+		return p.recoverDisable(ctx, w, b)
 	}
 	rows, err := w.Query(ctx, `SELECT binding,organization_id,provider_id FROM sso_providers.command_effects WHERE command_id=$1 AND tenant_id=$2`, string(b.CommandID), string(b.TenantID))
 	if err != nil {
