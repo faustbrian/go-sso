@@ -155,9 +155,12 @@ func (b providerLoginBindingMetadata) protocolTransaction(original providerLogin
 	if err != nil {
 		return sso.LoginTransaction{}, sso.ErrForbidden
 	}
+	// OIDC's legacy omitted discriminator must remain unchanged in storage,
+	// while the selected protocol adapter receives the explicit wire mode.
+	protocol, _ := providerLoginCryptoProtocol(input.Protocol)
 	transaction, err := sso.NewLoginTransaction(sso.LoginTransaction{
 		TenantID: input.Command.TenantID, ID: string(input.Command.CommandID), ProviderID: input.ProviderID,
-		OrganizationID: organization.ID(input.OrganizationID), Protocol: input.Protocol, Callback: *callback,
+		OrganizationID: organization.ID(input.OrganizationID), Protocol: protocol, Callback: *callback,
 		ExpiresAt: input.ExpiresAt, ProviderVersion: input.ProviderVersion, MappingVersion: input.MappingVersion,
 		RememberPolicy: remember, CommandID: b.CallbackCommand,
 	}, input.CredentialGeneration)

@@ -96,6 +96,13 @@ func (p *providerLoginPhase) committedRedirect(ctx context.Context, out sso.Sign
 	var redirect url.URL
 	if input.Protocol == providerProtocolOAuth2 && s.oauthStartAdapter != nil {
 		redirect, err = s.oauthStartAdapter.redirect(ctx, *input, binding, profile, s.router.config.Clock, deadline)
+	} else if adapter := s.oidcStartAdapter; input.Protocol == "" && adapter != nil {
+		key := providerLoginProfileKey{organization: input.Proof.OrganizationID, provider: input.ProviderID}
+		if wire, selected := adapter.profiles[key]; selected {
+			redirect, err = adapter.redirect(ctx, wire, *input, binding, profile, s.router.config.Clock, deadline)
+		} else {
+			redirect, err = profile.authorizationRedirect(binding.Public)
+		}
 	} else {
 		redirect, err = profile.authorizationRedirect(binding.Public)
 	}

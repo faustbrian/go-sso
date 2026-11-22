@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Allow configured static OIDC login profiles to use an optional protocol
+  adapter for committed start redirects without changing native state,
+  callback ownership, or existing unselected profiles.
+
 - Select one standalone adapter for original OAuth2 redirect rendering and
   reserved callback completion. Start discloses only the committed state and
   S256 challenge against the exact current provider, with no callback custody.

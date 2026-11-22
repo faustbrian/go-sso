@@ -80,6 +80,7 @@ type ProviderLoginService struct {
 	oauthProfiles     map[providerLoginProfileKey]StaticOAuth2LoginProfile
 	oauthDigest       [32]byte
 	oauthStartAdapter *providerOAuth2StartAdapter
+	oidcStartAdapter  *providerOIDCStartAdapter
 	payload           providerLoginPayloadConfig
 	callbackVerifier  capability.Service
 	callbackLimits    capability.Limits

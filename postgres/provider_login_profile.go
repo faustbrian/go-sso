@@ -38,6 +38,7 @@ type providerLoginProfile struct {
 	issuer, authorizationEndpoint string
 	protocol                      string
 	oauthConfiguration            providerOAuthConfiguration
+	mapping                       sso.AttributeMappingSpec
 }
 
 func normalizeStaticOIDCLoginProfile(p StaticOIDCLoginProfile) (StaticOIDCLoginProfile, error) {
@@ -150,7 +151,7 @@ func (r *ProviderRouter) readProviderLoginProfile(ctx context.Context, route sso
 	if !r.config.Clock.Now().Before(binding.ValidUntil) {
 		return providerLoginProfile{}, sso.ErrForbidden
 	}
-	return providerLoginProfile{configured: configured, issuer: stored.Metadata.Issuer, authorizationEndpoint: stored.Metadata.AuthorizationEndpoint}, nil
+	return providerLoginProfile{configured: configured, issuer: stored.Metadata.Issuer, authorizationEndpoint: stored.Metadata.AuthorizationEndpoint, mapping: stored.Mapping}, nil
 }
 
 func (p providerLoginProfile) authorizationRedirect(state providerLoginPublicState) (url.URL, error) {
