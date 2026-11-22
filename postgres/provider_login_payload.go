@@ -424,33 +424,7 @@ func (c providerLoginPayloadConfig) openCommittedBinding(ctx context.Context, ro
 		clear(stored.Proof)
 		return fail()
 	}
-	m := stored.Metadata
-	if m.Schema != 1 || m.Input.validate() != nil || !reflect.DeepEqual(m.Input.rowIdentity(), row) || m.StateKey == 0 || m.PKCEKey == 0 || c.StateKeys[m.StateKey] == ([32]byte{}) || c.PKCEKeys[m.PKCEKey] == ([32]byte{}) || m.PKCECommitment == ([32]byte{}) || m.CallbackCommand == row.StartCommandID {
-		clear(stored.Proof)
-		return fail()
-	}
-	if _, err := identity.ParseCommandID(string(m.CallbackCommand)); err != nil {
-		clear(stored.Proof)
-		return fail()
-	}
-	for _, value := range []string{m.Public.State, m.Public.Nonce, m.Public.Challenge} {
-		if len(value) != 43 {
-			clear(stored.Proof)
-			return fail()
-		}
-		raw, err := base64.RawURLEncoding.Strict().DecodeString(value)
-		valid := err == nil && len(raw) == 32
-		clear(raw)
-		if !valid {
-			clear(stored.Proof)
-			return fail()
-		}
-	}
-	rawState, _ := base64.RawURLEncoding.Strict().DecodeString(m.Public.State)
-	defer clear(rawState)
-	digest, err := providerLoginStateDigest(c.StateKeys[m.StateKey], m.StateKey, row.TenantID, rawState)
-	grant := kernel.CapabilityPlan(stored.Plan.Grant)
-	if err != nil || !hmac.Equal(digest[:], m.StateDigest[:]) || stored.Plan.Contributor != c.Issuer.Descriptor() || grant.Purpose != "identity.sso.oidc-callback" || grant.MaxUses != 1 || grant.ReplayKeyVersion == 0 || grant.ReplayDigest == ([32]byte{}) || grant.ProofFingerprint == ([32]byte{}) || !grant.ExpiresAt.Equal(row.ExpiresAt) || len(stored.Proof) == 0 || len(stored.Proof) > 32768 || sha256.Sum256(stored.Proof) != grant.ProofFingerprint {
+	if !c.validProviderLoginPendingBinding(row, stored) {
 		clear(stored.Proof)
 		return fail()
 	}

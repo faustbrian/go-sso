@@ -105,22 +105,26 @@ func (p *providerLoginPhase) readBrowser(ctx context.Context) error {
 }
 
 func (p *providerLoginPhase) requireBrowser(flow session.PreAuthTransaction, now time.Time) error {
-	spec, err := flow.Bindings()
-	if err != nil {
-		return identity.ForbiddenError{}
-	}
 	remember, err := p.request.LoginIntent.RememberPolicy()
 	if err != nil {
 		return identity.ForbiddenError{}
 	}
-	b, c := spec.Binding, p.service.config
-	i := b.Intent
-	if b.ID != p.browser.FlowID || i.TenantID != c.TenantID || i.Purpose != session.PreAuthSessionIssuance ||
-		i.Action != providerOIDCCallback || i.IdentifierBinding != ([32]byte{}) || i.Origin != p.browser.Origin ||
-		i.CallbackURL != p.request.SuccessCallback.String() || i.PolicyID != c.PolicyID || i.PolicyVersion != p.service.policyVersion || i.Remember != remember {
+	return p.service.requireProviderLoginBrowser(flow, now, p.browser, p.request.SuccessCallback.String(), remember)
+}
+
+func (s *ProviderLoginService) requireProviderLoginBrowser(flow session.PreAuthTransaction, now time.Time, browser ProviderLoginBrowser, successCallback string, remember session.RememberPolicy) error {
+	spec, err := flow.Bindings()
+	if err != nil {
 		return identity.ForbiddenError{}
 	}
-	token, err := session.ParseToken(p.browser.FlowCookie.Token())
+	b, c := spec.Binding, s.config
+	i := b.Intent
+	if b.ID != browser.FlowID || i.TenantID != c.TenantID || i.Purpose != session.PreAuthSessionIssuance ||
+		i.Action != providerOIDCCallback || i.IdentifierBinding != ([32]byte{}) || i.Origin != browser.Origin ||
+		i.CallbackURL != successCallback || i.PolicyID != c.PolicyID || i.PolicyVersion != s.policyVersion || i.Remember != remember {
+		return identity.ForbiddenError{}
+	}
+	token, err := session.ParseToken(browser.FlowCookie.Token())
 	if err != nil {
 		return identity.ForbiddenError{}
 	}
@@ -288,28 +292,11 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 }
 
 func (p *providerLoginPhase) restoreInput(ctx context.Context, k kernel.RequestKeyPreparationBinding, wire []byte) error {
-	aad, err := p.requestKeyContext(k)
+	input, err := p.openOriginalInput(ctx, k, wire)
 	if err != nil {
 		return err
 	}
-	if len(wire) == 0 || len(wire) > providerLoginRequestWireLimit {
-		return identity.ForbiddenError{}
-	}
-	sealed, err := envelope.ParseEnvelope(wire)
-	if err != nil {
-		return identity.ForbiddenError{}
-	}
-	plain, err := p.service.config.Envelope.Decrypt(ctx, envelope.DecryptRequest{Envelope: sealed, Context: aad})
-	defer clear(plain)
-	var input providerLoginStartInput
-	if err != nil || len(plain) == 0 || len(plain) > providerLoginRequestPlainLimit || json.Unmarshal(plain, &input) != nil {
-		return identity.ForbiddenError{}
-	}
-	want := p.commandBinding(k.Admission.CommandID)
-	if identity.CommandBinding(input.Command) != want || want.ValidateFor(providerSigninOperation()) != nil || input.Intent != p.intent ||
-		input.Proof.TenantID != want.TenantID || input.GlobalVersion == 0 || input.TenantVersion == 0 ||
-		!input.Issued.Equal(input.Started.Truncate(time.Second)) || !input.Expires.After(input.Started) ||
-		input.Expires.After(input.Issued.Add(p.service.config.StateLifetime)) {
+	if input.Intent != p.intent {
 		return identity.ForbiddenError{}
 	}
 	remember, err := p.request.LoginIntent.RememberPolicy()
@@ -321,17 +308,45 @@ func (p *providerLoginPhase) restoreInput(ctx context.Context, k kernel.RequestK
 		input.SuccessCallback != p.request.SuccessCallback.String() || input.ErrorCallback != p.request.ErrorCallback.String() {
 		return identity.ForbiddenError{}
 	}
+	p.input = &input
+	return nil
+}
+
+func (p *providerLoginPhase) openOriginalInput(ctx context.Context, k kernel.RequestKeyPreparationBinding, wire []byte) (providerLoginStartInput, error) {
+	aad, err := p.requestKeyContext(k)
+	if err != nil {
+		return providerLoginStartInput{}, err
+	}
+	if len(wire) == 0 || len(wire) > providerLoginRequestWireLimit {
+		return providerLoginStartInput{}, identity.ForbiddenError{}
+	}
+	sealed, err := envelope.ParseEnvelope(wire)
+	if err != nil {
+		return providerLoginStartInput{}, identity.ForbiddenError{}
+	}
+	plain, err := p.service.config.Envelope.Decrypt(ctx, envelope.DecryptRequest{Envelope: sealed, Context: aad})
+	defer clear(plain)
+	var input providerLoginStartInput
+	if err != nil || len(plain) == 0 || len(plain) > providerLoginRequestPlainLimit || json.Unmarshal(plain, &input) != nil {
+		return providerLoginStartInput{}, identity.ForbiddenError{}
+	}
+	want := p.commandBinding(k.Admission.CommandID)
+	if identity.CommandBinding(input.Command) != want || want.ValidateFor(providerSigninOperation()) != nil ||
+		input.Proof.TenantID != want.TenantID || input.GlobalVersion == 0 || input.TenantVersion == 0 ||
+		!input.Issued.Equal(input.Started.Truncate(time.Second)) || !input.Expires.After(input.Started) ||
+		input.Expires.After(input.Issued.Add(p.service.config.StateLifetime)) {
+		return providerLoginStartInput{}, identity.ForbiddenError{}
+	}
 	profile, ok := p.service.profiles[providerLoginProfileKey{input.Proof.OrganizationID, input.ProviderID}]
 	if !ok || profile.Domain != input.Proof.Domain || profile.ProviderVersion != input.ProviderVersion ||
 		profile.CredentialGeneration != input.Generation || profile.MappingVersion != input.MappingVersion ||
 		profile.ClientID != input.ClientID || profile.ProtocolRedirectURI != input.ProtocolRedirectURI {
-		return identity.ForbiddenError{}
+		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
 	if _, err := input.authority(); err != nil {
-		return err
+		return providerLoginStartInput{}, err
 	}
-	p.input = &input
-	return nil
+	return input, nil
 }
 
 func earlierLoginTime(a, b time.Time) time.Time {

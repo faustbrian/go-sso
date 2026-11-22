@@ -7,10 +7,9 @@ and original safe organization recovery scope. It has no proof/result table,
 transaction coordinator or alternative ownership truth. The separate provider
 service persists disabled metadata; a separate opt-in credential service stores
 only configured-envelope client-secret custody. Separate opt-ins enable or
-disable a static OIDC provider. Trusted routing, anonymous
-discovery and static OIDC sign-in start are separate opt-ins. This profile
-does not process protocol callbacks, issue sessions, enforce federation or
-perform JIT provisioning.
+disable a static OIDC provider. Trusted routing, anonymous discovery, static
+OIDC sign-in start and completion are separate opt-ins. Completion supports
+existing linked members only; it does not provision accounts or create links.
 
 ### Static OIDC login custody schema
 
@@ -57,6 +56,37 @@ correlation input; the coordinator chooses the durable command ID returned as
 code/S256 authorization redirect and never renews state or the pre-auth flow.
 An unknown commit or stale current authority returns no redirect. Start
 installs no HTTP route, exchanges no code and creates no user or session.
+
+### Native static OIDC callback for an existing linked member
+
+Before opting in, install the native callback account, capability, MFA,
+session and audit/outbox schemas. Apply `ProviderLoginTokenVaultMigrationSource`
+after `LoginTransactionMigrationSource` and the identity account schema on the
+same primary. Append the identity PostgreSQL
+`SSOOIDCCallbackPreparationErasureMigrationSource` after the enterprise start
+erasure migration. The callback and session adapters share the same primary.
+
+Construct `NewProviderLoginCompletionService` from the selected start service.
+Supply the same provider's pinned HTTPS metadata, client authentication,
+permitted algorithms and signing keys, and the consumer's session audience,
+authorization namespace, cookie policy, and CSRF key. Existing accounts must
+have an active `sso`-owned provider credential in the namespace given by
+`SSOOIDCAccountProviderNamespace`, a current membership, and known factor
+authority. This profile cannot satisfy a required second factor.
+
+Call `SigninCallback` with the exact configured provider callback URL, the
+original browser flow cookie/context, and the parsed authorization-code query.
+Only an acknowledged first commit discloses the session cookie, CSRF token and
+configured return URL. Configure the session PostgreSQL service's explicit
+enterprise OIDC cookie profile for authenticated session reads and strict
+logout. Provider tokens are never returned; the encrypted vault is the only
+durable owner after a successful callback. A definitive refusal or a verified
+response without an eligible link or member closes original verifier custody.
+An uncertain provider response remains unresolved and must not be exchanged
+again. None of these failures creates a session.
+
+This API installs no public HTTP route and does not implement JIT provisioning,
+new account linking, or non-OIDC federation.
 
 ### Static OIDC provider enablement
 

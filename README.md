@@ -13,8 +13,9 @@ an encrypted client secret while preserving disabled state. These profiles are
 not a release-qualified SSO platform. The separate opt-in enablement profile
 changes disabled static-OIDC provider state only after current native domain,
 credential and organization checks. Trusted native verified-domain routing
-is opt-in. Active-use credential overlap, public discovery, login, JIT,
-protocol adapters and HTTP routes are not implemented or advertised.
+is opt-in. The [native PostgreSQL adapter](postgres/README.md) separately
+supports static OIDC sign-in for an existing linked active member. It does not
+install HTTP routes, create links, or provision accounts.
 
 ## Disabled static OIDC provider values
 

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add opt-in native static OIDC callback sign-in for existing linked active
+  members. Exchange the original code and S256 verifier once. Bind the issued
+  cookie, browser use, encrypted provider-token deposit, audit and session
+  lifecycle in one transaction. Definitive refusal erases original verifier
+  custody; ambiguous exchange cannot retry or disclose credentials.
+
 - Add opt-in native static OIDC provider disablement. The exact authorized
   mutation stops new sign-in starts and records the selected drain or revoke
   mode and original bounded count with required audit and lifecycle outbox.

@@ -17,6 +17,7 @@ import (
 	authentication "github.com/faustbrian/go-authentication/v2"
 	"github.com/faustbrian/go-authorization/v3"
 	capabilitypg "github.com/faustbrian/go-capability/postgres/identity"
+	"github.com/faustbrian/go-capability/v2"
 	identity "github.com/faustbrian/go-identity"
 	kernel "github.com/faustbrian/go-identity/postgres"
 	"github.com/faustbrian/go-identity/risk"
@@ -68,16 +69,18 @@ type ProviderLoginConfig struct {
 // ProviderLoginService owns native anonymous enterprise OIDC initiation. It
 // borrows the router's primary; it does not issue sessions or own HTTP routes.
 type ProviderLoginService struct {
-	router          *ProviderRouter
-	directory       *kernel.Repository
-	config          ProviderLoginConfig
-	policyVersion   uint64
-	profiles        map[providerLoginProfileKey]StaticOIDCLoginProfile
-	providerDomains map[sso.ProviderID]string
-	callbacks       map[string]struct{}
-	profileDigest   [32]byte
-	payload         providerLoginPayloadConfig
-	custody         risk.AuthenticationAdmissionCustody
+	router           *ProviderRouter
+	directory        *kernel.Repository
+	config           ProviderLoginConfig
+	policyVersion    uint64
+	profiles         map[providerLoginProfileKey]StaticOIDCLoginProfile
+	providerDomains  map[sso.ProviderID]string
+	callbacks        map[string]struct{}
+	profileDigest    [32]byte
+	payload          providerLoginPayloadConfig
+	callbackVerifier capability.Service
+	callbackLimits   capability.Limits
+	custody          risk.AuthenticationAdmissionCustody
 }
 
 type providerLoginProfileKey struct {
@@ -146,6 +149,11 @@ func NewProviderLoginService(router *ProviderRouter, config ProviderLoginConfig)
 	if err != nil {
 		return nil, sso.ErrInvalidInput
 	}
+	callbackVerifier, err := capability.NewService(config.Capability.Crypto)
+	if err != nil {
+		return nil, sso.ErrInvalidInput
+	}
+	callbackLimits := config.Capability.Crypto.Limits
 	codec, err := capabilitypg.NewIssuancePreparationCodec(issuer, config.CapabilityPreparation)
 	if err != nil {
 		return nil, sso.ErrInvalidInput
@@ -196,7 +204,7 @@ func NewProviderLoginService(router *ProviderRouter, config ProviderLoginConfig)
 	s := &ProviderLoginService{
 		router: router, config: config, directory: directory, policyVersion: admissionCopy.PolicyVersion,
 		profiles: profiles, providerDomains: domains, callbacks: callbacks, profileDigest: sha256.Sum256(frame),
-		payload: payload, custody: custody,
+		payload: payload, callbackVerifier: callbackVerifier, callbackLimits: callbackLimits, custody: custody,
 	}
 	if _, _, err := s.coordinator(&providerLoginPhase{service: s}); err != nil {
 		return nil, sso.ErrInvalidInput

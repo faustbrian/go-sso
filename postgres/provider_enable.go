@@ -100,8 +100,21 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 }
 
 func authenticateStoredProviderCredential(ctx context.Context, crypto *envelope.Service, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64) error {
-	if installed < 2 || generation == 0 || len(wire) == 0 || len(wire) > 32768 || len(contextWire) == 0 || len(contextWire) > 4096 {
+	return withAuthenticatedStoredProviderCredential(ctx, crypto, tenant, organization, provider, wire, contextWire, generation, installed, func(ctx context.Context, _ []byte) error {
+		return ctx.Err()
+	})
+}
+
+// withAuthenticatedStoredProviderCredential borrows exact installed client
+// credentials synchronously, clearing plaintext before returning. The caller
+// must already authorize the installed generation and, for exchange, hold the
+// original acknowledged callback reservation. This does neither operation.
+func withAuthenticatedStoredProviderCredential(ctx context.Context, crypto *envelope.Service, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64, use func(context.Context, []byte) error) error {
+	if ctx == nil || crypto == nil || use == nil || installed < 2 || generation == 0 || len(wire) == 0 || len(wire) > 32768 || len(contextWire) == 0 || len(contextWire) > 4096 {
 		return sso.ErrForbidden
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	var binding sso.CredentialReferenceContext
 	if json.Unmarshal(contextWire, &binding) != nil || binding.TenantID != tenant || binding.OrganizationID != organization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
@@ -126,7 +139,10 @@ func authenticateStoredProviderCredential(ctx context.Context, crypto *envelope.
 	if err != nil || len(plain) == 0 || len(plain) > 32768 {
 		return providerError(ctx, sso.ErrForbidden)
 	}
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return use(ctx, plain)
 }
 
 func (p *ProviderContributor) prepareEnable(ctx context.Context) error {

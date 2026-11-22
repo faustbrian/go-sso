@@ -239,6 +239,7 @@ func installProviderLoginStartMigrations(t *testing.T, f *orgFixture) {
 			t.Fatal("install or replay ordered native login migrations", err)
 		}
 	}
+	f.history = append(migrationList(nil), complete...)
 }
 
 func providerLoginAdmission(t *testing.T, x providerEnableFixture) risk.AuthenticationAdmissionCustodyConfig {
