@@ -213,6 +213,15 @@ func tracedProviderService(t *testing.T, f *orgFixture, config ssopg.ProviderSer
 // authority for synthetic rows. Copied ciphertext is never decrypted/accepted
 // as provider configuration or used to manufacture a command outcome.
 func TestNativeProviderQueryScale(t *testing.T) {
+	proveNativeProviderQueryScale(t, false)
+}
+
+func TestNativeOAuthProviderQueryScale(t *testing.T) {
+	proveNativeProviderQueryScale(t, true)
+}
+
+func proveNativeProviderQueryScale(t *testing.T, oauth bool) {
+	t.Helper()
 	f, service, config := newProviderFixture(t)
 	request := providerRequest(t, "https://query.example.com", "query-seed")
 	created, err := service.ProviderRegisterOidc(f.ctx, request)
@@ -222,6 +231,13 @@ func TestNativeProviderQueryScale(t *testing.T) {
 	populateProviderQueryRows(t, f, created.Provider.ID)
 	trace := new(providerTrace)
 	service = tracedProviderService(t, f, config, trace)
+	if oauth {
+		installProviderProtocolHistory(t, f)
+		service, err = service.WithOAuthRegistration()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	var rows, hot, effects int
 	var version string
 	if err = f.pool.Raw().QueryRow(f.ctx, `SELECT count(*),count(*) FILTER(WHERE tenant_id='org-test-basic'),(SELECT count(*) FROM sso_providers.command_effects),current_setting('server_version') FROM sso_providers.providers`).Scan(&rows, &hot, &effects, &version); err != nil || rows != 100001 || hot != 10001 || effects != 100001 {
@@ -278,12 +294,27 @@ func TestNativeProviderQueryScale(t *testing.T) {
 		sort.Slice(elapsed, func(i, j int) bool { return elapsed[i] < elapsed[j] })
 		t.Logf("native %s: 7 warmed calls median=%s max=%s (includes current session/org/policy checks and pool/client overhead)", operation.name, elapsed[3], elapsed[6])
 	}
-	fresh := providerRequest(t, "https://query-new.example.com", "query-fresh")
-	if out, err := service.ProviderRegisterOidc(f.ctx, fresh); err != nil || out.Provider.ID == "" {
-		t.Fatal("native scaled insertion", err)
-	}
-	if out, err := service.ProviderRegisterOidc(f.ctx, fresh); err != nil || out.Provider.ID == "" {
-		t.Fatal("native scaled original recovery", err)
+	if oauth {
+		fresh := providerOAuthRegistrationRequest(t, request.OrganizationID)
+		start := time.Now()
+		registered, err := service.ProviderRegisterOauth(f.ctx, fresh)
+		t.Logf("native OAuth registration with protected effects at scale: %s", time.Since(start))
+		if err != nil || registered.Provider.ID == "" || registered.Provider.Protocol != "oauth2" {
+			t.Fatal("native scaled OAuth insertion", err)
+		}
+		start = time.Now()
+		if out, err := service.ProviderRegisterOauth(f.ctx, fresh); err != nil || out.Provider.ID != registered.Provider.ID {
+			t.Fatal("native scaled OAuth original recovery", err)
+		}
+		t.Logf("native OAuth registration retry at scale: %s", time.Since(start))
+	} else {
+		fresh := providerRequest(t, "https://query-new.example.com", "query-fresh")
+		if out, err := service.ProviderRegisterOidc(f.ctx, fresh); err != nil || out.Provider.ID == "" {
+			t.Fatal("native scaled insertion", err)
+		}
+		if out, err := service.ProviderRegisterOidc(f.ctx, fresh); err != nil || out.Provider.ID == "" {
+			t.Fatal("native scaled original recovery", err)
+		}
 	}
 	trace.mu.Lock()
 	queries := append([]providerQuery(nil), trace.queries...)

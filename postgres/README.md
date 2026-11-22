@@ -540,6 +540,27 @@ opaque ID cursor and limits of 1 through 100. Current authority is checked befor
 querying and again before disclosure; a cursor grants no authority. Requested
 domains remain pending, `Enabled` is false and `VerifiedDomains` is empty.
 
+## Disabled static OAuth2 provider registration
+
+After the provider and provider-metadata migrations, apply both steps of
+`ProviderProtocolMigrationSource` before selecting
+`ProviderService.WithOAuthRegistration`. The expansion uses a constant OIDC
+default for historical rows and legacy inserts. The later step validates the
+closed protocol constraint under a weaker lock. Neither step rewrites the
+encrypted provider settings or creates a route.
+
+Select protocol-aware administration on every registry consumer sharing that
+primary before the first OAuth registration. Legacy OIDC-only readers assume
+that no OAuth rows exist. On rollback, keep the schema and use protocol-aware
+reads if any OAuth provider has already been registered.
+
+`ProviderRegisterOauth` accepts only the validated root-owned static intent.
+It resolves the same current organization administration, protected risk, audit
+and outbox owners as OIDC, with a separate action and encrypted protocol binding.
+Exact retries recover the original disabled result. Pending domains do not
+become verified, and registration does not install credentials, enable the
+provider, make a provider request or issue a session.
+
 ## Domain recovery
 
 The exact original safe organization `CommandBinding` is compare-and-set before

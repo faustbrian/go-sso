@@ -120,7 +120,7 @@ func (s *ProviderService) providerDisable(ctx context.Context, r sso.ProviderDis
 		return out, sso.ErrInvalidInput
 	}
 	p := &ProviderContributor{
-		service: s, request: sso.ProviderRegisterOidcRequest{OrganizationID: s.updateOrganization},
+		service: s, request: providerCommandInput{OrganizationID: s.updateOrganization},
 		admission: admission, intent: intent, disable: &providerDisable{selection: selection, reasonDigest: reason},
 	}
 	defer func() { clear(p.configuration); clear(p.disable.predecessorEnvelope) }()

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add a selected native registration path for disabled static OAuth2
+  providers. The provider registry retains existing OIDC metadata, encrypts
+  the OAuth configuration with its own protocol binding, and recovers exact
+  retries through the existing coordinator. Registration does not enable
+  OAuth routing or sign-in.
+
 - Add native `SharedCallbackRateSource` attribution for a shared enterprise
   sign-in/member-link callback. Authenticated stored mode selects only its
   original flow or fresh local password cookie, with no cross-mode fallback,

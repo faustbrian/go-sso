@@ -39,6 +39,9 @@ func (p *ProviderContributor) operation() identity.FeatureOperation {
 	if p.update != nil {
 		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.update", SchemaID: "sso-disabled-static-oidc-update-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 	}
+	if p.request.protocol == providerProtocolOAuth2 {
+		return providerOAuthRegistrationOperation()
+	}
 	return providerOperation()
 }
 func (p *ProviderContributor) beforeVersion() uint64 {
@@ -104,7 +107,7 @@ func (s *ProviderService) ProviderUpdate(ctx context.Context, r sso.ProviderUpda
 	if err != nil {
 		return out, sso.ErrInvalidInput
 	}
-	p := &ProviderContributor{service: s, update: &r, request: sso.ProviderRegisterOidcRequest{CommandID: r.CommandID, OrganizationID: s.updateOrganization, Issuer: spec.Issuer, Mapping: r.Mapping, IdempotencyKey: r.IdempotencyKey}, admission: a, intent: intent, configuration: configuration}
+	p := &ProviderContributor{service: s, update: &r, request: providerCommandInput{CommandID: r.CommandID, OrganizationID: s.updateOrganization, Issuer: spec.Issuer, Mapping: r.Mapping}, admission: a, intent: intent, configuration: configuration}
 	if err = s.composeProvider(p); err != nil {
 		return out, err
 	}
@@ -229,7 +232,11 @@ func (p *ProviderContributor) writeProvider(ctx context.Context, w kernel.Work, 
 	var err error
 	if p.update == nil {
 		issuer := sha256.Sum256([]byte(p.request.Issuer))
-		n, err = w.Exec(ctx, `INSERT INTO sso_providers.providers(tenant_id,organization_id,provider_id,issuer_digest,configuration_envelope,mapping_version,pending_domains) VALUES($1,$2,$3,$4,$5,$6::numeric,$7) ON CONFLICT DO NOTHING`, string(b.TenantID), p.request.OrganizationID, b.RecordID, issuer[:], p.configuration, strconv.FormatUint(mapping.Version, 10), int32(len(p.request.Domains)))
+		if p.request.protocol == providerProtocolOAuth2 {
+			n, err = w.Exec(ctx, `INSERT INTO sso_providers.providers(tenant_id,organization_id,provider_id,issuer_digest,configuration_envelope,mapping_version,pending_domains,protocol) VALUES($1,$2,$3,$4,$5,$6::numeric,$7,'oauth2') ON CONFLICT DO NOTHING`, string(b.TenantID), p.request.OrganizationID, b.RecordID, issuer[:], p.configuration, strconv.FormatUint(mapping.Version, 10), int32(len(p.request.Domains)))
+		} else {
+			n, err = w.Exec(ctx, `INSERT INTO sso_providers.providers(tenant_id,organization_id,provider_id,issuer_digest,configuration_envelope,mapping_version,pending_domains) VALUES($1,$2,$3,$4,$5,$6::numeric,$7) ON CONFLICT DO NOTHING`, string(b.TenantID), p.request.OrganizationID, b.RecordID, issuer[:], p.configuration, strconv.FormatUint(mapping.Version, 10), int32(len(p.request.Domains)))
+		}
 	} else {
 		n, err = w.Exec(ctx, `UPDATE sso_providers.providers SET metadata_version=$4::numeric,metadata_configuration_envelope=$5,metadata_mapping_version=$6::numeric WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3 AND metadata_version=$7::numeric AND NOT enabled`, string(b.TenantID), p.request.OrganizationID, b.RecordID, strconv.FormatUint(p.afterVersion(), 10), p.configuration, strconv.FormatUint(mapping.Version, 10), strconv.FormatUint(p.beforeVersion(), 10))
 	}

@@ -52,7 +52,7 @@ type ProviderContributor struct {
 	update        *sso.ProviderUpdateRequest
 	enable        *providerEnable
 	disable       *providerDisable
-	request       sso.ProviderRegisterOidcRequest
+	request       providerCommandInput
 	admission     providerAdmission
 	intent        identity.RequestIntent
 	binding       identity.CommandBinding
@@ -84,6 +84,23 @@ func (ProviderContributor) MarshalJSON() ([]byte, error) { return nil, sso.ErrSe
 func (ProviderContributor) MarshalText() ([]byte, error) { return nil, sso.ErrSensitiveSerialization }
 
 type providerStoredBinding identity.CommandBinding
+
+// The coordinator consumes the shared provider command shape, not one
+// protocol's public registration request.
+type providerCommandInput struct {
+	CommandID      identity.CommandID
+	OrganizationID string
+	Issuer         string
+	Domains        []string
+	Mapping        sso.AttributeMapping
+	protocol       string
+}
+
+type providerRegistrationResult struct {
+	Provider                     sso.Provider
+	VerificationRequirementCount uint32
+	Completion                   sso.Completion
+}
 
 type providerConfiguration struct {
 	Metadata sso.OIDCStaticMetadataSpec
@@ -117,19 +134,27 @@ func (s *ProviderService) composeProvider(p *ProviderContributor) error {
 // Matching retries recover only that original command; an absent journal stays
 // Unknown. No proof, login, routing, discovery request or credential is created.
 func (s *ProviderService) ProviderRegisterOidc(ctx context.Context, r sso.ProviderRegisterOidcRequest) (sso.ProviderRegisterOidcResult, error) {
-	var out sso.ProviderRegisterOidcResult
 	if s == nil || ctx == nil || validateProviderRequest(r) != nil {
-		return out, sso.ErrInvalidInput
+		return sso.ProviderRegisterOidcResult{}, sso.ErrInvalidInput
 	}
+	request := providerCommandInput{CommandID: r.CommandID, OrganizationID: r.OrganizationID, Issuer: r.Issuer, Domains: r.Domains, Mapping: r.Mapping}
+	result, err := s.registerDisabledProvider(ctx, request, r.IdempotencyKey, func() ([]byte, error) {
+		metadata, _ := r.StaticMetadata.Spec()
+		mapping, _ := r.Mapping.Spec()
+		return json.Marshal(providerConfiguration{Metadata: metadata, Mapping: mapping, Domains: append([]string(nil), r.Domains...)})
+	})
+	return sso.ProviderRegisterOidcResult(result), err
+}
+
+func (s *ProviderService) registerDisabledProvider(ctx context.Context, r providerCommandInput, key identity.IdempotencyKey, encode func() ([]byte, error)) (providerRegistrationResult, error) {
+	var out providerRegistrationResult
 	ctx, cancel := context.WithTimeout(ctx, s.config.MaximumDuration)
 	defer cancel()
 	a, err := s.admit(ctx, r.OrganizationID, "org:sso-write")
 	if err != nil {
 		return out, err
 	}
-	metadata, _ := r.StaticMetadata.Spec()
-	mapping, _ := r.Mapping.Spec()
-	configuration, err := json.Marshal(providerConfiguration{Metadata: metadata, Mapping: mapping, Domains: append([]string(nil), r.Domains...)})
+	configuration, err := encode()
 	if err != nil || len(configuration) > providerConfigurationMaximumBytes {
 		return out, sso.ErrInvalidInput
 	}
@@ -149,10 +174,11 @@ func (s *ProviderService) ProviderRegisterOidc(ctx context.Context, r sso.Provid
 		return out, err
 	}
 	bound, _ := a.session.Session.Bindings()
-	scope := kernel.RequestKeyScope{TenantID: s.authentication.TenantID, ActorID: identity.ActorID(bound.UserID), ActorKind: authorization.SubjectUser, Method: "POST", RouteID: providerOperation().OperationID}
-	caller := s.kernelDecision(bound.UserID, "identity.request-admission", providerOperation().OperationID)
-	registration := kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: providerOperation()}
-	keyBinding, wire, err := p.coordinator.ResolvePreparedRequestKey(ctx, scope, r.IdempotencyKey, intent, caller, registration, p)
+	op := p.operation()
+	scope := kernel.RequestKeyScope{TenantID: s.authentication.TenantID, ActorID: identity.ActorID(bound.UserID), ActorKind: authorization.SubjectUser, Method: "POST", RouteID: op.OperationID}
+	caller := s.kernelDecisionFor(bound.UserID, "identity.request-admission", op.OperationID, op.OperationID)
+	registration := kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: op}
+	keyBinding, wire, err := p.coordinator.ResolvePreparedRequestKey(ctx, scope, key, intent, caller, registration, p)
 	defer clear(wire)
 	if err != nil {
 		if p.failure != nil {
@@ -165,7 +191,7 @@ func (s *ProviderService) ProviderRegisterOidc(ctx context.Context, r sso.Provid
 		return out, providerError(ctx, err)
 	}
 	if p.binding != original {
-		out.Completion, err = p.coordinator.RecoverPreparedFeatureCommand(ctx, providerRecovery(original), s.kernelDecision(bound.UserID, "identity.user", string(bound.UserID)), registration, p)
+		out.Completion, err = p.coordinator.RecoverPreparedFeatureCommand(ctx, providerRecovery(original), s.kernelDecisionFor(bound.UserID, "identity.user", string(bound.UserID), op.OperationID), registration, p)
 	} else {
 		var plan kernel.CommandPlan
 		plan, err = p.plan(false)
@@ -184,7 +210,7 @@ func (s *ProviderService) ProviderRegisterOidc(ctx context.Context, r sso.Provid
 		if parseErr != nil || mappingVersion == 0 || pending < 1 || pending > 128 {
 			return out, sso.ErrUnavailable
 		}
-		out.Provider = sso.Provider{ID: original.RecordID, OrganizationID: r.OrganizationID, Protocol: "oidc", Version: 1, MappingVersion: mappingVersion, VerifiedDomains: []string{}}
+		out.Provider = sso.Provider{ID: original.RecordID, OrganizationID: r.OrganizationID, Protocol: r.providerProtocol(), Version: 1, MappingVersion: mappingVersion, VerifiedDomains: []string{}}
 		out.VerificationRequirementCount = uint32(pending)
 		if _, admissionErr := s.admit(ctx, r.OrganizationID, "org:sso-write"); admissionErr != nil {
 			out.Provider = sso.Provider{}
@@ -231,7 +257,11 @@ func providerError(ctx context.Context, err error) error {
 }
 
 func (s *ProviderService) kernelDecision(actor identity.UserID, kind, id string) authorization.DecisionContext {
-	dc := s.decision(actor, id, providerOperation().OperationID)
+	return s.kernelDecisionFor(actor, kind, id, providerOperation().OperationID)
+}
+
+func (s *ProviderService) kernelDecisionFor(actor identity.UserID, kind, id, action string) authorization.DecisionContext {
+	dc := s.decision(actor, id, action)
 	dc.Request.Resource = authorization.Resource{Type: authorization.ResourceType(kind), ID: authorization.ResourceID(id)}
 	return dc
 }
@@ -600,7 +630,7 @@ func (p *ProviderContributor) CheckFeatureCommit(ctx context.Context, w kernel.W
 }
 
 func (p *ProviderContributor) configurationContext() (envelope.Context, error) {
-	return envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(p.binding.TenantID), "organization": p.request.OrganizationID, "provider": p.binding.RecordID, "protocol": "oidc", "purpose": "static-configuration", "version": strconv.FormatUint(p.afterVersion(), 10)})
+	return envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(p.binding.TenantID), "organization": p.request.OrganizationID, "provider": p.binding.RecordID, "protocol": p.request.providerProtocol(), "purpose": "static-configuration", "version": strconv.FormatUint(p.afterVersion(), 10)})
 }
 func (p *ProviderContributor) outputContext(generation uint64) (envelope.Context, error) {
 	frame, err := json.Marshal(struct {

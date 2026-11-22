@@ -172,7 +172,7 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 	if err != nil {
 		return out, sso.ErrInvalidInput
 	}
-	p := &ProviderContributor{service: s, request: sso.ProviderRegisterOidcRequest{OrganizationID: s.updateOrganization}, admission: a, intent: intent, enable: &selected}
+	p := &ProviderContributor{service: s, request: providerCommandInput{OrganizationID: s.updateOrganization}, admission: a, intent: intent, enable: &selected}
 	defer func() { clear(p.configuration); clear(selected.predecessor.configuration) }()
 	if err = s.composeProvider(p); err != nil {
 		return out, err

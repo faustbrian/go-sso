@@ -63,6 +63,7 @@ type ProviderService struct {
 	updateAuthorization  ProviderUpdateAuthorization
 	enableAuthorization  ProviderEnableAuthorization
 	disableAuthorization ProviderDisableAuthorization
+	oauthRegistration    bool
 }
 
 func (ProviderService) Format(s fmt.State, _ rune) {
@@ -200,26 +201,50 @@ func (s *ProviderService) admit(ctx context.Context, organizationID, action stri
 	return a, nil
 }
 
+func (s *ProviderService) providerMetadataSelect() string {
+	const columns = `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text,enabled`
+	if s.oauthRegistration {
+		return columns + ",protocol"
+	}
+	return columns
+}
+
+func (s *ProviderService) scanProviderMetadata(row interface{ Scan(...any) error }, organizationID string) (sso.Provider, error) {
+	p := sso.Provider{OrganizationID: organizationID, Protocol: providerProtocolOIDC, VerifiedDomains: []string{}}
+	var mappingVersion, providerVersion string
+	var err error
+	if s.oauthRegistration {
+		err = row.Scan(&p.ID, &mappingVersion, &providerVersion, &p.Enabled, &p.Protocol)
+	} else {
+		err = row.Scan(&p.ID, &mappingVersion, &providerVersion, &p.Enabled)
+	}
+	if err != nil {
+		return sso.Provider{}, err
+	}
+	if p.Protocol != providerProtocolOIDC && p.Protocol != providerProtocolOAuth2 {
+		return sso.Provider{}, sso.ErrUnavailable
+	}
+	if p.MappingVersion, err = strconv.ParseUint(mappingVersion, 10, 64); err != nil || p.MappingVersion == 0 {
+		return sso.Provider{}, sso.ErrUnavailable
+	}
+	if p.Version, err = strconv.ParseUint(providerVersion, 10, 64); err != nil || p.Version == 0 {
+		return sso.Provider{}, sso.ErrUnavailable
+	}
+	return p, nil
+}
+
 func (s *ProviderService) read(ctx context.Context, organizationID string, cursor sso.ProviderID, limit uint32) ([]sso.Provider, error) {
-	rows, err := s.pool.Raw().Query(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text,enabled FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id>$3 ORDER BY provider_id LIMIT $4`, string(s.authentication.TenantID), organizationID, string(cursor), int32(limit))
+	rows, err := s.pool.Raw().Query(ctx, s.providerMetadataSelect()+` FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id>$3 ORDER BY provider_id LIMIT $4`, string(s.authentication.TenantID), organizationID, string(cursor), int32(limit))
 	if err != nil {
 		return nil, providerError(ctx, err)
 	}
 	defer rows.Close()
 	providers := make([]sso.Provider, 0, limit)
 	for rows.Next() {
-		var p sso.Provider
-		var version, providerVersion string
-		if err := rows.Scan(&p.ID, &version, &providerVersion, &p.Enabled); err != nil {
+		p, err := s.scanProviderMetadata(rows, organizationID)
+		if err != nil {
 			return nil, providerError(ctx, err)
 		}
-		if p.MappingVersion, err = strconv.ParseUint(version, 10, 64); err != nil || p.MappingVersion == 0 {
-			return nil, sso.ErrUnavailable
-		}
-		if p.Version, err = strconv.ParseUint(providerVersion, 10, 64); err != nil || p.Version == 0 {
-			return nil, sso.ErrUnavailable
-		}
-		p.OrganizationID, p.Protocol, p.VerifiedDomains = organizationID, "oidc", []string{}
 		providers = append(providers, p)
 	}
 	if err = rows.Err(); err != nil {
@@ -240,24 +265,14 @@ func (s *ProviderService) ProviderGet(ctx context.Context, r sso.ProviderGetRequ
 	if _, err := s.admit(ctx, r.OrganizationID, "org:sso-read"); err != nil {
 		return sso.ProviderGetResult{}, err
 	}
-	var p sso.Provider
-	var version, providerVersion string
-	err := s.pool.Raw().QueryRow(ctx, `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text,enabled FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`, string(s.authentication.TenantID), r.OrganizationID, string(r.ProviderID)).Scan(&p.ID, &version, &providerVersion, &p.Enabled)
+	row := s.pool.Raw().QueryRow(ctx, s.providerMetadataSelect()+` FROM sso_providers.providers WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`, string(s.authentication.TenantID), r.OrganizationID, string(r.ProviderID))
+	p, err := s.scanProviderMetadata(row, r.OrganizationID)
 	if err != nil {
 		return sso.ProviderGetResult{}, providerError(ctx, err)
-	}
-	p.MappingVersion, err = strconv.ParseUint(version, 10, 64)
-	if err != nil || p.MappingVersion == 0 {
-		return sso.ProviderGetResult{}, sso.ErrUnavailable
-	}
-	p.Version, err = strconv.ParseUint(providerVersion, 10, 64)
-	if err != nil || p.Version == 0 {
-		return sso.ProviderGetResult{}, sso.ErrUnavailable
 	}
 	if _, err = s.admit(ctx, r.OrganizationID, "org:sso-read"); err != nil {
 		return sso.ProviderGetResult{}, err
 	}
-	p.OrganizationID, p.Protocol, p.VerifiedDomains = r.OrganizationID, "oidc", []string{}
 	return sso.ProviderGetResult{Provider: p}, nil
 }
 
