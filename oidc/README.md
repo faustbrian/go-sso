@@ -32,6 +32,24 @@ identity in the token hook and do not widen the mapped assertion.
 
 This module does not own HTTP routes, durable reservation or token storage,
 provider discovery, UserInfo, local account or session policy, or provider
-token refresh/revocation. Logout result types are available, but this profile
-does not perform provider logout. The PostgreSQL and Reference sign-in paths
-do not yet select this adapter.
+token refresh/revocation. Native PostgreSQL and Reference can opt in to this
+sign-in adapter. It does not perform provider logout itself.
+
+## RP-initiated logout wire support
+
+`NewRPLogoutProfile` selects an explicit HTTPS provider logout endpoint,
+client ID and registered RP callback. This profile follows the
+[RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)
+client-ID path without an ID-token hint. Select it only for a provider that
+recognizes the registered callback for that client. The provider may require
+the user to confirm logout, and a correlated browser return is not independent
+proof that a provider session no longer exists.
+
+The native owner generates and durably binds one-use state to the original
+provider, session, version, registered callback, and final application
+return target. Only after acknowledged local revocation and state persistence
+may it disclose `RPLogoutProfile.Redirect`. On return,
+`ParseRPLogoutCallback` discards provider error text and
+`RPLogoutCallback.OutcomeFor` compares exact state and trusted route.
+These helpers do not revoke or renew any session, persist or consume state,
+or expose HTTP routes.
