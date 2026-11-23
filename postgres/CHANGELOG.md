@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add native RP-initiated enterprise OIDC logout backed by one-use PostgreSQL
+  state and the original session's revocation. The callback settles provider
+  success, refusal or timeout without reactivating the local cookie. No HTTP
+  routes are installed by this module.
+
 - Allow selected OIDC sign-in and explicit-link completion to use the original
   parsed callback with a protocol adapter inside the native acknowledged
   reservation. Keep token-vault and account/session effects native.

@@ -434,7 +434,9 @@
         "github.com/faustbrian/go-identity/session",
         "github.com/faustbrian/go-sso"
       ],
-      "reverse_owned_dependencies": [],
+      "reverse_owned_dependencies": [
+        "github.com/faustbrian/go-sso/postgres"
+      ],
       "external_runtime_dependencies": [],
       "required_services": [],
       "build_tags": [],
@@ -585,6 +587,7 @@
         "github.com/faustbrian/go-secret-envelope/v2",
         "github.com/faustbrian/go-sso",
         "github.com/faustbrian/go-sso/domain-verification",
+        "github.com/faustbrian/go-sso/oidc",
         "github.com/faustbrian/go-transactional-outbox/postgres/identity",
         "github.com/faustbrian/go-transactional-outbox/v2"
       ],
