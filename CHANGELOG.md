@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve the explicitly selected SAML protocol in bounded provider-route
+  evidence without granting permission to start a browser transaction.
+
 - Add a distinct, bounded SAML SP-signer readiness checkpoint for native
   provider activation without granting domain, configuration, or key authority.
 

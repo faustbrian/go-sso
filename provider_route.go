@@ -90,6 +90,13 @@ func NewOAuth2DomainRoute(b DomainRouteBinding) (DomainRoute, error) {
 	return newDomainRoute(b, "oauth2")
 }
 
+// NewSAMLDomainRoute selects the explicit SAML profile for the same bounded
+// route evidence. The native reader must limit ValidUntil to the installed
+// SP signer's original certificate expiry. Construction grants no authority.
+func NewSAMLDomainRoute(b DomainRouteBinding) (DomainRoute, error) {
+	return newDomainRoute(b, "saml")
+}
+
 func newDomainRoute(b DomainRouteBinding, protocol string) (DomainRoute, error) {
 	if !providerClaimName(string(b.ProviderID)) || b.ProviderVersion == 0 || b.CredentialGeneration == 0 || b.PolicyVersion == 0 || b.Proof.validate() != nil {
 		return DomainRoute{}, ErrInvalidInput

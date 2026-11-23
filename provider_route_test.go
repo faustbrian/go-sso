@@ -140,6 +140,38 @@ func TestDomainRouteRetainsProtocolAndRejectsMixedChoices(t *testing.T) {
 	}
 }
 
+func TestSAMLDomainRoutePreservesExactEvidenceAndNeverFallsBack(t *testing.T) {
+	binding := routeBinding("saml-provider")
+	saml, err := sso.NewSAMLDomainRoute(binding)
+	if err != nil || saml.Protocol() != "saml" {
+		t.Fatal("SAML route lost its distinct protocol", err)
+	}
+	if got, err := saml.Bindings(); err != nil || got != binding {
+		t.Fatal("SAML route changed the exact original evidence", err)
+	}
+	request, err := sso.NewDomainRouteRequest("tenant-a", "example.test", binding.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := sso.SelectDomainRoute(request, "unrelated-default", []sso.DomainRoute{saml}, routeTime); err != nil || got != saml {
+		t.Fatal("exact selection did not preserve the SAML route", err)
+	}
+	oidc := makeRoute(t, "oidc-provider")
+	if got, err := sso.SelectDomainRoute(request, "oidc-provider", []sso.DomainRoute{oidc}, routeTime); !errors.Is(err, sso.ErrForbidden) || got.Protocol() != "" {
+		t.Fatal("a missing explicit SAML provider fell back to an OIDC default", err)
+	}
+	if got, err := sso.SelectDomainRoute(request, "", []sso.DomainRoute{saml, oidc}, routeTime); !errors.Is(err, sso.ErrForbidden) || got.Protocol() != "" {
+		t.Fatal("different protocols were mixed in one route selection", err)
+	}
+	if got, err := sso.SelectDomainRoute(request, "", []sso.DomainRoute{saml}, binding.ValidUntil); !errors.Is(err, sso.ErrForbidden) || got.Protocol() != "" {
+		t.Fatal("route reached its original exclusive cutoff without denial", err)
+	}
+	binding.ValidUntil = binding.ObservedAt.Add(20*time.Second + time.Microsecond)
+	if _, err := sso.NewSAMLDomainRoute(binding); !errors.Is(err, sso.ErrInvalidInput) {
+		t.Fatal("SAML route accepted more than twenty seconds of evidence", err)
+	}
+}
+
 func FuzzDomainRouteRequest(f *testing.F) {
 	for _, domain := range []string{"EXAMPLE.Test.", "*.example.test", "user@example.test", "127.0.0.1", "a.test"} {
 		f.Add(domain)
