@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/xml"
+	"strconv"
+	"strings"
 )
 
 const (
@@ -36,6 +38,48 @@ type SPMetadataConfig struct {
 // are never modified or retained, and callers must not mutate them concurrently.
 // Approval, signing-key ownership and metadata publication remain with callers.
 func ExportSPMetadata(config SPMetadataConfig) ([]byte, error) {
+	return exportSPMetadata(config, "")
+}
+
+// ExportSPMetadataWithIDPInitiatedACS explicitly advertises a separate,
+// non-default index-1 HTTP-POST ACS for IdP-initiated login while preserving
+// the default index-0 SP-initiated ACS. AssertionConsumerURL must be the exact
+// HTTPS /saml2/{provider}/acs route with a canonical 1..128-byte provider path
+// segment. The additional URL is derived from that same origin and provider
+// as /saml2/{provider}/idp-init; no second caller-supplied URL is accepted.
+// Entity and certificate validation, ownership, concurrency and error semantics
+// are the same as ExportSPMetadata. No Single Logout endpoint is advertised.
+// This only exports unsigned metadata; provider approval, unsolicited-login
+// policy, route exposure, signing-key ownership and publication remain with callers.
+func ExportSPMetadataWithIDPInitiatedACS(config SPMetadataConfig) ([]byte, error) {
+	consumer, ok := samlHTTPSURL(config.AssertionConsumerURL, maximumEndpointBytes, false)
+	if !ok || strings.Contains(consumer.EscapedPath(), "%") || strings.HasSuffix(consumer.Host, ":") {
+		return nil, ErrInvalidInput
+	}
+	provider, selected := strings.CutPrefix(consumer.Path, "/saml2/")
+	if !selected {
+		return nil, ErrInvalidInput
+	}
+	provider, selected = strings.CutSuffix(provider, "/acs")
+	if !selected || !validIDPInitiatedProviderSegment(provider) {
+		return nil, ErrInvalidInput
+	}
+	// Match NewIDPInitiatedPOSTResponseProfile's origin so advertised metadata
+	// cannot select a destination rejected by the unsolicited-response verifier.
+	if port := consumer.Port(); port != "" {
+		value, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || value == 0 || strconv.FormatUint(value, 10) != port {
+			return nil, ErrInvalidInput
+		}
+	}
+	idpInitiatedURL := "https://" + consumer.Host + "/saml2/" + provider + "/idp-init"
+	if !samlAssertionConsumerURL(idpInitiatedURL) {
+		return nil, ErrInvalidInput
+	}
+	return exportSPMetadata(config, idpInitiatedURL)
+}
+
+func exportSPMetadata(config SPMetadataConfig, idpInitiatedURL string) ([]byte, error) {
 	if !samlSPEntityID(config.EntityID) {
 		return nil, ErrInvalidInput
 	}
@@ -75,6 +119,14 @@ func ExportSPMetadata(config SPMetadataConfig) ([]byte, error) {
 			},
 		}
 	}
+	consumers := []spMetadataConsumer{{
+		Binding: httpPostBinding, Location: config.AssertionConsumerURL, Index: 0, Default: true,
+	}}
+	if idpInitiatedURL != "" {
+		consumers = append(consumers, spMetadataConsumer{
+			Binding: httpPostBinding, Location: idpInitiatedURL, Index: 1, Default: false,
+		})
+	}
 	document := spMetadataEntityDescriptor{
 		EntityID: config.EntityID,
 		SP: spMetadataSPDescriptor{
@@ -82,9 +134,7 @@ func ExportSPMetadata(config SPMetadataConfig) ([]byte, error) {
 			AuthnRequestsSigned:  true,
 			WantAssertionsSigned: true,
 			Keys:                 keys,
-			Consumer: spMetadataConsumer{
-				Binding: httpPostBinding, Location: config.AssertionConsumerURL, Index: 0, Default: true,
-			},
+			Consumers:            consumers,
 		},
 	}
 	encoded, err := xml.Marshal(document)
@@ -107,7 +157,7 @@ type spMetadataSPDescriptor struct {
 	AuthnRequestsSigned  bool                      `xml:"AuthnRequestsSigned,attr"`
 	WantAssertionsSigned bool                      `xml:"WantAssertionsSigned,attr"`
 	Keys                 []spMetadataKeyDescriptor `xml:"urn:oasis:names:tc:SAML:2.0:metadata KeyDescriptor"`
-	Consumer             spMetadataConsumer        `xml:"urn:oasis:names:tc:SAML:2.0:metadata AssertionConsumerService"`
+	Consumers            []spMetadataConsumer      `xml:"urn:oasis:names:tc:SAML:2.0:metadata AssertionConsumerService"`
 }
 
 type spMetadataKeyDescriptor struct {

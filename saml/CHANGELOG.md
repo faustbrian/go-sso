@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add opt-in SP metadata export for an installed IdP-initiated SAML
+  destination. The extra exact HTTP-POST ACS is non-default; ordinary SP
+  metadata continues to advertise only its existing default ACS.
+
 - Add a distinct signed IdP-initiated POST verifier that requires an exact
   derived destination, no request correlation fields, and a short signed
   issue-time window. It returns detached evidence and does not enable login.

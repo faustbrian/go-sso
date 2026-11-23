@@ -78,6 +78,140 @@ func TestExportSPMetadataPublishesExactSignedSPProfile(t *testing.T) {
 	}
 }
 
+func TestExportSPMetadataWithIDPInitiatedACSPreservesDefaultAndAddsDerivedDestination(t *testing.T) {
+	key := metadataRSAKey(t, 2048)
+	certificate := metadataCertificate(t, key, &key.PublicKey, 1)
+	for _, tc := range []struct {
+		origin, provider string
+	}{
+		{"https://identity.example", "acme"},
+		{"https://Identity.Example:9443", "Tenant_0123.-"},
+		{"https://[2001:db8::1]:9443", strings.Repeat("p", 128)},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			originalCertificate := bytes.Clone(certificate)
+			config := saml.SPMetadataConfig{
+				EntityID:             "HTTPS://identity.example/SP%2fexact?realm=one&service=saml",
+				AssertionConsumerURL: tc.origin + "/saml2/" + tc.provider + "/acs",
+				SigningCertificates:  [][]byte{certificate},
+			}
+			defaultXML, err := saml.ExportSPMetadata(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := saml.ExportSPMetadataWithIDPInitiatedACS(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document metadataElement
+			if err := xml.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			assertMetadataElement(t, document, metadataNamespace, "EntityDescriptor", map[string]string{"entityID": config.EntityID}, 1)
+			descriptor := document.Children[0]
+			assertMetadataElement(t, descriptor, metadataNamespace, "SPSSODescriptor", map[string]string{
+				"protocolSupportEnumeration": "urn:oasis:names:tc:SAML:2.0:protocol",
+				"AuthnRequestsSigned":        "true", "WantAssertionsSigned": "true",
+			}, 3)
+			assertMetadataElement(t, descriptor.Children[1], metadataNamespace, "AssertionConsumerService", map[string]string{
+				"Binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", "Location": config.AssertionConsumerURL,
+				"index": "0", "isDefault": "true",
+			}, 0)
+			idpURL := tc.origin + "/saml2/" + tc.provider + "/idp-init"
+			assertMetadataElement(t, descriptor.Children[2], metadataNamespace, "AssertionConsumerService", map[string]string{
+				"Binding": "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", "Location": idpURL,
+				"index": "1", "isDefault": "false",
+			}, 0)
+			additionalConsumer := `<AssertionConsumerService xmlns="` + metadataNamespace + `" Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="` + idpURL + `" index="1" isDefault="false"></AssertionConsumerService>`
+			withoutOptIn := strings.Replace(string(encoded), additionalConsumer, "", 1)
+			if withoutOptIn != string(defaultXML) {
+				t.Fatal("opt-in changed existing metadata bytes beyond the additional non-default ACS")
+			}
+			if !bytes.Equal(config.SigningCertificates[0], originalCertificate) {
+				t.Fatal("metadata export mutated caller certificate bytes")
+			}
+		})
+	}
+}
+
+func TestExportSPMetadataWithIDPInitiatedACSRejectsNoncanonicalSelectedRoute(t *testing.T) {
+	key := metadataRSAKey(t, 2048)
+	certificate := metadataCertificate(t, key, &key.PublicKey, 1)
+	for _, destination := range []string{
+		"", "http://identity.example/saml2/acme/acs", "HTTPS://identity.example/saml2/acme/acs",
+		"https://identity.example:/saml2/acme/acs", "https://identity.example:0/saml2/acme/acs",
+		"https://identity.example:65536/saml2/acme/acs", "https://identity.example:09443/saml2/acme/acs",
+		"https://user:secret@identity.example/saml2/acme/acs", "https://identity.example/saml2/acme/acs?",
+		"https://identity.example/saml2/acme/acs?provider=other", "https://identity.example/saml2/acme/acs#fragment",
+		"https://identity.example/acs", "https://identity.example/prefix/saml2/acme/acs",
+		"https://identity.example/saml2/acme/ACS", "https://identity.example/saml2/acme/acs/",
+		"https://identity.example/saml2/acme/idp-init", "https://identity.example/saml2/acme/slo",
+		"https://identity.example/saml2//acs", "https://identity.example/saml2/./acs",
+		"https://identity.example/saml2/../acs", "https://identity.example/saml2/one/two/acs",
+		"https://identity.example/saml2/%61cme/acs", "https://identity.example/saml2/acme%2fother/acs",
+		"https://identity.example/saml2/acme%252fother/acs", "https://identity.example/saml2/{provider}/acs",
+		"https://identity.example/saml2/acme\\other/acs", "https://identity.example/saml2/é/acs",
+		"https://identity.example/saml2/" + strings.Repeat("p", 129) + "/acs",
+	} {
+		config := saml.SPMetadataConfig{
+			EntityID: "https://identity.example/sp", AssertionConsumerURL: destination,
+			SigningCertificates: [][]byte{certificate},
+		}
+		encoded, err := saml.ExportSPMetadataWithIDPInitiatedACS(config)
+		if !errors.Is(err, saml.ErrInvalidInput) || encoded != nil {
+			t.Errorf("noncanonical selected ACS accepted: %q", destination)
+		}
+		if err != nil && strings.Contains(err.Error(), "user:secret") {
+			t.Fatal("invalid configuration leaked credential material")
+		}
+	}
+}
+
+func TestExportSPMetadataWithIDPInitiatedACSBoundsDerivedDestination(t *testing.T) {
+	key := metadataRSAKey(t, 2048)
+	certificate := metadataCertificate(t, key, &key.PublicKey, 1)
+	for _, length := range []int{2048, 2049} {
+		origin := "https://" + strings.Repeat("a", length-len("https:///saml2/acme/idp-init"))
+		encoded, err := saml.ExportSPMetadataWithIDPInitiatedACS(saml.SPMetadataConfig{
+			EntityID: "https://identity.example/sp", AssertionConsumerURL: origin + "/saml2/acme/acs",
+			SigningCertificates: [][]byte{certificate},
+		})
+		if length == 2048 && (err != nil || len(encoded) == 0) {
+			t.Fatal("rejected the derived destination at its exact byte limit", err)
+		}
+		if length > 2048 && (!errors.Is(err, saml.ErrInvalidInput) || encoded != nil) {
+			t.Fatal("accepted an oversized derived destination")
+		}
+	}
+}
+
+func TestExportSPMetadataWithIDPInitiatedACSRetainsConfigurationValidation(t *testing.T) {
+	key := metadataRSAKey(t, 2048)
+	certificate := metadataCertificate(t, key, &key.PublicKey, 1)
+	base := saml.SPMetadataConfig{
+		EntityID: "https://identity.example/sp", AssertionConsumerURL: "https://identity.example/saml2/acme/acs",
+		SigningCertificates: [][]byte{certificate},
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*saml.SPMetadataConfig)
+	}{
+		{"invalid entity", func(c *saml.SPMetadataConfig) { c.EntityID = "http://identity.example/sp" }},
+		{"absent certificates", func(c *saml.SPMetadataConfig) { c.SigningCertificates = nil }},
+		{"duplicate certificates", func(c *saml.SPMetadataConfig) { c.SigningCertificates = [][]byte{certificate, certificate} }},
+		{"malformed certificate", func(c *saml.SPMetadataConfig) { c.SigningCertificates = [][]byte{[]byte("invalid DER")} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := base
+			tc.change(&config)
+			encoded, err := saml.ExportSPMetadataWithIDPInitiatedACS(config)
+			if !errors.Is(err, saml.ErrInvalidInput) || encoded != nil {
+				t.Fatal("invalid metadata configuration accepted or returned usable bytes")
+			}
+		})
+	}
+}
+
 // OASIS Metadata 2.0 §§2.2.1–2.2.3 and the reference entity/URI bounds.
 func TestExportSPMetadataValidatesExactHTTPSConfiguration(t *testing.T) {
 	key := metadataRSAKey(t, 2048)
