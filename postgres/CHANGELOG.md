@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Expand shared login transaction custody for SAML without PKCE, preserving
+  populated OIDC and OAuth 2.0 rows and their original verifier rules.
+
 - Opt into explicit SAML provider routing with current verified domain proof
   and an installed signer whose certificate bounds the original route lifetime.
 

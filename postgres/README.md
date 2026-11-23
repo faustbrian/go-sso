@@ -78,6 +78,14 @@ expiry is no later than the matched certificate's expiry. A missing or
 ineligible provider does not fall back to an OIDC/OAuth provider or a default.
 This lookup emits neither browser state nor a redirect.
 
+Before installing a native SAML start writer, append both versions of
+`LoginTransactionSAMLProtocolMigrationSource` after the OAuth/OIDC login
+transaction protocol history and the SAML provider registry expansion. The
+shared transaction table still owns the original opaque state lookup and
+provider disposition. SAML rows cannot store PKCE material and have an
+original lifetime of at most five minutes. Existing OIDC/OAuth2 rows retain
+their original verifier rules and indexes. Keep the expansion on rollback.
+
 Install `SAMLReplayMigrationSource` after the native identity command and
 SSO provider migrations. Choose the next unused version in that migration
 history. Installation creates an empty table, bounds the foreign-key lock
