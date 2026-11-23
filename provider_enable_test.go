@@ -139,6 +139,31 @@ func TestOAuth2CredentialCheckpointRetainsProtocolAndOriginalLifetime(t *testing
 	}
 }
 
+func TestSAMLCredentialCheckpointPreservesProtocolScopeAndExpiry(t *testing.T) {
+	binding := enableCredentialBinding()
+	checkpoint, err := sso.NewSAMLCredentialCheckpoint(binding)
+	if err != nil || checkpoint.Protocol() != "saml" {
+		t.Fatal("SAML signer checkpoint did not preserve its protocol", err)
+	}
+	if got, err := checkpoint.Bindings(); err != nil || got != binding {
+		t.Fatal("SAML signer checkpoint changed its original authority metadata", err)
+	}
+	oidc, _ := sso.NewCredentialCheckpoint(binding)
+	oauth2, _ := sso.NewOAuth2CredentialCheckpoint(binding)
+	if checkpoint == oidc || checkpoint == oauth2 {
+		t.Fatal("SAML signer checkpoint aliased a client-secret profile")
+	}
+	request := enableRequest(t)
+	request.CredentialCheckpoint = checkpoint
+	if err := request.Validate(); err != nil {
+		t.Fatal("SAML signer checkpoint failed the common exact readiness shape", err)
+	}
+	binding.ExpiresAt = binding.ExpiresAt.Add(time.Microsecond)
+	if _, err := sso.NewSAMLCredentialCheckpoint(binding); !errors.Is(err, sso.ErrInvalidInput) {
+		t.Fatal("SAML signer checkpoint accepted a lifetime beyond twenty seconds", err)
+	}
+}
+
 func TestProviderEnableRequestValidatesShapeWithoutGrantingAuthority(t *testing.T) {
 	for _, method := range []organization.DomainMethod{organization.DomainDNS, organization.DomainHTTPS} {
 		request := enableRequest(t)

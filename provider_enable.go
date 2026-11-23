@@ -25,7 +25,7 @@ func (DomainProofCheckpoint) MarshalJSON() ([]byte, error) { return nil, ErrSens
 func (DomainProofCheckpoint) MarshalText() ([]byte, error) { return nil, ErrSensitiveSerialization }
 
 // CredentialCheckpointBinding is a detached, non-authoritative snapshot for the
-// enablement-only static client-secret checkpoint. IDs are exact 1..128
+// enablement-only provider credential checkpoint. IDs are exact 1..128
 // printable ASCII bytes. ProviderVersion is the current optimistic version;
 // Generation selects the active encrypted credential. Observation and exclusive
 // expiry must be UTC microseconds, with a positive lifetime of at most 20 seconds.
@@ -40,7 +40,7 @@ type CredentialCheckpointBinding struct {
 	ExpiresAt       time.Time
 }
 
-// CredentialCheckpoint is immutable, enablement-only static client-secret
+// CredentialCheckpoint is immutable, enablement-only provider credential
 // metadata. It contains no secret and grants no authority. Zero is invalid; copies
 // are safe for concurrent reads. Native admission must read the current encrypted
 // credential under the exact owner/version/generation and original lifetime.
@@ -61,6 +61,14 @@ func NewCredentialCheckpoint(b CredentialCheckpointBinding) (CredentialCheckpoin
 // does not check current credentials, authorization or provider ownership.
 func NewOAuth2CredentialCheckpoint(b CredentialCheckpointBinding) (CredentialCheckpoint, error) {
 	return newCredentialCheckpoint(b, "oauth2")
+}
+
+// NewSAMLCredentialCheckpoint selects the SAML SP-signing credential profile
+// without reading a clock, checking a certificate or granting authority.
+// Native enablement must revalidate the exact installed signer and its original
+// certificate cutoff; constructing a checkpoint cannot change that cutoff.
+func NewSAMLCredentialCheckpoint(b CredentialCheckpointBinding) (CredentialCheckpoint, error) {
+	return newCredentialCheckpoint(b, "saml")
 }
 
 func newCredentialCheckpoint(b CredentialCheckpointBinding, protocol string) (CredentialCheckpoint, error) {

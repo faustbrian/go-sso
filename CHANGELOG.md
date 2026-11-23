@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a distinct, bounded SAML SP-signer readiness checkpoint for native
+  provider activation without granting domain, configuration, or key authority.
+
 - Define a SAML SP-signing purpose for the encrypted credential-rotation
   reference, distinct from client secrets, and a local signer-validation port.
 
