@@ -32,7 +32,7 @@ const providerGrantRevocationReadSQL = `SELECT organization_id,provider_id,start
 FROM sso_providers.provider_login_token_sets
 WHERE tenant_id=$1 AND callback_command_id=$2 AND user_id=$3 AND origin_operation='identity.sso.oauth-callback'`
 
-func (p *providerGrantRevokePhase) readGrant(ctx context.Context) (b providerLoginStoredTokenBinding, ciphertext []byte, err error) {
+func (p *providerGrantPhase) readGrant(ctx context.Context) (b providerLoginStoredTokenBinding, ciphertext []byte, err error) {
 	start := p.service.completion.start
 	row := start.router.pool.Raw().QueryRow(ctx, providerGrantRevocationReadSQL, string(p.ref.TenantID), string(p.ref.CommandID), string(p.record.UserID))
 	var tenant, user, account, startID, callback string
@@ -68,7 +68,7 @@ func (p *providerGrantRevokePhase) readGrant(ctx context.Context) (b providerLog
 	return b, ciphertext, nil
 }
 
-func (p *providerGrantRevokePhase) matchesGrant(b providerLoginStoredTokenBinding) bool {
+func (p *providerGrantPhase) matchesGrant(b providerLoginStoredTokenBinding) bool {
 	_, err := b.aad()
 	return err == nil && b.Account.TenantID == p.ref.TenantID && b.Account.UserID == p.record.UserID &&
 		b.Callback == p.ref.CommandID && b.Organization == string(p.ref.OrganizationID) && b.Provider == string(p.ref.ProviderID) &&
@@ -76,7 +76,7 @@ func (p *providerGrantRevokePhase) matchesGrant(b providerLoginStoredTokenBindin
 		b.Version == p.ref.Version && b.ProviderVersion == p.record.Authentication.ProofVersion
 }
 
-func (p *providerGrantRevokePhase) newBinding(id identity.CommandID) identity.CommandBinding {
+func (p *providerGrantPhase) newBinding(id identity.CommandID) identity.CommandBinding {
 	op, start := p.registration().Operation, p.service.completion.start
 	return identity.CommandBinding{CommandID: id, TenantID: p.ref.TenantID, UserID: p.record.UserID, ActorID: identity.ActorID(p.record.UserID),
 		ActorKind: p.scope().ActorKind, PolicyID: start.config.PolicyID, PolicyVersion: start.policyVersion,
@@ -84,7 +84,7 @@ func (p *providerGrantRevokePhase) newBinding(id identity.CommandID) identity.Co
 		RecordID: string(p.ref.CommandID), CorrelationID: string(id)}
 }
 
-func (p *providerGrantRevokePhase) requestContext(k kernel.RequestKeyPreparationBinding) (envelope.Context, error) {
+func (p *providerGrantPhase) requestContext(k kernel.RequestKeyPreparationBinding) (envelope.Context, error) {
 	start := p.service.completion.start
 	if k.Feature != p.registration() || k.Scope != p.scope() || k.Namespace != start.config.RequestKeys.Namespace ||
 		k.PolicyVersion != start.policyVersion || k.IntentDigest == ([32]byte{}) || k.Admission.FingerprintKeyVersion == 0 ||
@@ -97,10 +97,14 @@ func (p *providerGrantRevokePhase) requestContext(k kernel.RequestKeyPreparation
 		return envelope.Context{}, identity.UnavailableError{}
 	}
 	digest := sha256.Sum256(wire)
-	return envelope.NewContext(map[string]string{"profile": "sso-provider-grant-revoke-request-v1", "binding": base64.RawURLEncoding.EncodeToString(digest[:])})
+	profile := "sso-provider-grant-revoke-request-v1"
+	if p.service.operation == providerGrantRefreshOperation {
+		profile = "sso-provider-grant-refresh-request-v1"
+	}
+	return envelope.NewContext(map[string]string{"profile": profile, "binding": base64.RawURLEncoding.EncodeToString(digest[:])})
 }
 
-func (p *providerGrantRevokePhase) PrepareRequestKey(ctx context.Context, k kernel.RequestKeyPreparationBinding, request identity.RequestIntent) ([]byte, error) {
+func (p *providerGrantPhase) PrepareRequestKey(ctx context.Context, k kernel.RequestKeyPreparationBinding, request identity.RequestIntent) ([]byte, error) {
 	aad, err := p.requestContext(k)
 	if err != nil {
 		return nil, err
@@ -138,7 +142,7 @@ func (p *providerGrantRevokePhase) PrepareRequestKey(ctx context.Context, k kern
 	return start.payload.seal(ctx, aad, wire, providerLoginRequestWireLimit)
 }
 
-func (p *providerGrantRevokePhase) restoreInput(ctx context.Context, k kernel.RequestKeyPreparationBinding, ciphertext []byte) error {
+func (p *providerGrantPhase) restoreInput(ctx context.Context, k kernel.RequestKeyPreparationBinding, ciphertext []byte) error {
 	aad, err := p.requestContext(k)
 	if err != nil {
 		return err

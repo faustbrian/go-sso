@@ -109,6 +109,9 @@ func (c *providerWireConn) Write(p []byte) (int, error) {
 			values := make([][]byte, len(bind.Parameters))
 			for i, parameter := range bind.Parameters {
 				values[i] = append([]byte(nil), parameter...)
+				if parameter == nil {
+					continue
+				}
 				format := int16(0)
 				if len(bind.ParameterFormatCodes) == 1 {
 					format = bind.ParameterFormatCodes[0]

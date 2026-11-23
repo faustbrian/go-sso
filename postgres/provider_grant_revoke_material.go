@@ -44,26 +44,47 @@ func providerGrantRevocationEpochArgs(binding providerLoginStoredTokenBinding) [
 func (s *ProviderLoginService) revokeProviderGrantWithInstalledCredential(ctx context.Context, binding providerLoginStoredTokenBinding, ciphertext []byte,
 	attempt identity.CommandID, generation uint64, transport StaticOAuth2CompletionProfile, endpoint string,
 ) (providerGrantRevocationOutcome, error) {
-	if ctx == nil || s == nil || s.router == nil || s.router.pool == nil || s.router.pool.Raw() == nil ||
-		s.router.config.Clock == nil || s.router.config.Envelope == nil || !s.router.protocolRegistry ||
-		binding.Account.TenantID != s.config.TenantID {
+	if endpoint == "" {
 		return "", identity.ForbiddenError{}
 	}
-	if err := ctx.Err(); err != nil {
+	var outcome providerGrantRevocationOutcome
+	err := s.withInstalledOAuth2GrantProvider(ctx, binding, transport, endpoint, func(ctx context.Context, provider *oauth.SharedOAuth2UserInfoProvider) error {
+		var err error
+		outcome, err = s.revokeProviderGrant(ctx, binding, ciphertext, attempt, generation, provider, endpoint)
+		return err
+	})
+	if err != nil {
 		return "", err
 	}
+	return outcome, nil
+}
+
+// The provider and its installed credential are borrowed only inside the
+// synchronous call. A refresh uses the already checked token endpoint; a
+// revoke must additionally supply its exact registered revocation endpoint.
+func (s *ProviderLoginService) withInstalledOAuth2GrantProvider(ctx context.Context, binding providerLoginStoredTokenBinding,
+	transport StaticOAuth2CompletionProfile, revocationEndpoint string, use func(context.Context, *oauth.SharedOAuth2UserInfoProvider) error,
+) error {
+	if ctx == nil || s == nil || s.router == nil || s.router.pool == nil || s.router.pool.Raw() == nil ||
+		s.router.config.Clock == nil || s.router.config.Envelope == nil || !s.router.protocolRegistry ||
+		binding.Account.TenantID != s.config.TenantID || use == nil {
+		return identity.ForbiddenError{}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if _, err := binding.aad(); err != nil {
-		return "", err
+		return err
 	}
 	selected, ok := s.oauthProfiles[providerLoginProfileKey{
 		organization: organization.ID(binding.Organization), provider: sso.ProviderID(binding.Provider),
 	}]
 	if !ok {
-		return "", identity.ForbiddenError{}
+		return identity.ForbiddenError{}
 	}
 	original, err := providerGrantRevocationProfileInput(binding, selected, transport)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	var stored providerEnableStored
@@ -73,32 +94,31 @@ func (s *ProviderLoginService) revokeProviderGrantWithInstalledCredential(ctx co
 		clear(stored.credentialContext)
 	}()
 	if err := stored.scan(s.router.pool.Raw().QueryRow(ctx, providerGrantRevocationMaterialSQL, providerGrantRevocationEpochArgs(binding)...)); err != nil {
-		return "", providerError(ctx, err)
+		return providerError(ctx, err)
 	}
 	if !stored.enabled || stored.pending != 1 || stored.version != strconv.FormatUint(binding.ProviderVersion, 10) ||
 		stored.mapping != strconv.FormatUint(binding.MappingVersion, 10) || stored.generation != strconv.FormatUint(binding.CredentialGeneration, 10) {
-		return "", identity.ForbiddenError{}
+		return identity.ForbiddenError{}
 	}
 	installed, err := strconv.ParseUint(stored.credentialVersion, 10, 64)
 	if err != nil {
-		return "", sso.ErrUnavailable
+		return sso.ErrUnavailable
 	}
 	if err := validateProviderOAuth2CallbackCredential(original, installed, stored.credential, stored.credentialContext); err != nil {
-		return "", err
+		return err
 	}
 	configuration, err := openProviderOAuth2CallbackConfiguration(ctx, s.router.config.Envelope, original, stored.version, stored.configuration)
 	if err != nil {
-		return "", err
+		return err
 	}
 	if err := validateProviderOAuth2ExchangeProfile(original, selected, transport, configuration); err != nil {
-		return "", err
+		return err
 	}
-	if endpoint == "" || configuration.RevocationEndpoint != endpoint {
-		return "", identity.ForbiddenError{}
+	if revocationEndpoint != "" && configuration.RevocationEndpoint != revocationEndpoint {
+		return identity.ForbiddenError{}
 	}
 
-	var outcome providerGrantRevocationOutcome
-	err = withAuthenticatedProtocolProviderCredential(ctx, s.router.config.Envelope, providerProtocolOAuth2,
+	return withAuthenticatedProtocolProviderCredential(ctx, s.router.config.Envelope, providerProtocolOAuth2,
 		string(binding.Account.TenantID), binding.Organization, binding.Provider,
 		stored.credential, stored.credentialContext, binding.CredentialGeneration, installed,
 		func(ctx context.Context, secret []byte) error {
@@ -113,13 +133,8 @@ func (s *ProviderLoginService) revokeProviderGrantWithInstalledCredential(ctx co
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			outcome, err = s.revokeProviderGrant(ctx, binding, ciphertext, attempt, generation, provider, endpoint)
-			return err
+			return use(ctx, provider)
 		})
-	if err != nil {
-		return "", err
-	}
-	return outcome, nil
 }
 
 // Reuse the authenticated configuration codec without reconstructing a login

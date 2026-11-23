@@ -20,10 +20,11 @@ import (
 )
 
 const providerGrantRevocationSettled = "enterprise_provider.token_revocation_settled.v1"
+const providerGrantRefreshSettled = "enterprise_provider.token_refresh_settled.v1"
 const providerGrantRevocationSubject = "provider_grant"
 
-type providerGrantRevokePhase struct {
-	service     *ProviderGrantRevocationService
+type providerGrantPhase struct {
+	service     *providerGrantService
 	observed    session.GetResult
 	record      session.SessionSpec
 	ref         sso.TokenVersionSpec
@@ -38,42 +39,53 @@ type providerGrantRevokePhase struct {
 	plan        kernel.CommandPlan
 }
 
-var _ kernel.RequestKeyPreparationContributor = (*providerGrantRevokePhase)(nil)
-var _ kernel.FeatureAdmissionPreparationContributor = (*providerGrantRevokePhase)(nil)
-var _ kernel.FeatureCommitContributor = (*providerGrantRevokePhase)(nil)
+var _ kernel.RequestKeyPreparationContributor = (*providerGrantPhase)(nil)
+var _ kernel.FeatureAdmissionPreparationContributor = (*providerGrantPhase)(nil)
+var _ kernel.FeatureCommitContributor = (*providerGrantPhase)(nil)
 
-func (p *providerGrantRevokePhase) binding() identity.CommandBinding {
+func (p *providerGrantPhase) binding() identity.CommandBinding {
 	return identity.CommandBinding(p.input.Command)
 }
 
-func (*providerGrantRevokePhase) Descriptor() kernel.ContributorDescriptor {
+func (*providerGrantPhase) Descriptor() kernel.ContributorDescriptor {
 	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.enterprise-token-vault", Version: 1}
 }
 
-func (p *providerGrantRevokePhase) FeatureOperations() []identity.FeatureOperation {
+func (p *providerGrantPhase) FeatureOperations() []identity.FeatureOperation {
 	return []identity.FeatureOperation{p.registration().Operation}
 }
 
-func (p *providerGrantRevokePhase) registration() kernel.FeatureRegistration {
+func (p *providerGrantPhase) registration() kernel.FeatureRegistration {
+	if p.service.operation == providerGrantRefreshOperation {
+		return kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: kernel.SSOEnterpriseGrantRefreshOperation()}
+	}
 	return kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: identity.FeatureOperation{
 		Owner: "sso", OperationID: providerGrantRevokeOperation, SchemaID: providerGrantRevokeOperation + ".native-v1",
 		SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired,
 	}}
 }
 
-func (*providerGrantRevokePhase) lifecycle() kernel.LifecyclePlan {
+func (p *providerGrantPhase) lifecycle() kernel.LifecyclePlan {
 	// The immutable settlement record is being created; its version is not a
 	// new token generation and says nothing about provider success.
-	return kernel.LifecyclePlan{EventType: providerGrantRevocationSettled, BeforeVersion: 0, AfterVersion: 1}
+	eventType := providerGrantRevocationSettled
+	if p.service.operation == providerGrantRefreshOperation {
+		eventType = providerGrantRefreshSettled
+	}
+	return kernel.LifecyclePlan{EventType: eventType, BeforeVersion: 0, AfterVersion: 1}
 }
 
-func (p *providerGrantRevokePhase) declare(registry *kernel.ContributorRegistry) (kernel.CommandPlan, error) {
+func (p *providerGrantPhase) declare(registry *kernel.ContributorRegistry) (kernel.CommandPlan, error) {
 	b, feature, lifecycle := p.binding(), p.registration(), p.lifecycle()
-	builder, err := audit.NewBuilder(audit.BuilderConfig{IDGenerator: func() (string, error) { return "sso-grant-revoke-declaration", nil }})
+	id := "sso-grant-revoke-declaration"
+	if p.service.operation == providerGrantRefreshOperation {
+		id = "sso-grant-refresh-declaration"
+	}
+	builder, err := audit.NewBuilder(audit.BuilderConfig{IDGenerator: func() (string, error) { return id, nil }})
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
-	record, err := builder.Build(audit.RecordInput{Action: providerGrantRevokeOperation, OccurredAt: p.input.StartedAt,
+	record, err := builder.Build(audit.RecordInput{Action: p.service.operation, OccurredAt: p.input.StartedAt,
 		Outcome: audit.OutcomeSucceeded, ReasonCode: "completed", Actor: audit.ActorInput{Kind: audit.ActorHuman, ID: string(b.ActorID)},
 		Subject: audit.SubjectInput{Type: providerGrantRevocationSubject, ID: b.RecordID},
 		Context: audit.ContextInput{TenantID: string(b.TenantID), CorrelationID: b.CorrelationID},
@@ -91,12 +103,12 @@ func (p *providerGrantRevokePhase) declare(registry *kernel.ContributorRegistry)
 		return kernel.CommandPlan{}, err
 	}
 	return kernel.CommandPlan{Contributors: registry.Descriptors(), SubjectType: providerGrantRevocationSubject, Feature: &feature, Lifecycle: &lifecycle,
-		Audits: []kernel.AuditPlan{{EventType: providerGrantRevokeOperation, SchemaVersion: 1, BindingDigest: digest, RetentionClass: "protected",
+		Audits: []kernel.AuditPlan{{EventType: p.service.operation, SchemaVersion: 1, BindingDigest: digest, RetentionClass: "protected",
 			RetentionPolicyVersion: p.service.completion.start.config.AuditRetentionPolicyVersion, RequiredRecordCount: 1, Required: true,
 			MaxRecordBytes: 16384, MaxAggregateBytes: 16384}}}, nil
 }
 
-func (p *providerGrantRevokePhase) ValidateFeatureCommand(command identity.Command, plan kernel.CommandPlan) error {
+func (p *providerGrantPhase) ValidateFeatureCommand(command identity.Command, plan kernel.CommandPlan) error {
 	if p.inputDigest == ([32]byte{}) || command != p.command {
 		return identity.ForbiddenError{}
 	}
@@ -107,14 +119,14 @@ func (p *providerGrantRevokePhase) ValidateFeatureCommand(command identity.Comma
 	return nil
 }
 
-func (p *providerGrantRevokePhase) ValidateFeaturePreparation(command identity.Command, plan kernel.CommandPlan) error {
+func (p *providerGrantPhase) ValidateFeaturePreparation(command identity.Command, plan kernel.CommandPlan) error {
 	if plan.Feature == nil || plan.Capability != nil || plan.CapabilityIssuance != nil || plan.Delivery != nil {
 		return identity.ForbiddenError{}
 	}
 	return p.ValidateFeatureCommand(command, plan)
 }
 
-func (p *providerGrantRevokePhase) checkOriginal(ctx context.Context) error {
+func (p *providerGrantPhase) checkOriginal(ctx context.Context) error {
 	if ctx == nil {
 		return identity.ForbiddenError{}
 	}
@@ -130,11 +142,11 @@ func (p *providerGrantRevokePhase) checkOriginal(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (p *providerGrantRevokePhase) AdmitFeaturePreparation(ctx context.Context, w kernel.Work, command identity.Command) error {
+func (p *providerGrantPhase) AdmitFeaturePreparation(ctx context.Context, w kernel.Work, command identity.Command) error {
 	return p.requireCurrent(ctx, w, command)
 }
 
-func (p *providerGrantRevokePhase) requireCurrent(ctx context.Context, w kernel.Work, command identity.Command) error {
+func (p *providerGrantPhase) requireCurrent(ctx context.Context, w kernel.Work, command identity.Command) error {
 	if err := p.ValidateFeatureCommand(command, kernel.CommandPlan{}); err != nil {
 		return err
 	}
@@ -173,7 +185,11 @@ func (p *providerGrantRevokePhase) requireCurrent(ctx context.Context, w kernel.
 	}); err != nil {
 		return err
 	}
-	if err := mfapg.RequireSSOOAuth2GrantRevocationFactors(ctx, w, p, command, p.original); err != nil {
+	requireFactors := mfapg.RequireSSOOAuth2GrantRevocationFactors
+	if p.service.operation == providerGrantRefreshOperation {
+		requireFactors = mfapg.RequireSSOOAuth2GrantRefreshFactors
+	}
+	if err := requireFactors(ctx, w, p, command, p.original); err != nil {
 		return err
 	}
 	if err := sessionpg.RequireCSRF(ctx, w, start.config.Session, p.original, p.browser.CSRF, p.service.completion.csrfKey); err != nil {
@@ -200,22 +216,22 @@ func (p *providerGrantRevokePhase) requireCurrent(ctx context.Context, w kernel.
 	return p.checkOriginal(ctx)
 }
 
-func (p *providerGrantRevokePhase) PrepareFeatureAdmission(ctx context.Context, command identity.Command) (kernel.FeaturePreparationAdmission, error) {
+func (p *providerGrantPhase) PrepareFeatureAdmission(ctx context.Context, command identity.Command) (kernel.FeaturePreparationAdmission, error) {
 	return p, p.ValidateFeatureCommand(command, kernel.CommandPlan{})
 }
 
-func (p *providerGrantRevokePhase) RestoreFeatureAdmission(ctx context.Context, command identity.Command, generation uint64, ciphertext []byte) (kernel.FeaturePreparationAdmission, error) {
+func (p *providerGrantPhase) RestoreFeatureAdmission(ctx context.Context, command identity.Command, generation uint64, ciphertext []byte) (kernel.FeaturePreparationAdmission, error) {
 	_, _, err := p.RestoreFeaturePreparation(ctx, command, generation, ciphertext)
 	return p, err
 }
 
-func (p *providerGrantRevokePhase) Check(ctx context.Context) error { return p.checkOriginal(ctx) }
+func (p *providerGrantPhase) Check(ctx context.Context) error { return p.checkOriginal(ctx) }
 
-func (*providerGrantRevokePhase) GenerateFeaturePreparation(context.Context, identity.Command, uint64) ([]byte, error) {
+func (*providerGrantPhase) GenerateFeaturePreparation(context.Context, identity.Command, uint64) ([]byte, error) {
 	return nil, identity.ForbiddenError{}
 }
 
-func (p *providerGrantRevokePhase) Generate(ctx context.Context, generation uint64) ([]byte, error) {
+func (p *providerGrantPhase) Generate(ctx context.Context, generation uint64) ([]byte, error) {
 	if err := p.checkOriginal(ctx); err != nil {
 		return nil, err
 	}
@@ -232,6 +248,9 @@ func (p *providerGrantRevokePhase) Generate(ctx context.Context, generation uint
 		return nil, err
 	}
 	transport := p.service.completion.profiles[providerLoginProfileKey{p.ref.OrganizationID, p.ref.ProviderID}]
+	if p.service.operation == providerGrantRefreshOperation {
+		return p.generateRefreshPreparation(ctx, aad, grant, ciphertext, generation, transport)
+	}
 	outcome, err := start.revokeProviderGrantWithInstalledCredential(ctx, grant, ciphertext, p.binding().CommandID, generation, transport, p.endpoint)
 	if err != nil {
 		return nil, err
@@ -239,19 +258,23 @@ func (p *providerGrantRevokePhase) Generate(ctx context.Context, generation uint
 	return p.service.outcomes.seal(ctx, aad, []byte(outcome), 4096)
 }
 
-func (p *providerGrantRevokePhase) outcomeContext(generation uint64) (envelope.Context, error) {
+func (p *providerGrantPhase) outcomeContext(generation uint64) (envelope.Context, error) {
 	if generation == 0 || p.inputDigest == ([32]byte{}) {
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
 	b := p.binding()
+	profile := "sso-provider-grant-revoke-outcome-v1"
+	if p.service.operation == providerGrantRefreshOperation {
+		profile = "sso-provider-grant-refresh-outcome-v1"
+	}
 	return envelope.NewContext(map[string]string{
-		"profile": "sso-provider-grant-revoke-outcome-v1", "tenant": string(b.TenantID), "attempt": string(b.CommandID),
+		"profile": profile, "tenant": string(b.TenantID), "attempt": string(b.CommandID),
 		"grant": b.RecordID, "generation": strconv.FormatUint(generation, 10),
 		"input": base64.RawURLEncoding.EncodeToString(p.inputDigest[:]),
 	})
 }
 
-func (p *providerGrantRevokePhase) openOutcome(ctx context.Context, g uint64, ciphertext []byte) (providerGrantRevocationReceipt, error) {
+func (p *providerGrantPhase) openOutcome(ctx context.Context, g uint64, ciphertext []byte) (providerGrantRevocationReceipt, error) {
 	aad, err := p.outcomeContext(g)
 	if err != nil {
 		return providerGrantRevocationReceipt{}, err
@@ -271,17 +294,17 @@ func (p *providerGrantRevokePhase) openOutcome(ctx context.Context, g uint64, ci
 	return r, nil
 }
 
-func (p *providerGrantRevokePhase) RestoreFeaturePreparation(ctx context.Context, command identity.Command, generation uint64, ciphertext []byte) (identity.Command, kernel.CommandPlan, error) {
+func (p *providerGrantPhase) RestoreFeaturePreparation(ctx context.Context, command identity.Command, generation uint64, ciphertext []byte) (identity.Command, kernel.CommandPlan, error) {
 	if err := p.ValidateFeatureCommand(command, p.plan); err != nil {
 		return identity.Command{}, kernel.CommandPlan{}, err
 	}
-	if _, err := p.openOutcome(ctx, generation, ciphertext); err != nil {
+	if err := p.validatePreparedOutcome(ctx, generation, ciphertext); err != nil {
 		return identity.Command{}, kernel.CommandPlan{}, err
 	}
 	return command, p.plan, nil
 }
 
-func (p *providerGrantRevokePhase) ApplyFeature(ctx context.Context, w kernel.Work, command identity.Command) (identity.FeatureReceipt, error) {
+func (p *providerGrantPhase) ApplyFeature(ctx context.Context, w kernel.Work, command identity.Command) (identity.FeatureReceipt, error) {
 	if err := w.RequireFeatureCommand(ctx, p, command); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
@@ -293,32 +316,52 @@ func (p *providerGrantRevokePhase) ApplyFeature(ctx context.Context, w kernel.Wo
 	if err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	receipt, err := p.openOutcome(ctx, generation, wire)
-	if err != nil {
-		return identity.FeatureReceipt{}, err
-	}
-	if err := settleProviderGrantRevocation(ctx, w, receipt, p.input.CiphertextDigest); err != nil {
+	if err := p.settleOutcome(ctx, w, generation, wire); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
 	return identity.FeatureReceipt{Operation: p.registration().Operation, AfterVersion: 1}, nil
 }
 
-func (p *providerGrantRevokePhase) CheckFeatureCommit(ctx context.Context, w kernel.Work, command identity.Command) error {
+func (p *providerGrantPhase) validatePreparedOutcome(ctx context.Context, generation uint64, wire []byte) error {
+	if p.service.operation == providerGrantRefreshOperation {
+		prepared, err := p.openRefreshPreparation(ctx, generation, wire)
+		prepared.clear()
+		return err
+	}
+	_, err := p.openOutcome(ctx, generation, wire)
+	return err
+}
+
+func (p *providerGrantPhase) settleOutcome(ctx context.Context, w kernel.Work, generation uint64, wire []byte) error {
+	if p.service.operation == providerGrantRefreshOperation {
+		return p.settleRefreshOutcome(ctx, w, generation, wire)
+	}
+	receipt, err := p.openOutcome(ctx, generation, wire)
+	if err != nil {
+		return err
+	}
+	return settleProviderGrantRevocation(ctx, w, receipt, p.input.CiphertextDigest)
+}
+
+func (p *providerGrantPhase) CheckFeatureCommit(ctx context.Context, w kernel.Work, command identity.Command) error {
 	return p.requireCurrent(ctx, w, command)
 }
 
-func (p *providerGrantRevokePhase) matchesReceipt(r providerGrantRevocationReceipt) bool {
+func (p *providerGrantPhase) matchesReceipt(r providerGrantRevocationReceipt) bool {
 	b := p.binding()
 	return r.valid() && r.Tenant == b.TenantID && r.User == b.UserID && r.Callback == p.ref.CommandID &&
 		r.Attempt == b.CommandID && r.Version == p.ref.Version && r.IntentDigest == p.intent
 }
 
-func (p *providerGrantRevokePhase) RecoverParticipant(ctx context.Context, w kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
+func (p *providerGrantPhase) RecoverParticipant(ctx context.Context, w kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
 	b, feature, life, err := w.FeatureScope(p)
 	if err != nil || b != p.binding() || feature != p.registration() || life != p.lifecycle() {
 		return kernel.RecoveryUnknown, identity.ForbiddenError{}
 	}
 	attempt, _ := base64.RawURLEncoding.Strict().DecodeString(string(b.CommandID))
+	if p.service.operation == providerGrantRefreshOperation {
+		return p.recoverRefreshOutcome(ctx, w, attempt)
+	}
 	rows, err := w.Query(ctx, readProviderGrantRevocationReceiptSQL, string(b.TenantID), string(b.UserID), attempt)
 	if err != nil {
 		return kernel.RecoveryUnknown, err

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add opt-in native grant refresh for linked enterprise OAuth2 members. Use
+  one provider attempt per generation, commit the encrypted successor and
+  receipt together, and recover the original result without resending.
+
 - Add optional forward-only schema for enterprise OAuth2 refresh generations
   and safe outcome history. Applying it alone does not enable refresh.
 

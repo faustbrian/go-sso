@@ -69,11 +69,14 @@ type ProviderGrantRevocationResult struct {
 	LocalErased     bool
 }
 
-type ProviderGrantRevocationService struct {
+type ProviderGrantRevocationService struct{ native *providerGrantService }
+
+type providerGrantService struct {
 	completion *ProviderOAuth2LoginCompletionService
 	sessions   *session.SessionService
 	endpoints  map[providerLoginProfileKey]string
 	outcomes   providerLoginPayloadConfig
+	operation  string
 }
 
 // NewProviderGrantRevocationService selects native revocation for existing
@@ -104,23 +107,43 @@ func NewProviderGrantRevocationService(login *ProviderOAuth2LoginCompletionServi
 		}
 		endpoints[key] = endpoint.URL
 	}
+	native, err := newProviderGrantService(login, cfg.Session, endpoints, providerGrantRevokeOperation)
+	if err != nil {
+		return nil, err
+	}
+	return &ProviderGrantRevocationService{native: native}, nil
+}
+
+func newProviderGrantService(login *ProviderOAuth2LoginCompletionService, cfg session.ServiceConfig,
+	endpoints map[providerLoginProfileKey]string, operation string,
+) (*providerGrantService, error) {
+	label := "sso-provider-grant-revoke-outcome-key-v1/"
+	switch operation {
+	case providerGrantRevokeOperation:
+	case providerGrantRefreshOperation:
+		label = "sso-provider-grant-refresh-outcome-key-v1/"
+	default:
+		return nil, sso.ErrInvalidInput
+	}
+	start := login.start
+	cfg.Clock = start.router.config.Clock
 	reader, err := sessionpg.NewSelectedSessionServiceWithSSOOAuth2(start.router.pool,
-		sessionpg.SelectedSessionServiceConfig{Repository: start.config.Session, Validation: cfg.Session},
+		sessionpg.SelectedSessionServiceConfig{Repository: start.config.Session, Validation: cfg},
 		sessionpg.SSOOAuth2SessionAdmission{Profile: login.policy, Authority: start.router.organizations})
 	if err != nil {
 		return nil, sso.ErrInvalidInput
 	}
-	outcomes, err := localProviderGrantRevocationOutcomes(start.payload.StateKeys, start.payload.CurrentStateKey)
+	outcomes, err := localProviderGrantOutcomes(start.payload.StateKeys, start.payload.CurrentStateKey, label)
 	if err != nil {
 		return nil, err
 	}
-	return &ProviderGrantRevocationService{completion: login, sessions: reader, endpoints: endpoints, outcomes: outcomes}, nil
+	return &providerGrantService{completion: login, sessions: reader, endpoints: endpoints, outcomes: outcomes, operation: operation}, nil
 }
 
 // Restore and final Work must not call a remote key provider. Derive a
 // distinct local wrapping key from each already-retained state key, whose
-// retention also covers the revocation preparation's shorter lifetime.
-func localProviderGrantRevocationOutcomes(stateKeys map[uint32][32]byte, current uint32) (providerLoginPayloadConfig, error) {
+// retention covers these preparations' shorter lifetime.
+func localProviderGrantOutcomes(stateKeys map[uint32][32]byte, current uint32, label string) (providerLoginPayloadConfig, error) {
 	keys := make(map[string][]byte, len(stateKeys))
 	defer func() {
 		for _, key := range keys {
@@ -129,7 +152,7 @@ func localProviderGrantRevocationOutcomes(stateKeys map[uint32][32]byte, current
 	}()
 	for version, stateKey := range stateKeys {
 		ref := strconv.FormatUint(uint64(version), 10)
-		key, err := hkdf.Key(sha256.New, stateKey[:], nil, "sso-provider-grant-revoke-outcome-key-v1/"+ref, envelope.DataKeySize)
+		key, err := hkdf.Key(sha256.New, stateKey[:], nil, label+ref, envelope.DataKeySize)
 		clear(stateKey[:])
 		if err != nil {
 			return providerLoginPayloadConfig{}, sso.ErrInvalidInput
@@ -151,74 +174,81 @@ func localProviderGrantRevocationOutcomes(stateKeys map[uint32][32]byte, current
 // Reuse the exact request key. A competing key cannot resend a fenced grant;
 // an ambiguous call does not represent provider success or local removal.
 func (s *ProviderGrantRevocationService) Revoke(ctx context.Context, request sso.RevokeEnterpriseToken, browser ProviderGrantRevocationBrowser) (ProviderGrantRevocationResult, error) {
-	if ctx == nil || s == nil || s.completion == nil || s.sessions == nil {
+	if ctx == nil || s == nil || s.native == nil {
 		return ProviderGrantRevocationResult{}, sso.ErrInvalidInput
 	}
 	grant, key, err := request.Bindings()
 	if err != nil {
 		return ProviderGrantRevocationResult{}, err
 	}
-	ref, err := grant.Spec()
-	if err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	start := s.completion.start
-	ctx, cancel := context.WithTimeout(ctx, start.config.Coordinator.MaximumDuration)
+	ctx, cancel := context.WithTimeout(ctx, s.native.completion.start.config.Coordinator.MaximumDuration)
 	defer cancel()
-	p, err := s.admit(ctx, ref, browser)
-	if err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	coord, registry, err := p.coordinator()
-	if err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	intent, err := identity.NewRequestIntent([]identity.FeatureField{revokeBytes("sso.vault.intent", p.intent[:])})
-	if err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	k, wire, err := coord.ResolvePreparedRequestKey(ctx, p.scope(), key, intent, p.caller("identity.request-admission", providerGrantRevokeOperation), p.registration(), p)
-	defer clear(wire)
-	if err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	if err := p.restoreInput(ctx, k, wire); err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	record, err := p.queryCommand(ctx, coord)
-	if err == nil && record.Outcome == identity.CommitOutcomeCommitted {
-		return p.result(ctx, record)
-	}
-	var hidden identity.ForbiddenError
-	if err != nil && !errors.As(err, &hidden) {
-		return ProviderGrantRevocationResult{}, err
-	}
-	if (record.Binding.CommandID != "" && record.Outcome != identity.CommitOutcomeInProgress) || p.checkOriginal(ctx) != nil {
-		return ProviderGrantRevocationResult{}, identity.UnknownCommitError{CommandID: p.binding().CommandID}
-	}
-	p.plan, err = p.declare(registry)
-	if err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	p.plan, err = coord.PrepareFeaturePreparationPlan(p.command, p.plan)
-	if err != nil {
-		return ProviderGrantRevocationResult{}, err
-	}
-	out, err := coord.ExecutePreparedFeature(ctx, p.command, p.plan)
-	if err != nil || out.Outcome != identity.CommitOutcomeCommitted {
-		if err != nil && out.Outcome == 0 {
-			return ProviderGrantRevocationResult{}, err
-		}
-		return ProviderGrantRevocationResult{}, identity.UnknownCommitError{CommandID: p.binding().CommandID}
-	}
-	record, err = p.queryCommand(ctx, coord)
+	p, record, err := s.native.execute(ctx, grant, key, browser)
 	if err != nil {
 		return ProviderGrantRevocationResult{}, err
 	}
 	return p.result(ctx, record)
 }
 
-func (s *ProviderGrantRevocationService) admit(ctx context.Context, ref sso.TokenVersionSpec, browser ProviderGrantRevocationBrowser) (*providerGrantRevokePhase, error) {
+func (s *providerGrantService) execute(ctx context.Context, grant sso.TokenVersion, key identity.IdempotencyKey, browser ProviderGrantRevocationBrowser) (*providerGrantPhase, kernel.CommandRecord, error) {
+	ref, err := grant.Spec()
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	p, err := s.admit(ctx, ref, browser)
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	coord, registry, err := p.coordinator()
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	intent, err := identity.NewRequestIntent([]identity.FeatureField{revokeBytes("sso.vault.intent", p.intent[:])})
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	k, wire, err := coord.ResolvePreparedRequestKey(ctx, p.scope(), key, intent, p.caller("identity.request-admission", s.operation), p.registration(), p)
+	defer clear(wire)
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	if err := p.restoreInput(ctx, k, wire); err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	record, err := p.queryCommand(ctx, coord)
+	if err == nil && record.Outcome == identity.CommitOutcomeCommitted {
+		return p, record, nil
+	}
+	var hidden identity.ForbiddenError
+	if err != nil && !errors.As(err, &hidden) {
+		return nil, kernel.CommandRecord{}, err
+	}
+	if (record.Binding.CommandID != "" && record.Outcome != identity.CommitOutcomeInProgress) || p.checkOriginal(ctx) != nil {
+		return nil, kernel.CommandRecord{}, identity.UnknownCommitError{CommandID: p.binding().CommandID}
+	}
+	p.plan, err = p.declare(registry)
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	p.plan, err = coord.PrepareFeaturePreparationPlan(p.command, p.plan)
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	out, err := coord.ExecutePreparedFeature(ctx, p.command, p.plan)
+	if err != nil || out.Outcome != identity.CommitOutcomeCommitted {
+		if err != nil && out.Outcome == 0 {
+			return nil, kernel.CommandRecord{}, err
+		}
+		return nil, kernel.CommandRecord{}, identity.UnknownCommitError{CommandID: p.binding().CommandID}
+	}
+	record, err = p.queryCommand(ctx, coord)
+	if err != nil {
+		return nil, kernel.CommandRecord{}, err
+	}
+	return p, record, nil
+}
+
+func (s *providerGrantService) admit(ctx context.Context, ref sso.TokenVersionSpec, browser ProviderGrantRevocationBrowser) (*providerGrantPhase, error) {
 	start := s.completion.start
 	endpoint := s.endpoints[providerLoginProfileKey{ref.OrganizationID, ref.ProviderID}]
 	if ref.TenantID != start.config.TenantID || endpoint == "" || browser.Origin != start.config.Origin {
@@ -258,28 +288,28 @@ func (s *ProviderGrantRevocationService) admit(ctx context.Context, ref sso.Toke
 	if err != nil {
 		return nil, sso.ErrUnavailable
 	}
-	return &providerGrantRevokePhase{service: s, observed: observed, record: spec, ref: ref, endpoint: endpoint,
+	return &providerGrantPhase{service: s, observed: observed, record: spec, ref: ref, endpoint: endpoint,
 		browser: browser, started: now, intent: sha256.Sum256(wire)}, nil
 }
 
 // TokenVersionSpec's public serialization intentionally denies this projection.
 type providerGrantTokenVersionWire sso.TokenVersionSpec
 
-func (p *providerGrantRevokePhase) scope() kernel.RequestKeyScope {
+func (p *providerGrantPhase) scope() kernel.RequestKeyScope {
 	return kernel.RequestKeyScope{TenantID: p.record.TenantID, ActorID: identity.ActorID(p.record.UserID),
-		ActorKind: authorization.SubjectUser, Method: "POST", RouteID: providerGrantRevokeOperation}
+		ActorKind: authorization.SubjectUser, Method: "POST", RouteID: p.service.operation}
 }
 
-func (p *providerGrantRevokePhase) caller(resource authorization.ResourceType, id string) authorization.DecisionContext {
+func (p *providerGrantPhase) caller(resource authorization.ResourceType, id string) authorization.DecisionContext {
 	return authorization.DecisionContext{PolicyRevision: authorization.Revision(p.service.completion.start.policyVersion), Request: authorization.Request{
-		Tenant: authorization.TenantID(p.record.TenantID), Action: providerGrantRevokeOperation,
+		Tenant: authorization.TenantID(p.record.TenantID), Action: authorization.Action(p.service.operation),
 		Subject:     authorization.Subject{Kind: authorization.SubjectUser, ID: authorization.SubjectID(p.record.UserID)},
 		Resource:    authorization.Resource{Type: resource, ID: authorization.ResourceID(id)},
 		Environment: authorization.Environment{Time: p.started},
 	}}
 }
 
-func (p *providerGrantRevokePhase) coordinator() (*kernel.Coordinator, *kernel.ContributorRegistry, error) {
+func (p *providerGrantPhase) coordinator() (*kernel.Coordinator, *kernel.ContributorRegistry, error) {
 	start := p.service.completion.start
 	auditing, err := auditpg.NewIdentityContributor(auditpg.Config{})
 	if err != nil {
@@ -297,7 +327,7 @@ func (p *providerGrantRevokePhase) coordinator() (*kernel.Coordinator, *kernel.C
 	return coord, registry, err
 }
 
-func (p *providerGrantRevokePhase) queryCommand(ctx context.Context, c *kernel.Coordinator) (kernel.CommandRecord, error) {
+func (p *providerGrantPhase) queryCommand(ctx context.Context, c *kernel.Coordinator) (kernel.CommandRecord, error) {
 	b := p.binding()
 	record, err := c.QueryCommand(ctx, identity.RecoveryQuery{CommandID: b.CommandID, TenantID: b.TenantID, UserID: b.UserID,
 		ActorID: b.ActorID, ActorKind: b.ActorKind, OperationID: b.OperationID, RecordID: b.RecordID}, p.caller("identity.user", string(b.UserID)))
@@ -307,7 +337,7 @@ func (p *providerGrantRevokePhase) queryCommand(ctx context.Context, c *kernel.C
 	return record, err
 }
 
-func (p *providerGrantRevokePhase) result(ctx context.Context, record kernel.CommandRecord) (ProviderGrantRevocationResult, error) {
+func (p *providerGrantPhase) result(ctx context.Context, record kernel.CommandRecord) (ProviderGrantRevocationResult, error) {
 	if record.Outcome != identity.CommitOutcomeCommitted || record.Binding != p.binding() {
 		return ProviderGrantRevocationResult{}, identity.UnknownCommitError{CommandID: p.binding().CommandID}
 	}

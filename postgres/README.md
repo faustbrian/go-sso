@@ -153,6 +153,38 @@ Retain the existing versioned login state keys for pending revocation
 preparations. Revocation derives separate local outcome keys so opening the
 redacted disposition does not call the vault's key provider during settlement.
 
+### Native enterprise OAuth 2.0 grant refresh
+
+Install `ProviderGrantRefreshMigrationSource` after the vault protocol history
+and `ProviderGrantFenceMigrationSource`. Install the identity PostgreSQL
+`SSOEnterpriseGrantRefreshPreparationErasureMigrationSource` after the OAuth2
+callback erasure history on the same primary. Apply the schema before enabling
+the refresh writer. Neither migration contacts a provider or adds a route.
+
+Use `NewProviderGrantRefreshService` with the native OAuth2 completion owner,
+the same audience, and an explicit set of installed provider IDs. Its token
+endpoint and client credential come from the installed generation. Pass
+`sso.NewRefreshEnterpriseToken` the exact restorable grant version and a retry
+key, then submit it to `Refresh` with the linked member's current cookie,
+trusted origin, and session-bound CSRF token. Legacy OAuth2 and OIDC deposits
+are not eligible. Refresh does not issue, replace, or revoke a session.
+
+A successful refresh replaces the original encrypted grant with exactly the
+next version and returns that grant reference, never the token bytes. If the
+provider omits a replacement refresh token, the successor retains the original
+refresh credential. Each refresh explicitly requests the current stored scope;
+it cannot widen to the provider credential's original scope. Rejection, refusal, an
+unknown provider result, or a known no-send after the fence does not write a
+successor. Such a fenced predecessor is retained encrypted for reconciliation
+but cannot be used by a second refresh or revocation attempt.
+
+Only the final transaction writes the successor and outcome together and clears
+the temporary encrypted preparation. A successful PostgreSQL commit can still
+lose its reply. Retry with the exact original key to recover its committed
+result without contacting the provider, even if a later operation has already
+advanced or revoked the successor. A successor reference from history does not
+establish that the successor is still current.
+
 ### Native static OIDC callback for an existing linked member
 
 Before opting in, install the native callback account, capability, MFA,

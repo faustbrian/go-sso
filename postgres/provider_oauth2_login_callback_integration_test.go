@@ -48,6 +48,11 @@ import (
 const nativeOAuth2JourneyIssuer = "https://provider.example.com/Enterprise"
 const nativeOAuth2JourneySubject = "native-oauth2-stable-linked-subject"
 const nativeOAuth2JourneyCode = "native-oauth2-original-code"
+const nativeOAuth2RotatedRefresh = "fixture-enterprise-rotated-refresh"
+const nativeOAuth2TwiceRotatedRefresh = "fixture-enterprise-twice-rotated-refresh"
+const nativeOAuth2RefreshRaceMode = "restorable-vault-refresh-competing-revoke"
+const nativeOAuth2NarrowRotatedMode = "restorable-vault-refresh-narrow-rotated"
+const nativeOAuth2NarrowRetainedMode = "restorable-vault-refresh-narrow-retained"
 
 type nativeOAuth2JourneyPolicy struct{}
 
@@ -62,8 +67,8 @@ func (nativeOAuth2JourneyPolicy) Decide(ctx context.Context, c authorization.Dec
 	}
 	if c.PolicyRevision == 1 && c.Request.Tenant == authorization.TenantID(discoveryFixtureTenant) &&
 		c.Request.Subject.Kind == authorization.SubjectUser && c.Request.Subject.ID == "owner" &&
-		c.Request.Action == "identity.sso.provider-token.revoke" &&
-		(c.Request.Resource.Type == "identity.request-admission" && c.Request.Resource.ID == "identity.sso.provider-token.revoke" ||
+		(c.Request.Action == "identity.sso.provider-token.revoke" || c.Request.Action == "identity.sso.provider-token.refresh") &&
+		(c.Request.Resource.Type == "identity.request-admission" && c.Request.Resource.ID == authorization.ResourceID(c.Request.Action) ||
 			c.Request.Resource.Type == "identity.user" && c.Request.Resource.ID == "owner") {
 		return authorization.Decision{Outcome: authorization.Allow, Revision: 1}, nil
 	}
@@ -79,6 +84,9 @@ type nativeOAuth2JourneyFixture struct {
 	posts            *atomic.Int32
 	identities       *atomic.Int32
 	revokes          *atomic.Int32
+	refreshes        *atomic.Int32
+	refreshEntered   chan struct{}
+	refreshRelease   chan struct{}
 	transport        ssopg.StaticOAuth2CompletionProfile
 	lookup           session.DigestKey
 	csrf             session.CSRFKey
@@ -92,7 +100,7 @@ func newNativeOAuth2JourneyFixture(t *testing.T, mode string, traces ...*provide
 func newNativeOAuth2JourneyFixtureWithAdapter(t *testing.T, mode string, factory ssopg.OAuth2ProtocolAdapterFactory, traces ...*providerTrace) nativeOAuth2JourneyFixture {
 	t.Helper()
 	var revocation url.URL
-	if strings.HasPrefix(mode, "restorable-vault-revoke") {
+	if strings.HasPrefix(mode, "restorable-vault-revoke") || strings.HasPrefix(mode, "restorable-vault-refresh") {
 		revocation = url.URL{Scheme: "https", Host: "provider.example.com", Path: "/revoke"}
 	}
 	x := newProviderOAuthLoginStartFixtureWithRevocation(t, revocation)
@@ -142,17 +150,83 @@ sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issu
 		}
 	}
 	challenge := started.RedirectURI.Query().Get("code_challenge")
-	posts, identities, revokes := &atomic.Int32{}, &atomic.Int32{}, &atomic.Int32{}
+	posts, identities, revokes, refreshes := &atomic.Int32{}, &atomic.Int32{}, &atomic.Int32{}, &atomic.Int32{}
+	refreshEntered, refreshRelease := make(chan struct{}, 1), make(chan struct{})
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/token":
-			posts.Add(1)
 			if r.Method != http.MethodPost || r.Host != "provider.example.com" || r.ParseForm() != nil {
 				t.Error("provider did not receive the installed HTTPS token endpoint")
 				http.Error(w, "invalid request", http.StatusBadRequest)
 				return
 			}
+			if r.PostForm.Get("grant_type") == "refresh_token" && strings.HasPrefix(mode, "restorable-vault-refresh") {
+				send := refreshes.Add(1)
+				expected := nativeCallbackJourneyRefreshToken
+				if mode == nativeOAuth2NarrowRotatedMode && send == 2 {
+					expected = nativeOAuth2RotatedRefresh
+				}
+				if r.PostForm.Get("refresh_token") != expected || r.PostForm.Get("client_id") != x.profile.ClientID ||
+					r.PostForm.Get("client_secret") != strings.Repeat("9", 32) || r.PostForm.Has("code") {
+					t.Error("refresh did not use the exact stored grant and installed client")
+					http.Error(w, "invalid request", http.StatusBadRequest)
+					return
+				}
+				if send == 2 && (mode == nativeOAuth2NarrowRotatedMode || mode == nativeOAuth2NarrowRetainedMode) {
+					if values := r.PostForm["scope"]; len(values) != 1 || values[0] != "read:identity" {
+						t.Error("second generation did not request the persisted narrower scope explicitly")
+						http.Error(w, "scope fixture failed", http.StatusBadRequest)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "fixture-narrowed-access-generation-three", "refresh_token": nativeOAuth2TwiceRotatedRefresh, "token_type": "Bearer", "expires_in": 3600})
+					return
+				}
+				if values := r.PostForm["scope"]; len(values) != 1 || values[0] != "read:identity email" {
+					t.Error("initial refresh did not request the persisted grant scope explicitly")
+					http.Error(w, "scope fixture failed", http.StatusBadRequest)
+					return
+				}
+				switch mode {
+				case "restorable-vault-refresh-refused", "restorable-vault-refresh-rejected":
+					kind := "invalid_scope"
+					if mode == "restorable-vault-refresh-rejected" {
+						kind = "invalid_grant"
+					}
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": kind})
+					return
+				case "restorable-vault-refresh-unknown":
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				case "restorable-vault-refresh-retained":
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "fixture-enterprise-renewed-access", "token_type": "Bearer", "expires_in": 3600})
+					return
+				case nativeOAuth2NarrowRetainedMode:
+					_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "fixture-narrowed-retained-access", "token_type": "Bearer", "expires_in": 3600, "scope": "read:identity"})
+					return
+				case "restorable-vault-refresh-late-factor":
+					updated, err := x.enable.f.pool.Raw().Exec(r.Context(), `UPDATE identity_mfa.factor_authorities SET version=version+1 WHERE tenant_id=$1 AND user_id='owner'`, string(x.config.TenantID))
+					if err != nil || updated.RowsAffected() != 1 {
+						t.Error("fixture could not advance factor authority during provider refresh", err)
+						http.Error(w, "fixture failed", http.StatusInternalServerError)
+						return
+					}
+				case nativeOAuth2RefreshRaceMode:
+					select {
+					case refreshEntered <- struct{}{}:
+					default:
+					}
+					select {
+					case <-refreshRelease:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "fixture-enterprise-rotated-access", "refresh_token": nativeOAuth2RotatedRefresh, "token_type": "Bearer", "expires_in": 3600, "scope": "read:identity"})
+				return
+			}
+			posts.Add(1)
 			verifier := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
 			if r.PostForm.Get("grant_type") != "authorization_code" || r.PostForm.Get("code") != nativeOAuth2JourneyCode ||
 				r.PostForm.Get("client_id") != x.profile.ClientID || r.PostForm.Get("client_secret") != strings.Repeat("9", 32) ||
@@ -189,8 +263,15 @@ sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issu
 			_ = json.NewEncoder(w).Encode(map[string]any{"stable_id": nativeOAuth2JourneySubject})
 		case "/revoke":
 			revokes.Add(1)
+			expected := nativeCallbackJourneyRefreshToken
+			if mode == "restorable-vault-refresh" || mode == nativeOAuth2RefreshRaceMode {
+				expected = nativeOAuth2RotatedRefresh
+			}
+			if mode == nativeOAuth2NarrowRotatedMode || mode == nativeOAuth2NarrowRetainedMode {
+				expected = nativeOAuth2TwiceRotatedRefresh
+			}
 			if r.Method != http.MethodPost || r.Host != "provider.example.com" || r.ParseForm() != nil ||
-				r.PostForm.Get("token") != nativeCallbackJourneyRefreshToken || r.PostForm.Get("token_type_hint") != "refresh_token" ||
+				r.PostForm.Get("token") != expected || r.PostForm.Get("token_type_hint") != "refresh_token" ||
 				r.PostForm.Get("client_id") != x.profile.ClientID || r.PostForm.Get("client_secret") != strings.Repeat("9", 32) {
 				t.Error("revocation did not use the exact provider and original refresh custody")
 				http.Error(w, "invalid request", http.StatusBadRequest)
@@ -262,7 +343,7 @@ sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issu
 		t.Fatal("compose explicit installed OAuth2 linked-member completion", err)
 	}
 	query := url.Values{"code": {nativeOAuth2JourneyCode}, "state": {started.RedirectURI.Query().Get("state")}, "iss": {nativeOAuth2JourneyIssuer}}
-	return nativeOAuth2JourneyFixture{start: x, completion: completion, completionConfig: completionConfig, request: ssopg.ProviderOAuth2LoginCallbackRequest{RawQuery: query.Encode(), Browser: x.browser, ReceivedRedirectURI: x.profile.ProtocolRedirectURI}, startedID: started.TransactionID, posts: posts, identities: identities, revokes: revokes, transport: completionProfiles[0], lookup: lookup, csrf: csrf}
+	return nativeOAuth2JourneyFixture{start: x, completion: completion, completionConfig: completionConfig, request: ssopg.ProviderOAuth2LoginCallbackRequest{RawQuery: query.Encode(), Browser: x.browser, ReceivedRedirectURI: x.profile.ProtocolRedirectURI}, startedID: started.TransactionID, posts: posts, identities: identities, revokes: revokes, refreshes: refreshes, refreshEntered: refreshEntered, refreshRelease: refreshRelease, transport: completionProfiles[0], lookup: lookup, csrf: csrf}
 }
 
 type nativeRevocationManagedKeyFixture struct{ *keyring.Provider }

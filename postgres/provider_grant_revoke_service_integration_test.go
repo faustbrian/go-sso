@@ -166,7 +166,17 @@ func TestNativeEnterpriseOAuth2RevokeSettlesAndRecovers(t *testing.T) {
 
 func nativeProviderGrantRevocationWithCommitFault(t *testing.T, x nativeOAuth2JourneyFixture, cfg ssopg.ProviderGrantRevocationConfig) (*ssopg.ProviderGrantRevocationService, *providerCommitFault) {
 	t.Helper()
-	pool, fault := providerLossPool(t, x.start.enable.f, "INSERT INTO sso_providers.provider_grant_revocation_receipts")
+	login, fault := nativeOAuth2CompletionWithCommitFault(t, x, "INSERT INTO sso_providers.provider_grant_revocation_receipts")
+	service, err := ssopg.NewProviderGrantRevocationService(login, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, fault
+}
+
+func nativeOAuth2CompletionWithCommitFault(t *testing.T, x nativeOAuth2JourneyFixture, statement string) (*ssopg.ProviderOAuth2LoginCompletionService, *providerCommitFault) {
+	t.Helper()
+	pool, fault := providerLossPool(t, x.start.enable.f, statement)
 	f := *x.start.enable.f
 	f.pool = pool
 	enabled := x.start.enable
@@ -183,9 +193,5 @@ func nativeProviderGrantRevocationWithCommitFault(t *testing.T, x nativeOAuth2Jo
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := ssopg.NewProviderGrantRevocationService(login, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return service, fault
+	return login, fault
 }
