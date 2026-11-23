@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Project the exact public signing certificate and original exclusive expiry
+  from a validated active SP signing credential bundle. The returned DER is
+  detached from secret storage; no private key or provider authority is exposed.
+
 - Sign an original AuthnRequest directly with a validated SP signing credential
   bundle without exporting its parsed private key. Return the certificate's
   original exclusive expiry for transaction fencing; the caller retains

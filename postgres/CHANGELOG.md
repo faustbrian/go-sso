@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Expose the exact installed SAML SP entity, ACS and public signing certificate
+  for the selected current route, without exporting credential custody.
+
 - Attribute SP-initiated SAML POST callbacks to their authenticated original
   provider, frontchannel flow, callback command and initial lifetime for
   transport quotas. Read-only attribution does not process the response,
