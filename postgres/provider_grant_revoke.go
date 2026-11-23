@@ -14,13 +14,24 @@ import (
 	"github.com/faustbrian/go-sso"
 )
 
-type providerGrantRevocationOutcome string
+// ProviderGrantRevocationOutcome describes only the provider interaction. The
+// local removal and command acknowledgement are independent observations.
+type ProviderGrantRevocationOutcome string
+
+type providerGrantRevocationOutcome = ProviderGrantRevocationOutcome
 
 const (
-	providerGrantAcknowledged providerGrantRevocationOutcome = "acknowledged"
-	providerGrantRefused      providerGrantRevocationOutcome = "refused"
-	providerGrantUnknown      providerGrantRevocationOutcome = "unknown"
-	providerGrantNotSent      providerGrantRevocationOutcome = "not_sent"
+	ProviderGrantRevocationAcknowledged ProviderGrantRevocationOutcome = "acknowledged"
+	ProviderGrantRevocationRefused      ProviderGrantRevocationOutcome = "refused"
+	ProviderGrantRevocationUnknown      ProviderGrantRevocationOutcome = "unknown"
+	ProviderGrantRevocationNotSent      ProviderGrantRevocationOutcome = "not_sent"
+)
+
+const (
+	providerGrantAcknowledged = ProviderGrantRevocationAcknowledged
+	providerGrantRefused      = ProviderGrantRevocationRefused
+	providerGrantUnknown      = ProviderGrantRevocationUnknown
+	providerGrantNotSent      = ProviderGrantRevocationNotSent
 )
 
 // revokeProviderGrant sends only after the original coordinator generation

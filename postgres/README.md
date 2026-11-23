@@ -127,13 +127,31 @@ new deposits. It does not change OIDC or convert earlier OAuth2 deposits,
 which cannot be opened independently after callback cleanup. This setting
 does not expose tokens or enable upstream refresh or revocation.
 
-Install `ProviderGrantFenceMigrationSource` on the same primary after both
-OAuth2 vault protocol migrations and the identity command history, before
-selecting a future grant lifecycle writer. It adds an empty table without
-changing running callback readers or writers. Leave the table installed on
-rollback. The fence prevents another attempt against the same grant version;
-its presence does not establish that a request reached the provider or that
-local custody was removed. Installation enables no network operation or route.
+### Native enterprise OAuth 2.0 grant revocation
+
+Install `ProviderGrantFenceMigrationSource` after both OAuth2 vault protocol
+migrations and the identity command history. Then install
+`ProviderGrantRevocationReceiptMigrationSource` on the same primary. Both
+add empty tables without changing existing grants. Leave both installed on
+code rollback. Installing them enables no provider call or HTTP route.
+
+Register the provider's revocation endpoint in its installed configuration
+and select the same HTTPS URL in `NewProviderGrantRevocationService`. Use the
+native OAuth2 completion service for that provider and configure the uncached
+session reader for the same audience. `Revoke` takes an exact restorable grant
+version, an idempotency key, and the current linked member's cookie, trusted
+origin and session-bound CSRF token. Legacy OAuth2 and OIDC vault entries are
+not eligible.
+
+Provider acknowledgement and local commit are separate. An acknowledged result
+removes the exact encrypted grant only when the local transaction commits.
+Refused or unknown provider outcomes retain the encrypted grant, but the fence
+prevents another attempt against that version. Retry the original authorized
+request with the same key to recover its local result, not to send again.
+An unknown commit does not establish either local erasure or provider refusal.
+Retain the existing versioned login state keys for pending revocation
+preparations. Revocation derives separate local outcome keys so opening the
+redacted disposition does not call the vault's key provider during settlement.
 
 ### Native static OIDC callback for an existing linked member
 

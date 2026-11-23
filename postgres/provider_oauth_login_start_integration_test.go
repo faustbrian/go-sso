@@ -36,6 +36,11 @@ type providerOAuthLoginStartFixture struct {
 
 func newProviderOAuthLoginStartFixture(t *testing.T) providerOAuthLoginStartFixture {
 	t.Helper()
+	return newProviderOAuthLoginStartFixtureWithRevocation(t, url.URL{})
+}
+
+func newProviderOAuthLoginStartFixtureWithRevocation(t *testing.T, revocation url.URL) providerOAuthLoginStartFixture {
+	t.Helper()
 	x := newProviderLoginStartFixture(t)
 	installProviderOAuthLoginStartHistory(t, x.enable.f)
 	providers, err := x.enable.service.WithOAuthRegistration()
@@ -46,7 +51,9 @@ func newProviderOAuthLoginStartFixture(t *testing.T) providerOAuthLoginStartFixt
 	if err != nil {
 		t.Fatal("select native OAuth lifecycle authority", err)
 	}
-	registered, err := providers.ProviderRegisterOauth(x.enable.f.ctx, providerOAuthRegistrationRequest(t, string(x.enable.proof.OrganizationID)))
+	request := providerOAuthRegistrationRequest(t, string(x.enable.proof.OrganizationID))
+	request.RevocationEndpoint = revocation
+	registered, err := providers.ProviderRegisterOauth(x.enable.f.ctx, request)
 	if err != nil || registered.Completion.Outcome != identity.CommitOutcomeCommitted || registered.Provider.Protocol != "oauth2" || registered.Provider.Enabled {
 		t.Fatal("commit disabled OAuth provider", err)
 	}

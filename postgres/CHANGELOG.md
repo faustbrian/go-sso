@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add opt-in native revocation for restorable enterprise OAuth2 grants. Check
+  current session, factor and organization authority, fence the provider call,
+  and recover the committed provider disposition with the original key. Erase
+  the encrypted grant only on acknowledged settlement. No HTTP route is added.
+
 - Add the optional enterprise grant-attempt fence. Competing revocation and
   refresh commands cannot both claim the same grant generation. The private
   revocation transport distinguishes acknowledgement, refusal and ambiguity

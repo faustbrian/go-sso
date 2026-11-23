@@ -37,6 +37,8 @@ import (
 	migrations "github.com/faustbrian/go-migrations/v3"
 	migrationpg "github.com/faustbrian/go-migrations/v3/postgres"
 	organizationpg "github.com/faustbrian/go-organization/postgres"
+	envelope "github.com/faustbrian/go-secret-envelope/v2"
+	"github.com/faustbrian/go-secret-envelope/v2/adapters/keyring"
 	"github.com/faustbrian/go-sso"
 	ssopg "github.com/faustbrian/go-sso/postgres"
 	"github.com/jackc/pgx/v5"
@@ -58,20 +60,28 @@ func (nativeOAuth2JourneyPolicy) Decide(ctx context.Context, c authorization.Dec
 		c.Request.Action == "identity.sso.oauth-callback" {
 		return authorization.Decision{Outcome: authorization.Allow, Revision: 1}, nil
 	}
+	if c.PolicyRevision == 1 && c.Request.Tenant == authorization.TenantID(discoveryFixtureTenant) &&
+		c.Request.Subject.Kind == authorization.SubjectUser && c.Request.Subject.ID == "owner" &&
+		c.Request.Action == "identity.sso.provider-token.revoke" &&
+		(c.Request.Resource.Type == "identity.request-admission" && c.Request.Resource.ID == "identity.sso.provider-token.revoke" ||
+			c.Request.Resource.Type == "identity.user" && c.Request.Resource.ID == "owner") {
+		return authorization.Decision{Outcome: authorization.Allow, Revision: 1}, nil
+	}
 	return (providerLoginPolicy{}).Decide(ctx, c)
 }
 
 type nativeOAuth2JourneyFixture struct {
-	start      providerOAuthLoginStartFixture
-	completion *ssopg.ProviderOAuth2LoginCompletionService
-	request    ssopg.ProviderOAuth2LoginCallbackRequest
-	startedID  string
-	posts      *atomic.Int32
-	identities *atomic.Int32
-	revokes    *atomic.Int32
-	transport  ssopg.StaticOAuth2CompletionProfile
-	lookup     session.DigestKey
-	csrf       session.CSRFKey
+	start            providerOAuthLoginStartFixture
+	completion       *ssopg.ProviderOAuth2LoginCompletionService
+	completionConfig ssopg.ProviderLoginCompletionConfig
+	request          ssopg.ProviderOAuth2LoginCallbackRequest
+	startedID        string
+	posts            *atomic.Int32
+	identities       *atomic.Int32
+	revokes          *atomic.Int32
+	transport        ssopg.StaticOAuth2CompletionProfile
+	lookup           session.DigestKey
+	csrf             session.CSRFKey
 }
 
 func newNativeOAuth2JourneyFixture(t *testing.T, mode string, traces ...*providerTrace) nativeOAuth2JourneyFixture {
@@ -81,11 +91,26 @@ func newNativeOAuth2JourneyFixture(t *testing.T, mode string, traces ...*provide
 
 func newNativeOAuth2JourneyFixtureWithAdapter(t *testing.T, mode string, factory ssopg.OAuth2ProtocolAdapterFactory, traces ...*providerTrace) nativeOAuth2JourneyFixture {
 	t.Helper()
-	x := newProviderOAuthLoginStartFixture(t)
+	var revocation url.URL
+	if strings.HasPrefix(mode, "restorable-vault-revoke") {
+		revocation = url.URL{Scheme: "https", Host: "provider.example.com", Path: "/revoke"}
+	}
+	x := newProviderOAuthLoginStartFixtureWithRevocation(t, revocation)
 	x.config.RestorableOAuth2Vault = strings.HasPrefix(mode, "restorable-vault")
+	if mode == "restorable-vault-revoke-local-outcome" {
+		k, err := keyring.New(map[string][]byte{x.config.KeyReference: bytes.Repeat([]byte{0x94}, 32)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		x.config.Envelope, err = envelope.NewService(nativeRevocationManagedKeyFixture{k})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	installNativeOAuth2JourneyMigrations(t, x.enable.f)
 	policy := kernel.CommandQueryPolicy{Authorization: nativeOAuth2JourneyPolicy{}, Clock: clock.System{}, PolicyVersion: 1}
 	x.config.Coordinator.AdmissionPolicy, x.config.Coordinator.QueryPolicy = &policy, &policy
+	x.config.RequestKeys.Policy = policy
 	var err error
 	x.service, err = ssopg.NewProviderLoginServiceWithOAuth2(x.router, x.config, []ssopg.StaticOAuth2LoginProfile{x.profile})
 	if err != nil {
@@ -177,6 +202,14 @@ sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issu
 			case "restorable-vault-revoke-refused":
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": "unsupported_token_type"})
+			case "restorable-vault-revoke-late-factor":
+				updated, err := x.enable.f.pool.Raw().Exec(r.Context(), `UPDATE identity_mfa.factor_authorities SET version=version+1 WHERE tenant_id=$1 AND user_id='owner'`, string(x.config.TenantID))
+				if err != nil || updated.RowsAffected() != 1 {
+					t.Error("fixture could not advance the original factor generation during revocation", err)
+					http.Error(w, "fixture failed", http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
 			default:
 				w.WriteHeader(http.StatusOK)
 			}
@@ -229,7 +262,16 @@ sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issu
 		t.Fatal("compose explicit installed OAuth2 linked-member completion", err)
 	}
 	query := url.Values{"code": {nativeOAuth2JourneyCode}, "state": {started.RedirectURI.Query().Get("state")}, "iss": {nativeOAuth2JourneyIssuer}}
-	return nativeOAuth2JourneyFixture{start: x, completion: completion, request: ssopg.ProviderOAuth2LoginCallbackRequest{RawQuery: query.Encode(), Browser: x.browser, ReceivedRedirectURI: x.profile.ProtocolRedirectURI}, startedID: started.TransactionID, posts: posts, identities: identities, revokes: revokes, transport: completionProfiles[0], lookup: lookup, csrf: csrf}
+	return nativeOAuth2JourneyFixture{start: x, completion: completion, completionConfig: completionConfig, request: ssopg.ProviderOAuth2LoginCallbackRequest{RawQuery: query.Encode(), Browser: x.browser, ReceivedRedirectURI: x.profile.ProtocolRedirectURI}, startedID: started.TransactionID, posts: posts, identities: identities, revokes: revokes, transport: completionProfiles[0], lookup: lookup, csrf: csrf}
+}
+
+type nativeRevocationManagedKeyFixture struct{ *keyring.Provider }
+
+func (k nativeRevocationManagedKeyFixture) DecryptDataKey(ctx context.Context, key string, wire []byte, aad envelope.Context) ([]byte, error) {
+	if aad.Values()["profile"] == "sso-provider-grant-revoke-outcome-v1" {
+		return nil, errors.New("managed key provider unavailable for local settlement")
+	}
+	return k.Provider.DecryptDataKey(ctx, key, wire, aad)
 }
 
 func installNativeOAuth2JourneyMigrations(t *testing.T, f *orgFixture) {
