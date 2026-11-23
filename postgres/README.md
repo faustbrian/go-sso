@@ -14,6 +14,18 @@ selection; it never links an existing local account by email.
 
 ### Optional SAML replay schema
 
+For IdP-initiated confirmation, apply `SAMLIDPConfirmationMigrationSource`
+after provider and identity-command history. It creates an empty table with
+no SP-start reference; short foreign-key locks are bounded by five seconds.
+Its one-way completion keeps original provenance but clears the encrypted
+pending binding and both browser/form commitments. Keep it on code rollback.
+Apply `SAMLIDPReplayMigrationSource` after `SAMLReplayMigrationSource`.
+The first step widens only the existing purpose check, without scanning or
+rewriting data under the exclusive lock. The separate validation holds a
+weaker lock. Both sign-in profiles keep the same replay uniqueness and exact
+command-purpose reference. Install all steps before enabling any future
+IdP-initiated writer; these migrations do not enable sign-in.
+
 Before enabling SAML provider writes, apply both versions of
 `ProviderSAMLProtocolMigrationSource` after the existing provider protocol
 history. The first version expands the check atomically without scanning

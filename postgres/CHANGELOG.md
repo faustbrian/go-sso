@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add optional PostgreSQL storage for pending unsolicited SAML confirmation.
+  Preserve the original expiry, erase pending custody only on exact completion,
+  and extend the existing replay table without splitting replay uniqueness.
+  No browser route, confirmation writer or session issuer is enabled.
+
 - Admit detached IdP-initiated SAML evidence for explicitly allowed current
   providers, without an SP start or RelayState. Recheck current native
   provider and domain authority after the borrowed wire verification.
