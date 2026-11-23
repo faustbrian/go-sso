@@ -28,7 +28,7 @@ require (
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
-	github.com/faustbrian/go-sso v0.0.0-20261123062212-c53a69b4a2a2
+	github.com/faustbrian/go-sso v0.0.0-20261123063952-429e9c073ff2
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734
 	github.com/faustbrian/go-sso/oidc v0.0.0-20261123000546-023dd34bb0c7
 	github.com/faustbrian/go-transactional-outbox/postgres/identity v0.0.0-20261020135213-493107bf82af

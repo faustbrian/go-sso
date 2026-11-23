@@ -191,6 +191,8 @@ github.com/faustbrian/go-sso v0.0.0-20261123060854-15c92e25c922 h1:zG48vUGoAXTGE
 github.com/faustbrian/go-sso v0.0.0-20261123060854-15c92e25c922/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso v0.0.0-20261123062212-c53a69b4a2a2 h1:9T8rkd7M3c85QHVjJWElJa0PACP7FvQMk3eMopppWb8=
 github.com/faustbrian/go-sso v0.0.0-20261123062212-c53a69b4a2a2/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
+github.com/faustbrian/go-sso v0.0.0-20261123063952-429e9c073ff2 h1:l8yS2rhq8n3AhlxWMLTStJVqO8ESwzkQi826CV3DyL8=
+github.com/faustbrian/go-sso v0.0.0-20261123063952-429e9c073ff2/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734 h1:wi/Fl8h5KagSJogEvLMKRfY2dkNGRTC1HNcndrUL45o=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734/go.mod h1:WI4BJ4aQ1ki49oDREV0ORq21xMfxr+CvP+fshGTPEkQ=
 github.com/faustbrian/go-sso/oidc v0.0.0-20261123000546-023dd34bb0c7 h1:uTAK484FW2rqPpGoQcRdJq20C0WgMSEUJLbhG9r9KEo=

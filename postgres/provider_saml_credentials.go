@@ -50,12 +50,11 @@ func (s *ProviderService) validateSAMLSigningExpiry(ctx context.Context, tenant,
 	}()
 	err = withAuthenticatedProtocolProviderCredential(ctx, s.config.Envelope, providerProtocolSAML, tenant, organization, provider, wire, contextWire,
 		generation, installed, func(ctx context.Context, plain []byte) error {
-			expiry, validationErr := s.samlSigningValidator(ctx, plain, at)
-			if ctx.Err() != nil {
-				return ctx.Err()
+			expiry, err := checkedSAMLSigningExpiry(ctx, s.samlSigningValidator, plain, at)
+			if err != nil {
+				return err
 			}
-			expiry = expiry.UTC().Truncate(time.Microsecond)
-			if validationErr != nil || !at.Before(expiry) || !s.config.Clock.Now().Before(expiry) {
+			if !s.config.Clock.Now().Before(expiry) {
 				return sso.ErrForbidden
 			}
 			validUntil = expiry
@@ -65,4 +64,24 @@ func (s *ProviderService) validateSAMLSigningExpiry(ctx context.Context, tenant,
 		return time.Time{}, err
 	}
 	return validUntil, nil
+}
+
+func checkedSAMLSigningExpiry(ctx context.Context, validate sso.SAMLSigningCredentialValidator, plain []byte, at time.Time) (validUntil time.Time, err error) {
+	if validate == nil {
+		return time.Time{}, sso.ErrForbidden
+	}
+	defer func() {
+		if recover() != nil {
+			validUntil, err = time.Time{}, sso.ErrUnavailable
+		}
+	}()
+	expiry, validationErr := validate(ctx, plain, at)
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	expiry = expiry.UTC().Truncate(time.Microsecond)
+	if validationErr != nil || !at.Before(expiry) {
+		return time.Time{}, sso.ErrForbidden
+	}
+	return expiry, nil
 }

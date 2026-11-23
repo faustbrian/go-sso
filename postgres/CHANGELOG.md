@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Opt into explicit SAML provider routing with current verified domain proof
+  and an installed signer whose certificate bounds the original route lifetime.
+
 - Enable an explicitly selected SAML provider only with current domain proof,
   trusted origin, and the original installed signer lifetime. Add exact SAML
   disable, including durable disposition and keyed recovery. No browser route

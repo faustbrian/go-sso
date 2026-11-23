@@ -50,11 +50,12 @@ type providerRouteScope struct {
 // static-provider read boundary. It owns no pool lifecycle or background retries.
 // It is not an HTTP endpoint, an authentication grant or public discovery.
 type ProviderRouter struct {
-	pool             *database.Pool
-	organizations    *organizationpg.Repository
-	config           ProviderRouterConfig
-	defaults         map[providerRouteScope]sso.ProviderID
-	protocolRegistry bool
+	pool              *database.Pool
+	organizations     *organizationpg.Repository
+	config            ProviderRouterConfig
+	defaults          map[providerRouteScope]sso.ProviderID
+	protocolRegistry  bool
+	samlRouteValidate sso.SAMLSigningCredentialValidator
 }
 
 // NewProviderRouter borrows a migrated primary pool. The organization owner is
@@ -101,6 +102,20 @@ func (r *ProviderRouter) WithProtocolRegistry() (*ProviderRouter, error) {
 	return &selected, nil
 }
 
+// WithSAMLRouteValidation opts a copy of a migrated router into explicit SAML
+// routing. The local validator must check the installed SP signer without
+// leaking, retaining or mutating the borrowed plaintext. It is called outside
+// Work and must be bounded, context-aware and safe for concurrent requests.
+// Selection does not register an HTTP route or grant browser authority.
+func (r *ProviderRouter) WithSAMLRouteValidation(validate sso.SAMLSigningCredentialValidator) (*ProviderRouter, error) {
+	if r == nil || r.pool == nil || r.pool.Raw() == nil || !r.protocolRegistry || validate == nil {
+		return nil, sso.ErrInvalidInput
+	}
+	selected := *r
+	selected.samlRouteValidate = validate
+	return &selected, nil
+}
+
 func (ProviderRouter) Format(s fmt.State, _ rune) {
 	_, _ = s.Write([]byte("sso.postgres.ProviderRouter(redacted)"))
 }
@@ -126,12 +141,23 @@ func (r *ProviderRouter) RouteOAuth2(ctx context.Context, request sso.DomainRout
 	return r.route(ctx, request, providerProtocolOAuth2)
 }
 
+// RouteSAML selects the exact enabled SAML provider for a verified domain.
+// The request must name both; generic/default routing never selects SAML.
+// Returned evidence expires no later than the installed signer's certificate
+// and grants no permission to start or complete a browser transaction.
+func (r *ProviderRouter) RouteSAML(ctx context.Context, request sso.DomainRouteRequest) (sso.DomainRoute, error) {
+	return r.route(ctx, request, providerProtocolSAML)
+}
+
 func (r *ProviderRouter) route(ctx context.Context, request sso.DomainRouteRequest, protocol string) (sso.DomainRoute, error) {
 	lookup, err := request.Bindings()
 	if r == nil || r.pool == nil || ctx == nil || err != nil {
 		return sso.DomainRoute{}, sso.ErrInvalidInput
 	}
 	if protocol == providerProtocolOAuth2 && (!r.protocolRegistry || lookup.ProviderID == "") {
+		return sso.DomainRoute{}, sso.ErrForbidden
+	}
+	if protocol == providerProtocolSAML && (!r.protocolRegistry || r.samlRouteValidate == nil || lookup.ProviderID == "") {
 		return sso.DomainRoute{}, sso.ErrForbidden
 	}
 	ctx, cancel := context.WithTimeout(ctx, min(r.config.MaximumDuration, r.config.Lifetime))
@@ -158,8 +184,11 @@ func (r *ProviderRouter) route(ctx context.Context, request sso.DomainRouteReque
 		return sso.DomainRoute{}, err
 	}
 	newRoute := sso.NewDomainRoute
-	if protocol == providerProtocolOAuth2 {
+	switch protocol {
+	case providerProtocolOAuth2:
 		newRoute = sso.NewOAuth2DomainRoute
+	case providerProtocolSAML:
+		newRoute = sso.NewSAMLDomainRoute
 	}
 	choices := make([]sso.DomainRoute, 0, len(stored))
 	for _, candidate := range stored {
@@ -195,7 +224,24 @@ func (r *ProviderRouter) route(ctx context.Context, request sso.DomainRouteReque
 		return sso.DomainRoute{}, err
 	}
 	b, _ := route.Bindings()
-	if err = r.authenticateRouteCredential(ctx, b, route.Protocol()); err != nil {
+	if protocol == providerProtocolSAML {
+		var signerExpiry time.Time
+		err = r.withRouteCredential(ctx, b, protocol, func(ctx context.Context, plain []byte) error {
+			var validationErr error
+			signerExpiry, validationErr = checkedSAMLSigningExpiry(ctx, r.samlRouteValidate, plain, b.ObservedAt)
+			return validationErr
+		})
+		if err != nil {
+			return sso.DomainRoute{}, err
+		}
+		if signerExpiry.Before(b.ValidUntil) {
+			b.ValidUntil = signerExpiry
+			route, err = newRoute(b)
+			if err != nil {
+				return sso.DomainRoute{}, sso.ErrForbidden
+			}
+		}
+	} else if err = r.withRouteCredential(ctx, b, protocol, func(ctx context.Context, _ []byte) error { return ctx.Err() }); err != nil {
 		return sso.DomainRoute{}, err
 	}
 	current, err := r.organizations.GetDomainProof(ctx, b.Proof.Key)
@@ -315,7 +361,7 @@ const routeCurrentCredentialWhere = ` FROM sso_providers.providers p JOIN sso_pr
 const routeReadCredentialSQL = `SELECT c.provider_version::text,c.envelope,c.credential_context` + routeCurrentCredentialWhere
 const routeCurrentCredentialSQL = `SELECT EXISTS(SELECT 1` + routeCurrentCredentialWhere + `)`
 
-func (r *ProviderRouter) authenticateRouteCredential(ctx context.Context, b sso.DomainRouteBinding, protocol string) error {
+func (r *ProviderRouter) withRouteCredential(ctx context.Context, b sso.DomainRouteBinding, protocol string, use func(context.Context, []byte) error) error {
 	var installed string
 	var wire, contextWire []byte
 	proof := b.Proof.Key
@@ -326,7 +372,7 @@ func (r *ProviderRouter) authenticateRouteCredential(ctx context.Context, b sso.
 	if err != nil || version > b.ProviderVersion {
 		return sso.ErrUnavailable
 	}
-	return authenticateProtocolProviderCredential(ctx, r.config.Envelope, protocol, string(proof.TenantID), string(proof.OrganizationID), string(b.ProviderID), wire, contextWire, b.CredentialGeneration, version)
+	return withAuthenticatedProtocolProviderCredential(ctx, r.config.Envelope, protocol, string(proof.TenantID), string(proof.OrganizationID), string(b.ProviderID), wire, contextWire, b.CredentialGeneration, version, use)
 }
 
 func (r *ProviderRouter) requireCurrentRoute(ctx context.Context, b sso.DomainRouteBinding) error {

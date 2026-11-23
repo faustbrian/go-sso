@@ -69,6 +69,15 @@ installed key and does not depend on a still-valid signer or a reachable IdP.
 Treat any original enable/disable receipt as historical, never current routing
 authority.
 
+For an exact native SAML lookup, select `WithProtocolRegistry` and then
+`WithSAMLRouteValidation`, using the deployment's local SP signer validator.
+Pass both the provider ID and verified domain to `RouteSAML`. The provider
+must still be enabled, the original domain proof must still be current, and
+the encrypted signer generation must authenticate. The route's original
+expiry is no later than the matched certificate's expiry. A missing or
+ineligible provider does not fall back to an OIDC/OAuth provider or a default.
+This lookup emits neither browser state nor a redirect.
+
 Install `SAMLReplayMigrationSource` after the native identity command and
 SSO provider migrations. Choose the next unused version in that migration
 history. Installation creates an empty table, bounds the foreign-key lock
