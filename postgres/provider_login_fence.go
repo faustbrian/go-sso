@@ -115,6 +115,14 @@ func requireProviderLoginAdmission(ctx context.Context, work kernel.Work, select
 	default:
 		return identity.ForbiddenError{}
 	}
+	return requireProviderLoginAdmissionRow(ctx, work, query, selected, mappingVersion, deadline)
+}
+
+func requireProviderLoginAdmissionRow(ctx context.Context, work kernel.Work, query string, selected sso.DomainRouteBinding, mappingVersion uint64, deadline time.Time) error {
+	if mappingVersion == 0 || deadline.IsZero() || deadline.After(selected.ValidUntil) {
+		return identity.ForbiddenError{}
+	}
+	proof := selected.Proof.Key
 	rows, err := work.Query(ctx, query,
 		string(proof.TenantID), string(proof.OrganizationID), string(selected.ProviderID),
 		strconv.FormatUint(selected.ProviderVersion, 10), strconv.FormatUint(selected.CredentialGeneration, 10),

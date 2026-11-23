@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Prepare an explicitly selected unsolicited SAML arrival by committing the
+  existing linked user's encrypted pending record and single confirmation
+  grant together. Return the independent browser pair only after a fresh
+  commit; receipt recovery never reveals it. This does not create a session
+  or enable an HTTP route.
+
 - Resolve eligible linked users from verified unsolicited SAML evidence on
   the existing native account, organization, factor, and policy readers.
   Preserve bounded original evidence without a prior SP start. Add the

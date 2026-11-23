@@ -14,8 +14,8 @@ import (
 	ssopg "github.com/faustbrian/go-sso/postgres"
 )
 
-func TestNativeSAMLIDPLinkedRecipientRequiresCurrentExistingLinkWithoutSPStart(t *testing.T) {
-	x := newNativeSAMLIDPAdmissionFixture(t)
+func seedSAMLIDPLinkedRecipient(t *testing.T, x *nativeSAMLIDPAdmissionFixture) {
+	t.Helper()
 	f, tenant := x.enable.f, x.enable.proof.TenantID
 	accounts, err := (kernel.AccountMigrationSource{Base: f.history, Version: 390}).Load(f.ctx)
 	if err != nil || len(accounts) != len(f.history)+1 {
@@ -41,6 +41,19 @@ SELECT $1,'owner','idp-linked-account',provider,issuer,subject,
 sha256(convert_to(octet_length(provider)::text||':'||provider||octet_length(issuer)::text||':'||issuer||octet_length(subject)::text||':'||subject,'UTF8')),1,1,true FROM a`, tenant, provider, x.installed.EntityID, expected.ProviderSubject)
 	exec(`INSERT INTO identity.account_credentials(tenant_id,user_id,credential_id,account_id) VALUES($1,'owner','idp-credential','idp-linked-account')`, tenant)
 	seedNativeCallbackJourneyFactors(t, providerLoginStartFixture{enable: x.enable, config: ssopg.ProviderLoginConfig{TenantID: tenant}}, "owner")
+}
+
+func TestNativeSAMLIDPLinkedRecipientRequiresCurrentExistingLinkWithoutSPStart(t *testing.T) {
+	x := newNativeSAMLIDPAdmissionFixture(t)
+	seedSAMLIDPLinkedRecipient(t, x)
+	f, tenant := x.enable.f, x.enable.proof.TenantID
+	expected := nativeSAMLIDPEvidence(time.Now().UTC())
+	exec := func(statement string, args ...any) {
+		t.Helper()
+		if _, err := f.pool.Raw().Exec(f.ctx, statement, args...); err != nil {
+			t.Fatal("configure linked recipient fixture", err)
+		}
+	}
 	var originalCutoff time.Time
 	service, err := ssopg.NewProviderSAMLIDPAdmissionService(x.router, ssopg.ProviderSAMLIDPAdmissionConfig{
 		TenantID: tenant, Profiles: []ssopg.StaticSAMLIDPAdmissionProfile{{Provider: x.profile, MaximumAge: time.Minute}},
