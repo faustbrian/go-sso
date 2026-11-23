@@ -328,6 +328,11 @@ func (s *ProviderLoginService) checkRetainedMember(ctx context.Context, org orga
 }
 
 func (p *providerLoginPhase) startScope() kernel.RequestKeyScope {
+	if p.protocol == providerProtocolSAML {
+		scope := p.service.requestScope()
+		scope.Method, scope.RouteID = "GET", p.operation().OperationID
+		return scope
+	}
 	if p.member == nil {
 		return p.service.requestScope()
 	}
@@ -337,6 +342,11 @@ func (p *providerLoginPhase) startScope() kernel.RequestKeyScope {
 
 func (p *providerLoginPhase) startCaller() authorization.DecisionContext {
 	caller := p.service.caller()
+	if p.protocol == providerProtocolSAML {
+		operation := p.operation().OperationID
+		caller.Request.Action = authorization.Action(operation)
+		caller.Request.Resource.ID = authorization.ResourceID(operation)
+	}
 	if p.member != nil {
 		caller.Request.Subject = authorization.Subject{Kind: authorization.SubjectUser, ID: authorization.SubjectID(p.member.user)}
 	}

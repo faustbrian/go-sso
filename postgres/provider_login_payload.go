@@ -100,6 +100,8 @@ func providerLoginCryptoProtocol(discriminator string) (protocol, callbackPurpos
 		return "oidc", providerOIDCCallback
 	case providerProtocolOAuth2:
 		return providerProtocolOAuth2, "identity.sso.oauth-callback"
+	case providerProtocolSAML:
+		return providerProtocolSAML, "identity.sso.saml-acs"
 	default:
 		return "", ""
 	}
@@ -148,9 +150,10 @@ func equalProviderLoginBindingMetadata(a, b providerLoginBindingMetadata) bool {
 // column. The binding envelope is its retained ciphertext owner; the raw
 // verifier is deliberately absent and has a separately erasable envelope.
 type providerLoginStoredBinding struct {
-	Metadata providerLoginBindingMetadata
-	Plan     providerLoginStoredPlan
-	Proof    []byte
+	Metadata     providerLoginBindingMetadata
+	Plan         providerLoginStoredPlan
+	Proof        []byte
+	SAMLRedirect string `json:",omitempty"`
 }
 
 type providerLoginStoredOutput struct {
@@ -197,6 +200,11 @@ func (i providerLoginPayloadInput) validate() error {
 			return identity.ForbiddenError{}
 		}
 		op = kernel.SSOOAuth2SigninStartOperation()
+	case providerProtocolSAML:
+		if i.Link != nil || i.Command.ActorKind != authorization.SubjectServiceAccount {
+			return identity.ForbiddenError{}
+		}
+		op = kernel.SSOSAMLSigninStartOperation()
 	case "":
 	default:
 		return identity.ForbiddenError{}
@@ -219,24 +227,42 @@ func (i providerLoginPayloadInput) validate() error {
 			return identity.ForbiddenError{}
 		}
 	}
-	// Match the selected static profile's actual accepted bounds, not the
-	// secret-envelope Context's unrelated 1024-byte per-value ceiling.
-	if !providerLoginVisible(i.ClientID, 1024) || !providerLoginVisible(i.RedirectURI, 2048) || !validProviderLoginCallback(i.RedirectURI) {
+	if i.Protocol == providerProtocolSAML {
+		callback, ok := samlProviderCallbackURL(i.BrowserOrigin, i.ProviderID)
+		// Issuer is the exact opaque IdP identity already checked by the
+		// installed SAML profile. It is not a URL for native I/O.
+		if i.ClientID != "" || !ok || i.RedirectURI != callback ||
+			!providerLoginPayloadText(i.Issuer, 1024) {
+			return identity.ForbiddenError{}
+		}
+	} else if !providerLoginVisible(i.ClientID, 1024) || !providerLoginVisible(i.RedirectURI, 2048) ||
+		!validProviderLoginCallback(i.RedirectURI) || !providerLoginPayloadIssuer(i.Issuer) {
 		return identity.ForbiddenError{}
 	}
-	if !providerLoginPayloadIssuer(i.Issuer) || !validProviderLoginOrigin(i.BrowserOrigin) || !validProviderLoginCallback(i.SuccessCallback) || !validProviderLoginCallback(i.ErrorCallback) {
+	if !validProviderLoginOrigin(i.BrowserOrigin) || !validProviderLoginCallback(i.SuccessCallback) || !validProviderLoginCallback(i.ErrorCallback) {
 		return identity.ForbiddenError{}
 	}
 	if _, err := session.NewRememberPolicy(i.Remember); err != nil {
 		return identity.ForbiddenError{}
 	}
-	if !providerLoginPayloadTime(i.IssuedAt) || !providerLoginPayloadTime(i.ExpiresAt) || !i.ExpiresAt.After(i.IssuedAt) || i.ExpiresAt.Sub(i.IssuedAt) > 10*time.Minute {
+	if !providerLoginPayloadTime(i.IssuedAt) || !providerLoginPayloadTime(i.ExpiresAt) || !i.ExpiresAt.After(i.IssuedAt) || i.ExpiresAt.Sub(i.IssuedAt) > providerLoginMaximumStateLifetime(i.Protocol) {
 		return identity.ForbiddenError{}
 	}
 	if i.Link != nil {
 		return i.Link.validate(i.Command, i.IssuedAt, i.ExpiresAt)
 	}
 	return nil
+}
+
+func samlProviderCallbackURL(origin, provider string) (string, bool) {
+	if !validSAMLProviderOrigin(origin) || !providerLoginPayloadText(provider, 128) {
+		return "", false
+	}
+	path := "/saml2/" + provider + "/acs"
+	if _, err := session.NewFrontchannelCookiePolicy(path); err != nil {
+		return "", false
+	}
+	return origin + path, true
 }
 
 func (i providerLoginMemberIntent) validate(binding identity.CommandBinding, issuedAt, expiresAt time.Time) error {
@@ -299,7 +325,7 @@ func providerLoginPayloadTenant(tenant identity.TenantID) bool {
 
 func (r providerLoginRowIdentity) aad() (envelope.Context, error) {
 	protocol, _ := providerLoginCryptoProtocol(r.Protocol)
-	if protocol == "" || !providerLoginPayloadTenant(r.TenantID) || !providerLoginPayloadText(r.OrganizationID, 128) || !providerLoginPayloadText(r.ProviderID, 128) || r.ProviderVersion == 0 || r.CredentialGeneration == 0 || r.MappingVersion == 0 || !providerLoginPayloadTime(r.IssuedAt) || !providerLoginPayloadTime(r.ExpiresAt) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.Sub(r.IssuedAt) > 10*time.Minute {
+	if protocol == "" || !providerLoginPayloadTenant(r.TenantID) || !providerLoginPayloadText(r.OrganizationID, 128) || !providerLoginPayloadText(r.ProviderID, 128) || r.ProviderVersion == 0 || r.CredentialGeneration == 0 || r.MappingVersion == 0 || !providerLoginPayloadTime(r.IssuedAt) || !providerLoginPayloadTime(r.ExpiresAt) || !r.ExpiresAt.After(r.IssuedAt) || r.ExpiresAt.Sub(r.IssuedAt) > providerLoginMaximumStateLifetime(r.Protocol) {
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
 	if _, err := identity.ParseCommandID(string(r.StartCommandID)); err != nil {
@@ -330,8 +356,21 @@ func providerLoginPayloadTime(value time.Time) bool {
 	return !value.IsZero() && value.Location() == time.UTC && value.Nanosecond() == 0 && value.Unix() > 0 && value.Year() <= 9999
 }
 
+func providerLoginMaximumStateLifetime(protocol string) time.Duration {
+	if protocol == providerProtocolSAML {
+		return 5 * time.Minute
+	}
+	return 10 * time.Minute
+}
+
 func (c providerLoginPayloadConfig) ready() bool {
-	return c.Envelope != nil && c.KeyReference != "" && c.Issuer != nil && c.Codec != nil && c.CapabilityIssuer != "" && c.Audience != "" && c.CurrentStateKey != 0 && c.CurrentPKCEKey != 0 && c.StateKeys[c.CurrentStateKey] != ([32]byte{}) && c.PKCEKeys[c.CurrentPKCEKey] != ([32]byte{})
+	return c.readyFor("")
+}
+
+func (c providerLoginPayloadConfig) readyFor(protocol string) bool {
+	return c.Envelope != nil && c.KeyReference != "" && c.Issuer != nil && c.Codec != nil &&
+		c.CapabilityIssuer != "" && c.Audience != "" && c.CurrentStateKey != 0 && c.StateKeys[c.CurrentStateKey] != ([32]byte{}) &&
+		(protocol == providerProtocolSAML || c.CurrentPKCEKey != 0 && c.PKCEKeys[c.CurrentPKCEKey] != ([32]byte{}))
 }
 
 // Generation and complete original input belong to preparation AAD. The
@@ -367,7 +406,8 @@ func providerLoginPayloadAAD(i providerLoginPayloadInput, purpose string, genera
 // URLs beyond Context's per-value limit without truncation. The commitment is
 // excluded because it is subsequently computed over this AAD and the verifier.
 func providerLoginVerifierAAD(metadata providerLoginBindingMetadata) (envelope.Context, error) {
-	if metadata.Schema != 1 || metadata.Input.validate() != nil || metadata.StateDigest == ([32]byte{}) || metadata.StateKey == 0 || metadata.PKCEKey == 0 {
+	if metadata.Schema != 1 || metadata.Input.Protocol == providerProtocolSAML || metadata.Input.validate() != nil ||
+		metadata.StateDigest == ([32]byte{}) || metadata.StateKey == 0 || metadata.PKCEKey == 0 {
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
 	metadata.PKCECommitment = [32]byte{}
@@ -410,11 +450,20 @@ func providerLoginPayloadMAC(key [32]byte, version uint32, domain string, fields
 	return digest
 }
 
+type providerSAMLRedirectSigner func(context.Context, string, time.Time, string) (url.URL, error)
+
 func (c providerLoginPayloadConfig) generate(ctx context.Context, input providerLoginPayloadInput, generation uint64, admitted risk.PreparedAuthenticationAdmission) ([]byte, error) {
+	return c.generateWithSAMLRedirect(ctx, input, generation, admitted, nil)
+}
+
+func (c providerLoginPayloadConfig) generateWithSAMLRedirect(ctx context.Context, input providerLoginPayloadInput, generation uint64, admitted risk.PreparedAuthenticationAdmission, sign providerSAMLRedirectSigner) ([]byte, error) {
+	if (input.Protocol == providerProtocolSAML) != (sign != nil) {
+		return nil, identity.ForbiddenError{}
+	}
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return nil, err
 	}
-	if !c.ready() {
+	if !c.readyFor(input.Protocol) {
 		return nil, identity.ForbiddenError{}
 	}
 	aad, err := providerLoginPayloadAAD(input, "output", generation)
@@ -425,8 +474,11 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 	defer clear(state[:])
 	defer clear(nonce[:])
 	defer clear(rawVerifier[:])
-	for _, raw := range [][]byte{state[:], rawVerifier[:]} {
-		if _, err := rand.Read(raw); err != nil {
+	if _, err := rand.Read(state[:]); err != nil {
+		return nil, identity.UnavailableError{}
+	}
+	if input.Protocol != providerProtocolSAML {
+		if _, err := rand.Read(rawVerifier[:]); err != nil {
 			return nil, identity.UnavailableError{}
 		}
 	}
@@ -442,24 +494,28 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 	if err != nil {
 		return nil, identity.UnavailableError{}
 	}
-	verifier := base64.RawURLEncoding.AppendEncode(nil, rawVerifier[:])
-	defer clear(verifier)
-	challenge := sha256.Sum256(verifier)
 	digest, err := providerLoginProtocolStateDigest(c.StateKeys[c.CurrentStateKey], c.CurrentStateKey, input.Command.TenantID, input.Protocol, state[:])
 	if err != nil {
 		return nil, err
 	}
-	metadata := providerLoginBindingMetadata{Schema: 1, Input: input, CallbackCommand: callback, Public: providerLoginPublicState{State: base64.RawURLEncoding.EncodeToString(state[:]), Nonce: nonceText, Challenge: base64.RawURLEncoding.EncodeToString(challenge[:])}, StateKey: c.CurrentStateKey, PKCEKey: c.CurrentPKCEKey, StateDigest: digest}
-	vaad, err := providerLoginVerifierAAD(metadata)
-	if err != nil {
-		return nil, err
+	metadata := providerLoginBindingMetadata{Schema: 1, Input: input, CallbackCommand: callback, Public: providerLoginPublicState{State: base64.RawURLEncoding.EncodeToString(state[:]), Nonce: nonceText}, StateKey: c.CurrentStateKey, StateDigest: digest}
+	var encryptedVerifier []byte
+	if protocol != providerProtocolSAML {
+		verifier := base64.RawURLEncoding.AppendEncode(nil, rawVerifier[:])
+		defer clear(verifier)
+		challenge := sha256.Sum256(verifier)
+		metadata.Public.Challenge = base64.RawURLEncoding.EncodeToString(challenge[:])
+		metadata.PKCEKey = c.CurrentPKCEKey
+		vaad, err := providerLoginVerifierAAD(metadata)
+		if err != nil {
+			return nil, err
+		}
+		encryptedVerifier, err = c.seal(ctx, vaad, verifier, 4096)
+		if err != nil {
+			return nil, err
+		}
+		metadata.PKCECommitment = providerLoginPayloadMAC(c.PKCEKeys[c.CurrentPKCEKey], c.CurrentPKCEKey, "identity.sso."+protocol+".pkce-verifier.v1", vaad.AdditionalData(), []byte(input.IssuedAt.Format(time.RFC3339Nano)), []byte(input.ExpiresAt.Format(time.RFC3339Nano)), verifier)
 	}
-	encryptedVerifier, err := c.seal(ctx, vaad, verifier, 4096)
-	if err != nil {
-		return nil, err
-	}
-	commitment := providerLoginPayloadMAC(c.PKCEKeys[c.CurrentPKCEKey], c.CurrentPKCEKey, "identity.sso."+protocol+".pkce-verifier.v1", vaad.AdditionalData(), []byte(input.IssuedAt.Format(time.RFC3339Nano)), []byte(input.ExpiresAt.Format(time.RFC3339Nano)), verifier)
-	metadata.PKCECommitment = commitment
 	plainMetadata, err := providerLoginPayloadEncode(metadata)
 	if err != nil {
 		return nil, identity.UnavailableError{}
@@ -480,6 +536,18 @@ func (c providerLoginPayloadConfig) generate(ctx context.Context, input provider
 		return nil, identity.ForbiddenError{}
 	}
 	stored := providerLoginStoredBinding{Metadata: metadata, Plan: providerLoginStoredPlan{Contributor: plan.Contributor, Grant: providerLoginStoredGrant(plan.Grants[0])}}
+	if sign != nil {
+		// RSA-PSS is randomized. Store one signed URL with the original state
+		// rather than signing again when the browser recovers an acknowledgement.
+		redirect, err := sign(ctx, "_"+string(input.Command.CommandID), input.IssuedAt, metadata.Public.State)
+		if err != nil {
+			return nil, err
+		}
+		stored.SAMLRedirect = redirect.String()
+		if _, err := parseRetainedSAMLRedirect(stored.SAMLRedirect, metadata.Public.State); err != nil {
+			return nil, err
+		}
+	}
 	defer func() { clear(stored.Proof) }()
 	checkpoint, err := c.Codec.CheckpointPreparation(ctx, issued, generation, func(ctx context.Context, index uint16, proof []byte) error {
 		if err := providerLoginPayloadContext(ctx); err != nil {
@@ -543,7 +611,7 @@ func (c providerLoginPayloadConfig) openCommittedBinding(ctx context.Context, ro
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return providerLoginStoredBinding{}, err
 	}
-	if !c.ready() {
+	if !c.readyFor(row.Protocol) {
 		return fail()
 	}
 	aad, err := row.aad()
@@ -571,7 +639,7 @@ func (c providerLoginPayloadConfig) restore(ctx context.Context, input providerL
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return providerLoginPayloadOutput{}, err
 	}
-	if !c.ready() {
+	if !c.readyFor(input.Protocol) {
 		return providerLoginPayloadOutput{}, identity.ForbiddenError{}
 	}
 	aad, err := providerLoginPayloadAAD(input, "output", generation)
@@ -584,7 +652,8 @@ func (c providerLoginPayloadConfig) restore(ctx context.Context, input providerL
 	}
 	defer clear(plain)
 	var out providerLoginStoredOutput
-	if providerLoginPayloadDecode(plain, &out) != nil || out.Schema != 1 || out.Generation != generation || len(out.Checkpoint) == 0 || len(out.Checkpoint) > 512<<10 || len(out.Verifier) == 0 || len(out.Verifier) > 4096 {
+	if providerLoginPayloadDecode(plain, &out) != nil || out.Schema != 1 || out.Generation != generation || len(out.Checkpoint) == 0 || len(out.Checkpoint) > 512<<10 ||
+		len(out.Verifier) > 4096 || (len(out.Verifier) == 0) != (input.Protocol == providerProtocolSAML) {
 		return providerLoginPayloadOutput{}, identity.ForbiddenError{}
 	}
 	stored, err := c.openBinding(ctx, input, out.Binding)
@@ -603,9 +672,12 @@ func (c providerLoginPayloadConfig) restore(ctx context.Context, input providerL
 	if err != nil {
 		return providerLoginPayloadOutput{}, identity.ForbiddenError{}
 	}
-	verifier, err := envelope.ParseEnvelope(out.Verifier)
-	if err != nil {
-		return providerLoginPayloadOutput{}, identity.ForbiddenError{}
+	var verifier envelope.Envelope
+	if input.Protocol != providerProtocolSAML {
+		verifier, err = envelope.ParseEnvelope(out.Verifier)
+		if err != nil {
+			return providerLoginPayloadOutput{}, identity.ForbiddenError{}
+		}
 	}
 	m := stored.Metadata
 	state := providerLoginTransactionState{callbackCommand: m.CallbackCommand, stateKey: m.StateKey, pkceKey: m.PKCEKey, stateDigest: m.StateDigest, pkceCommitment: m.PKCECommitment, binding: binding, verifier: verifier, issuedAt: input.IssuedAt, expiresAt: input.ExpiresAt}
@@ -624,7 +696,7 @@ func (c providerLoginPayloadConfig) redirectBinding(ctx context.Context, input p
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return providerLoginBindingMetadata{}, err
 	}
-	if !c.ready() {
+	if !c.readyFor(input.Protocol) {
 		return providerLoginBindingMetadata{}, identity.ForbiddenError{}
 	}
 	stored, err := c.openBinding(ctx, input, persistedBindingEnvelope)
@@ -633,6 +705,47 @@ func (c providerLoginPayloadConfig) redirectBinding(ctx context.Context, input p
 	}
 	defer clear(stored.Proof)
 	return stored.Metadata, nil
+}
+
+func (c providerLoginPayloadConfig) samlRedirect(ctx context.Context, input providerLoginPayloadInput, wire []byte) (url.URL, error) {
+	if input.Protocol != providerProtocolSAML {
+		return url.URL{}, identity.ForbiddenError{}
+	}
+	stored, err := c.openBinding(ctx, input, wire)
+	if err != nil {
+		return url.URL{}, err
+	}
+	defer clear(stored.Proof)
+	return parseRetainedSAMLRedirect(stored.SAMLRedirect, stored.Metadata.Public.State)
+}
+
+func parseRetainedSAMLRedirect(raw, relayState string) (url.URL, error) {
+	const maximumSAMLRedirectBytes = 8192 // Same maximum as sso.ProtocolStartResult.
+	if len(raw) == 0 || len(raw) > maximumSAMLRedirectBytes || relayState == "" {
+		return url.URL{}, identity.ForbiddenError{}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
+		u.Fragment != "" || u.RawFragment != "" || u.RawQuery == "" || u.String() != raw {
+		return url.URL{}, identity.ForbiddenError{}
+	}
+	fields, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return url.URL{}, identity.ForbiddenError{}
+	}
+	for _, name := range []string{"SAMLRequest", "RelayState", "SigAlg", "Signature"} {
+		values := fields[name]
+		if len(values) != 1 || values[0] == "" {
+			return url.URL{}, identity.ForbiddenError{}
+		}
+	}
+	// Only the selected SAML wire engine verifies and signs the binding.
+	// This reader checks retained custody, not protocol signature validity.
+	const samlRSAPSSSHA256 = "http://www.w3.org/2007/05/xmldsig-more#sha256-rsa-MGF1"
+	if fields.Get("RelayState") != relayState || fields.Get("SigAlg") != samlRSAPSSSHA256 {
+		return url.URL{}, identity.ForbiddenError{}
+	}
+	return *u, nil
 }
 
 func (c providerLoginPayloadConfig) seal(ctx context.Context, aad envelope.Context, plain []byte, maximum int) ([]byte, error) {

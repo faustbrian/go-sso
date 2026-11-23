@@ -26,21 +26,35 @@ func providerLoginLifecycle() kernel.LifecyclePlan {
 	return kernel.LifecyclePlan{EventType: "oauth.rp_transaction.created.v1", AfterVersion: 1}
 }
 
+func (p *providerLoginPhase) lifecycle() kernel.LifecyclePlan {
+	if p.protocol == providerProtocolSAML {
+		return kernel.LifecyclePlan{EventType: "sso.saml_transaction.created.v1", AfterVersion: 1}
+	}
+	return providerLoginLifecycle()
+}
+
 var (
 	_ kernel.FeatureAdmissionPreparationContributor = (*providerLoginPhase)(nil)
 	_ kernel.RequestKeyPreparationContributor       = (*providerLoginPhase)(nil)
 )
 
 func (p *providerLoginPhase) Descriptor() kernel.ContributorDescriptor {
-	if p.protocol == providerProtocolOAuth2 {
+	switch p.protocol {
+	case providerProtocolOAuth2:
 		return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oauth2-login-start", Version: 1}
+	case providerProtocolSAML:
+		return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.saml-login-start", Version: 1}
+	default:
+		return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oidc-login-start", Version: 1}
 	}
-	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oidc-login-start", Version: 1}
 }
 
 func (p *providerLoginPhase) operation() identity.FeatureOperation {
-	if p.protocol == providerProtocolOAuth2 {
+	switch p.protocol {
+	case providerProtocolOAuth2:
 		return kernel.SSOOAuth2SigninStartOperation()
+	case providerProtocolSAML:
+		return kernel.SSOSAMLSigninStartOperation()
 	}
 	if p.member != nil {
 		return providerExplicitLinkStartOperation()
@@ -97,7 +111,7 @@ func (p *providerLoginPhase) ValidateFeatureCommand(command identity.Command, pl
 		return identity.ForbiddenError{}
 	}
 	if plan.Feature != nil && (*plan.Feature != p.registration() || plan.SubjectType != providerLoginSubject ||
-		plan.CommandCounters != nil || plan.Lifecycle == nil || *plan.Lifecycle != providerLoginLifecycle() ||
+		plan.CommandCounters != nil || plan.Lifecycle == nil || *plan.Lifecycle != p.lifecycle() ||
 		plan.Delivery != nil || plan.Capability != nil) {
 		return identity.ForbiddenError{}
 	}
@@ -126,7 +140,7 @@ func (p *providerLoginPhase) plan(registry *kernel.ContributorRegistry, issuance
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
-	operation, lifecycle := p.registration(), providerLoginLifecycle()
+	operation, lifecycle := p.registration(), p.lifecycle()
 	return kernel.CommandPlan{Contributors: contributors, Feature: &operation, SubjectType: providerLoginSubject,
 		Audits: []kernel.AuditPlan{auditPlan}, Lifecycle: &lifecycle, CapabilityIssuance: issuance}, nil
 }
@@ -168,7 +182,7 @@ func (p *providerLoginPhase) auditPlan() (kernel.AuditPlan, error) {
 func (p *providerLoginPhase) checkPrimary(ctx context.Context, work kernel.Work, command identity.Command) error {
 	b, feature, lifecycle, err := work.FeatureScope(p)
 	if err != nil || p.input == nil || b != identity.CommandBinding(p.input.Command) ||
-		feature != p.registration() || lifecycle != providerLoginLifecycle() {
+		feature != p.registration() || lifecycle != p.lifecycle() {
 		return identity.ForbiddenError{}
 	}
 	if err := p.ValidateFeatureCommand(command, kernel.CommandPlan{}); err != nil {
@@ -294,7 +308,11 @@ func (a providerLoginAdmission) Generate(ctx context.Context, generation uint64)
 	if err := a.Check(ctx); err != nil {
 		return nil, err
 	}
-	return a.phase.service.payload.generate(ctx, a.phase.input.payload(), generation, a.admission.Prepared())
+	p := a.phase
+	if p.protocol == providerProtocolSAML {
+		return p.service.payload.generateWithSAMLRedirect(ctx, p.input.payload(), generation, a.admission.Prepared(), p.signSAMLRedirect)
+	}
+	return p.service.payload.generate(ctx, p.input.payload(), generation, a.admission.Prepared())
 }
 
 func (p *providerLoginPhase) PrepareFeatureAdmission(ctx context.Context, command identity.Command) (kernel.FeaturePreparationAdmission, error) {

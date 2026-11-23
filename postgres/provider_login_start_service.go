@@ -87,6 +87,7 @@ type ProviderLoginService struct {
 	oauthDigest       [32]byte
 	oauthStartAdapter *providerOAuth2StartAdapter
 	oidcStartAdapter  *providerOIDCStartAdapter
+	saml              *providerSAMLStart
 	payload           providerLoginPayloadConfig
 	callbackVerifier  capability.Service
 	callbackLimits    capability.Limits
@@ -102,7 +103,7 @@ type providerLoginProfileKey struct {
 // NewProviderLoginService composes the explicitly selected static OIDC native
 // start profile on the router's primary, without I/O or background work.
 func NewProviderLoginService(router *ProviderRouter, config ProviderLoginConfig) (*ProviderLoginService, error) {
-	return newProviderLoginService(router, config, nil)
+	return newProviderLoginService(router, config, nil, nil)
 }
 
 // NewProviderLoginServiceWithOAuth2 opts into explicitly selected static OAuth
@@ -114,10 +115,10 @@ func NewProviderLoginServiceWithOAuth2(router *ProviderRouter, config ProviderLo
 	if router == nil || !router.protocolRegistry || len(oauthProfiles) == 0 || len(oauthProfiles) > 128 {
 		return nil, sso.ErrInvalidInput
 	}
-	return newProviderLoginService(router, config, oauthProfiles)
+	return newProviderLoginService(router, config, oauthProfiles, nil)
 }
 
-func newProviderLoginService(router *ProviderRouter, config ProviderLoginConfig, oauthProfiles []StaticOAuth2LoginProfile) (*ProviderLoginService, error) {
+func newProviderLoginService(router *ProviderRouter, config ProviderLoginConfig, oauthProfiles []StaticOAuth2LoginProfile, saml *providerSAMLStart) (*ProviderLoginService, error) {
 	if router == nil || router.pool == nil || router.pool.Raw() == nil || config.Envelope == nil ||
 		!providerID(string(config.TenantID)) || !providerID(string(config.ActorID)) || !providerID(config.PolicyID) ||
 		!providerID(config.GlobalAuthorityID) || !providerID(config.ConfigurationID) || !providerID(config.KeyReference) ||
@@ -127,7 +128,7 @@ func newProviderLoginService(router *ProviderRouter, config ProviderLoginConfig,
 	if config.Coordinator.MaximumDuration < time.Millisecond || config.Coordinator.MaximumDuration > 30*time.Second ||
 		config.StateLifetime < time.Minute || config.StateLifetime > 10*time.Minute || config.StateLifetime%time.Second != 0 ||
 		config.Session.MaximumDuration <= 0 || config.Session.MaximumDuration > config.Coordinator.MaximumDuration ||
-		len(config.FlowKeys) == 0 || len(config.FlowKeys) > 32 || len(config.Profiles)+len(oauthProfiles) == 0 || len(config.Profiles) > 128 ||
+		len(config.FlowKeys) == 0 || len(config.FlowKeys) > 32 || saml == nil && len(config.Profiles)+len(oauthProfiles) == 0 || len(config.Profiles) > 128 ||
 		len(config.CallbackAllowlist) == 0 || len(config.CallbackAllowlist) > 64 {
 		return nil, sso.ErrInvalidInput
 	}
@@ -169,7 +170,7 @@ func newProviderLoginService(router *ProviderRouter, config ProviderLoginConfig,
 		}
 		callbacks[callback] = struct{}{}
 	}
-	if !validProviderLoginKeys(config) {
+	if !validProviderLoginKeys(config, saml == nil) {
 		return nil, sso.ErrInvalidInput
 	}
 	issuer, err := capabilitypg.NewIssuer(config.Capability)
@@ -232,8 +233,17 @@ func newProviderLoginService(router *ProviderRouter, config ProviderLoginConfig,
 		router: router, config: config, directory: directory, policyVersion: admissionCopy.PolicyVersion,
 		profiles: profiles, providerDomains: domains, callbacks: callbacks, profileDigest: sha256.Sum256(frame),
 		payload: payload, callbackVerifier: callbackVerifier, callbackLimits: callbackLimits, custody: custody,
+		saml: saml,
 	}
-	if _, _, err := s.coordinator(&providerLoginPhase{service: s}); err != nil {
+	baseProtocol := ""
+	if saml != nil {
+		baseProtocol = providerProtocolSAML
+		var selection [64]byte
+		copy(selection[:32], s.profileDigest[:])
+		copy(selection[32:], saml.digest[:])
+		saml.digest = sha256.Sum256(selection[:])
+	}
+	if _, _, err := s.coordinator(&providerLoginPhase{service: s, protocol: baseProtocol}); err != nil {
 		return nil, sso.ErrInvalidInput
 	}
 	if len(oauthProfiles) != 0 {
@@ -305,7 +315,7 @@ func (s *ProviderLoginService) SigninStartOAuth2(ctx context.Context, request ss
 }
 
 func (s *ProviderLoginService) startProviderTransactionForProtocol(ctx context.Context, request sso.SigninStartRequest, browser ProviderLoginBrowser, member *providerLoginMemberAdmission, protocol string) (out sso.SigninStartResult, err error) {
-	if s == nil || s.router == nil || ctx == nil || request.Validate() != nil {
+	if s == nil || s.router == nil || ctx == nil || !s.validateStartRequest(request, member, protocol) {
 		return out, sso.ErrInvalidInput
 	}
 	if browser.Origin != s.config.Origin || !browser.Network.IsValid() || browser.Network.Is4In6() ||
@@ -338,7 +348,7 @@ func (s *ProviderLoginService) startProviderTransactionForProtocol(ctx context.C
 		return out, providerError(ctx, err)
 	}
 	p.registry = registry
-	key, wire, err := coordinator.ResolvePreparedRequestKey(ctx, p.startScope(), request.IdempotencyKey, intent, p.startCaller(), p.registration(), p)
+	key, wire, err := p.resolveStartRequest(ctx, coordinator, intent)
 	if err != nil {
 		// The generic request mapper masks contributor errors. Preserve only a
 		// denial observed by this invocation, never a dependency or commit error.
@@ -372,6 +382,18 @@ func (s *ProviderLoginService) startProviderTransactionForProtocol(ctx context.C
 		return out, identity.UnknownCommitError{CommandID: key.Admission.CommandID}
 	}
 	return p.committedRedirect(ctx, out)
+}
+
+func (s *ProviderLoginService) validateStartRequest(request sso.SigninStartRequest, member *providerLoginMemberAdmission, protocol string) bool {
+	if protocol != providerProtocolSAML {
+		return s.saml == nil && request.Validate() == nil
+	}
+	if s.saml == nil || member != nil || request.CommandID != "" || !validProviderLoginCallback(request.SuccessCallback.String()) ||
+		!validProviderLoginCallback(request.ErrorCallback.String()) {
+		return false
+	}
+	_, err := request.LoginIntent.RememberPolicy()
+	return err == nil
 }
 
 func (s *ProviderLoginService) requestScope() kernel.RequestKeyScope {
@@ -426,6 +448,9 @@ func (p *providerLoginPhase) selectRoute(ctx context.Context) (sso.DomainRoute, 
 	if err != nil {
 		return sso.DomainRoute{}, providerLoginProfile{}, sso.ErrForbidden
 	}
+	if p.protocol == providerProtocolSAML {
+		return p.selectSAMLRoute(ctx, lookup)
+	}
 	route, err := s.router.RouteOAuth2(ctx, lookup)
 	if err != nil {
 		return sso.DomainRoute{}, providerLoginProfile{}, err
@@ -459,13 +484,20 @@ func (s *ProviderLoginService) coordinator(p *providerLoginPhase) (*kernel.Coord
 	if err != nil {
 		return nil, nil, err
 	}
-	coordinator, err := kernel.NewCoordinatorWithRequestKeys(s.router.pool, registry, s.config.Coordinator, s.config.RequestKeys)
+	newCoordinator := kernel.NewCoordinatorWithRequestKeys
+	if p.protocol == providerProtocolSAML {
+		newCoordinator = kernel.NewCoordinatorWithCanonicalSSOSAMLStartRequestKeys
+	}
+	coordinator, err := newCoordinator(s.router.pool, registry, s.config.Coordinator, s.config.RequestKeys)
 	return coordinator, registry, err
 }
 
-func validProviderLoginKeys(c ProviderLoginConfig) bool {
-	if len(c.StateKeys) < 1 || len(c.StateKeys) > 32 || len(c.PKCEKeys) < 1 || len(c.PKCEKeys) > 32 ||
-		c.StateKeys[c.CurrentStateKey] == ([32]byte{}) || c.PKCEKeys[c.CurrentPKCEKey] == ([32]byte{}) {
+func validProviderLoginKeys(c ProviderLoginConfig, requirePKCE bool) bool {
+	if len(c.StateKeys) < 1 || len(c.StateKeys) > 32 || c.StateKeys[c.CurrentStateKey] == ([32]byte{}) {
+		return false
+	}
+	if requirePKCE && (len(c.PKCEKeys) < 1 || len(c.PKCEKeys) > 32 || c.PKCEKeys[c.CurrentPKCEKey] == ([32]byte{})) ||
+		!requirePKCE && (len(c.PKCEKeys) != 0 || c.CurrentPKCEKey != 0) {
 		return false
 	}
 	for version, state := range c.StateKeys {

@@ -263,13 +263,18 @@ func TestNativeSAMLSigningCertificateExpiryFencesFinalCommit(t *testing.T) {
 
 func nativeSAMLSigningCredentialRequest(t *testing.T, f *orgFixture, config ssopg.ProviderServiceConfig, provider string, version, generation uint64, bundle []byte) sso.ProviderCredentialsRotateRequest {
 	t.Helper()
+	return nativeSAMLSigningCredentialRequestForTenant(t, f, config, "org-test-basic", provider, version, generation, bundle)
+}
+
+func nativeSAMLSigningCredentialRequestForTenant(t *testing.T, f *orgFixture, config ssopg.ProviderServiceConfig, tenant identity.TenantID, provider string, version, generation uint64, bundle []byte) sso.ProviderCredentialsRotateRequest {
+	t.Helper()
 	var at time.Time
 	if err := f.pool.Raw().QueryRow(f.ctx, `SELECT clock_timestamp()`).Scan(&at); err != nil {
 		t.Fatal(err)
 	}
 	at = at.UTC().Truncate(time.Microsecond)
 	binding := sso.CredentialReferenceContext{
-		TenantID: "org-test-basic", OrganizationID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", ProviderID: provider,
+		TenantID: string(tenant), OrganizationID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", ProviderID: provider,
 		Protocol: "saml", Purpose: "sp-signing-key", Generation: generation, ProviderVersion: version,
 		Audience: "identity.sso.provider.credentials-rotate", EnvelopeKeyID: config.KeyReference,
 		IssuedAt: at, ExpiresAt: at.Add(time.Minute),

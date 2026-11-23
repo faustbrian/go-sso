@@ -39,6 +39,21 @@ type providerLoginProfile struct {
 	protocol                      string
 	oauthConfiguration            providerOAuthConfiguration
 	mapping                       sso.AttributeMappingSpec
+	saml                          *providerSAMLLoginProfile
+}
+
+func (p providerLoginProfile) mappingVersion() uint64 {
+	if p.saml != nil {
+		return p.saml.configured.MappingVersion
+	}
+	return p.configured.MappingVersion
+}
+
+func (p providerLoginProfile) protocolRedirectURI() string {
+	if p.saml != nil {
+		return p.saml.acsURL
+	}
+	return p.configured.ProtocolRedirectURI
 }
 
 func normalizeStaticOIDCLoginProfile(p StaticOIDCLoginProfile) (StaticOIDCLoginProfile, error) {

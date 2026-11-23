@@ -86,6 +86,22 @@ provider disposition. SAML rows cannot store PKCE material and have an
 original lifetime of at most five minutes. Existing OIDC/OAuth2 rows retain
 their original verifier rules and indexes. Keep the expansion on rollback.
 
+Install the kernel's `CanonicalSAMLStartRequestMigrationSource` and
+`SSOSAMLStartPreparationErasureMigrationSource`. Create a distinct canonical
+request namespace and select `NewProviderLoginServiceWithSAML` with exact
+enabled provider, organization, verified domain, origin and generation pins.
+The signing port should call the optional SAML module's
+`AuthnRedirectProfile.RedirectWithSPSigningCredential` with the supplied
+borrowed bundle, original request ID, issue time and opaque RelayState.
+No OAuth client, scopes, or PKCE keys belong in this composition.
+
+Issue the original browser flow with `session.NewSAMLFrontchannelIssuer`
+for the exact provider ACS, then call `SigninStartSAML` with that browser
+custody and allowlisted application callbacks. Disclose the redirect only
+after success. A retry of the original browser flow retains the exact
+signed URL; an optional client key aliases it and cannot allocate another
+start. The native start does not handle a signed response or issue a session.
+
 Install `SAMLReplayMigrationSource` after the native identity command and
 SSO provider migrations. Choose the next unused version in that migration
 history. Installation creates an empty table, bounds the foreign-key lock

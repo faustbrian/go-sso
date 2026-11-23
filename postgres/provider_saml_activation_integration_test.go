@@ -23,7 +23,12 @@ import (
 
 func newProviderSAMLActivationFixture(t *testing.T) providerEnableFixture {
 	t.Helper()
-	f, base, config := newProviderFixtureWithUpdates(t, false,
+	return newProviderSAMLActivationFixtureForTenant(t, "org-test-basic")
+}
+
+func newProviderSAMLActivationFixtureForTenant(t *testing.T, tenant identity.TenantID) providerEnableFixture {
+	t.Helper()
+	f, base, config := newProviderFixtureForTenant(t, tenant, false,
 		organizationpg.DomainClaimMigrationSource{Version: 316},
 		organizationpg.DomainEvidenceMigrationSource{Version: 317})
 	installProviderSAMLActivationHistory(t, f)
@@ -59,13 +64,13 @@ func newProviderSAMLActivationFixture(t *testing.T) providerEnableFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	credential := nativeSAMLSigningCredentialRequest(t, f, config, registered.Provider.ID, 1, 1, bundle)
+	credential := nativeSAMLSigningCredentialRequestForTenant(t, f, config, tenant, registered.Provider.ID, 1, 1, bundle)
 	installed, err := nativeCredentialService(t, base).ProviderCredentialsRotate(f.ctx, credential)
 	if err != nil || installed.Completion.Outcome != identity.CommitOutcomeCommitted || installed.Version != 2 || !installed.Active {
 		t.Fatal("install encrypted SP signer on the disabled predecessor", err)
 	}
 	assertSAMLSigningCredentialState(t, f, registered.Provider.ID, "2", 1)
-	proof := enableTestProof(t, f, registration.OrganizationID, registration.Domains[0], "test-saml-activation-domain", 1)
+	proof := enableTestProofForTenant(t, f, tenant, registration.OrganizationID, registration.Domains[0], "test-saml-activation-domain", 1)
 	service, err := base.WithProviderEnableAuthorization(enablePolicy{})
 	if err != nil {
 		t.Fatal(err)

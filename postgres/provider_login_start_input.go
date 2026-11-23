@@ -58,9 +58,13 @@ func (i providerLoginStartInput) authority() (providerLoginAuthority, error) {
 		PolicyVersion: i.RoutePolicy, Proof: proof, ObservedAt: i.RouteObservedAt, ValidUntil: i.RouteValidUntil,
 	}
 	create := sso.NewDomainRoute
-	if i.Protocol == providerProtocolOAuth2 {
+	switch i.Protocol {
+	case providerProtocolOAuth2:
 		create = sso.NewOAuth2DomainRoute
-	} else if i.Protocol != "" {
+	case providerProtocolSAML:
+		create = sso.NewSAMLDomainRoute
+	case "":
+	default:
 		return providerLoginAuthority{}, identity.ForbiddenError{}
 	}
 	route, err := create(binding)
@@ -123,7 +127,15 @@ func (p *providerLoginPhase) requireBrowser(flow session.PreAuthTransaction, now
 		return identity.ForbiddenError{}
 	}
 	_, action := providerLoginCryptoProtocol(p.protocol)
-	return p.service.requireProviderLoginBrowserForAction(flow, now, p.browser, p.request.SuccessCallback.String(), remember, action)
+	callback := p.request.SuccessCallback.String()
+	if p.protocol == providerProtocolSAML {
+		var ok bool
+		callback, ok = samlProviderCallbackURL(p.service.config.Origin, p.request.ProviderID)
+		if !ok {
+			return identity.ForbiddenError{}
+		}
+	}
+	return p.service.requireProviderLoginBrowserForAction(flow, now, p.browser, callback, remember, action)
 }
 
 func (s *ProviderLoginService) requireProviderLoginBrowser(flow session.PreAuthTransaction, now time.Time, browser ProviderLoginBrowser, successCallback string, remember session.RememberPolicy) error {
@@ -164,8 +176,11 @@ func (p *providerLoginPhase) requestIntent() (identity.RequestIntent, error) {
 		return identity.RequestIntent{}, err
 	}
 	profileDigest := p.service.profileDigest
-	if p.protocol == providerProtocolOAuth2 {
+	switch p.protocol {
+	case providerProtocolOAuth2:
 		profileDigest = p.service.oauthDigest
+	case providerProtocolSAML:
+		profileDigest = p.service.saml.digest
 	}
 	b, i, r := flow.Binding, flow.Binding.Intent, p.request
 	remember, err := i.Remember.Bindings()
@@ -269,12 +284,14 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 	// Check the complete wire-size bound before reserving an irreversible
 	// generation. Real public values use the same fixed base64url length.
 	const publicFieldShape = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	shape := providerLoginPublicState{State: publicFieldShape, Challenge: publicFieldShape}
-	if p.protocol == "" {
-		shape.Nonce = publicFieldShape
-	}
-	if _, err := profile.authorizationRedirect(shape); err != nil {
-		return nil, identity.ForbiddenError{}
+	if p.protocol != providerProtocolSAML {
+		shape := providerLoginPublicState{State: publicFieldShape, Challenge: publicFieldShape}
+		if p.protocol == "" {
+			shape.Nonce = publicFieldShape
+		}
+		if _, err := profile.authorizationRedirect(shape); err != nil {
+			return nil, identity.ForbiddenError{}
+		}
 	}
 	authority, err := s.router.observeProviderLoginAuthority(ctx, selected)
 	if err != nil {
@@ -309,9 +326,9 @@ func (p *providerLoginPhase) PrepareRequestKey(ctx context.Context, k kernel.Req
 		ProviderID: route.ProviderID, ProviderVersion: route.ProviderVersion, Generation: route.CredentialGeneration,
 		RoutePolicy: route.PolicyVersion, Proof: route.Proof.Key,
 		RouteObservedAt: route.ObservedAt, RouteValidUntil: route.ValidUntil, Organization: authority.organization,
-		GlobalVersion: directory.GlobalVersion, TenantVersion: directory.TenantVersion, MappingVersion: profile.configured.MappingVersion,
+		GlobalVersion: directory.GlobalVersion, TenantVersion: directory.TenantVersion, MappingVersion: profile.mappingVersion(),
 		Issuer: profile.issuer, AuthorizationEndpoint: profile.authorizationEndpoint,
-		ClientID: profile.configured.ClientID, ProtocolRedirectURI: profile.configured.ProtocolRedirectURI,
+		ClientID: profile.configured.ClientID, ProtocolRedirectURI: profile.protocolRedirectURI(),
 		BrowserOrigin: p.browser.Origin, SuccessCallback: p.request.SuccessCallback.String(), ErrorCallback: p.request.ErrorCallback.String(),
 		Remember: remember,
 		Started:  now, Issued: issued, Expires: expires, Protocol: p.protocol,
@@ -387,15 +404,7 @@ func (p *providerLoginPhase) openOriginalInput(ctx context.Context, k kernel.Req
 		input.Expires.After(input.Issued.Add(p.service.config.StateLifetime)) {
 		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
-	key := providerLoginProfileKey{input.Proof.OrganizationID, input.ProviderID}
-	profile, ok := p.service.profiles[key]
-	if p.protocol == providerProtocolOAuth2 {
-		selected, found := p.service.oauthProfiles[key]
-		profile, ok = StaticOIDCLoginProfile(selected), found
-	}
-	if !ok || profile.Domain != input.Proof.Domain || profile.ProviderVersion != input.ProviderVersion ||
-		profile.CredentialGeneration != input.Generation || profile.MappingVersion != input.MappingVersion ||
-		profile.ClientID != input.ClientID || profile.ProtocolRedirectURI != input.ProtocolRedirectURI {
+	if !p.matchesConfiguredStart(input) {
 		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
 	if _, err := input.authority(); err != nil {
@@ -405,6 +414,34 @@ func (p *providerLoginPhase) openOriginalInput(ctx context.Context, k kernel.Req
 		return providerLoginStartInput{}, identity.ForbiddenError{}
 	}
 	return input, nil
+}
+
+func (p *providerLoginPhase) matchesConfiguredStart(input providerLoginStartInput) bool {
+	if p.protocol == providerProtocolSAML {
+		if p.service.saml == nil {
+			return false
+		}
+		selected, found := p.service.saml.profiles[input.ProviderID]
+		acsURL, valid := samlProviderCallbackURL(selected.TrustedOrigin, string(input.ProviderID))
+		return found && valid && selected.OrganizationID == input.Proof.OrganizationID && selected.Domain == input.Proof.Domain &&
+			selected.ProviderVersion == input.ProviderVersion && selected.CredentialGeneration == input.Generation &&
+			selected.MappingVersion == input.MappingVersion && acsURL == input.ProtocolRedirectURI && input.ClientID == ""
+	}
+	key := providerLoginProfileKey{input.Proof.OrganizationID, input.ProviderID}
+	profile, found := p.service.profiles[key]
+	if p.protocol == providerProtocolOAuth2 {
+		selected, ok := p.service.oauthProfiles[key]
+		profile, found = StaticOIDCLoginProfile(selected), ok
+	}
+	return found && profile.Domain == input.Proof.Domain && profile.ProviderVersion == input.ProviderVersion &&
+		profile.CredentialGeneration == input.Generation && profile.MappingVersion == input.MappingVersion &&
+		profile.ClientID == input.ClientID && profile.ProtocolRedirectURI == input.ProtocolRedirectURI
+}
+
+func (i providerLoginStartInput) matchesSelectedRoute(route sso.DomainRouteBinding, profile providerLoginProfile) bool {
+	return route.Proof.Key == i.Proof && route.ProviderID == i.ProviderID && route.ProviderVersion == i.ProviderVersion &&
+		route.CredentialGeneration == i.Generation && route.PolicyVersion == i.RoutePolicy && profile.mappingVersion() == i.MappingVersion &&
+		profile.issuer == i.Issuer && profile.authorizationEndpoint == i.AuthorizationEndpoint
 }
 
 func earlierLoginTime(a, b time.Time) time.Time {

@@ -80,6 +80,7 @@ SELECT true FROM eligible_provider WHERE clock_timestamp() < $7::timestamptz`
 
 const providerLoginAdmissionFenceSQL = providerLoginAdmissionFencePrefixSQL + providerLoginAdmissionFenceSuffixSQL
 const providerLoginOAuth2AdmissionFenceSQL = providerLoginAdmissionFencePrefixSQL + ` AND p.protocol='oauth2'` + providerLoginAdmissionFenceSuffixSQL
+const providerLoginSAMLAdmissionFenceSQL = providerLoginAdmissionFencePrefixSQL + ` AND p.protocol='saml'` + providerLoginAdmissionFenceSuffixSQL
 
 // The provider lock grants neither browser possession nor identity authority.
 // It must follow the organization proof fence in the same Work.
@@ -92,20 +93,25 @@ func requireProviderLoginAdmission(ctx context.Context, work kernel.Work, select
 		return err
 	}
 	proof := selected.Proof.Key
-	if binding.TenantID != proof.TenantID || binding.OperationID != "identity.sso.signin-start" {
+	if binding.TenantID != proof.TenantID {
 		return identity.ForbiddenError{}
 	}
 	query := providerLoginAdmissionFenceSQL
 	switch protocol {
 	case "oidc":
-		if binding.SchemaID == kernel.SSOOAuth2SigninStartOperation().SchemaID {
+		if binding.OperationID != providerSigninStart || binding.SchemaID == kernel.SSOOAuth2SigninStartOperation().SchemaID {
 			return identity.ForbiddenError{}
 		}
 	case providerProtocolOAuth2:
-		if binding.SchemaID != kernel.SSOOAuth2SigninStartOperation().SchemaID {
+		if binding.OperationID != providerSigninStart || binding.SchemaID != kernel.SSOOAuth2SigninStartOperation().SchemaID {
 			return identity.ForbiddenError{}
 		}
 		query = providerLoginOAuth2AdmissionFenceSQL
+	case providerProtocolSAML:
+		if binding.ValidateFor(kernel.SSOSAMLSigninStartOperation()) != nil {
+			return identity.ForbiddenError{}
+		}
+		query = providerLoginSAMLAdmissionFenceSQL
 	default:
 		return identity.ForbiddenError{}
 	}

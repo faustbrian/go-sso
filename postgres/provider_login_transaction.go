@@ -32,6 +32,9 @@ const insertProviderLoginSuffixSQL = `,$9,$10,$11,$12,$13,$14,$15,$16
 
 const insertProviderLoginTransactionSQL = insertProviderLoginPrefixSQL + `'oidc'` + insertProviderLoginSuffixSQL
 const insertProviderLoginOAuth2TransactionSQL = insertProviderLoginPrefixSQL + `'oauth2'` + insertProviderLoginSuffixSQL
+const insertProviderLoginSAMLTransactionSQL = insertProviderLoginPrefixSQL + `'saml',$9,$10,NULL,NULL,$11,NULL,$12,$13
+ WHERE $12::timestamptz<=statement_timestamp()
+ AND statement_timestamp()<LEAST($13::timestamptz,$14::timestamptz)`
 
 // Stage only during the original enrolled Apply. The calling feature also
 // owns pre-auth possession, risk, and capability issuance in this same Work;
@@ -44,7 +47,10 @@ func (r *ProviderRouter) persistProviderLoginStart(ctx context.Context, work ker
 	if err != nil {
 		return err
 	}
-	if _, err := identity.ParseCommandID(string(state.callbackCommand)); err != nil || state.callbackCommand == b.CommandID || b.RecordID != string(b.CommandID) || state.stateKey == 0 || state.pkceKey == 0 || state.stateDigest == ([32]byte{}) || state.pkceCommitment == ([32]byte{}) || state.issuedAt.IsZero() || state.expiresAt.Sub(state.issuedAt) <= 0 || state.expiresAt.Sub(state.issuedAt) > 10*time.Minute {
+	protocol := authority.route.Protocol()
+	if _, err := identity.ParseCommandID(string(state.callbackCommand)); err != nil || state.callbackCommand == b.CommandID || b.RecordID != string(b.CommandID) ||
+		state.stateKey == 0 || state.stateDigest == ([32]byte{}) || state.issuedAt.IsZero() || !state.issuedAt.Before(state.expiresAt) ||
+		state.expiresAt.Sub(state.issuedAt) > providerLoginMaximumStateLifetime(protocol) {
 		return identity.ForbiddenError{}
 	}
 	selected, err := authority.route.Bindings()
@@ -56,16 +62,30 @@ func (r *ProviderRouter) persistProviderLoginStart(ctx context.Context, work ker
 	if err != nil || len(sealedBinding) == 0 || len(sealedBinding) > 65536 {
 		return identity.ForbiddenError{}
 	}
+	if err := r.requireProviderLoginAuthority(ctx, work, owner, authority, mapping); err != nil {
+		return err
+	}
+	if protocol == providerProtocolSAML {
+		if state.pkceKey != 0 || state.pkceCommitment != ([32]byte{}) || state.verifier.KeyReference() != "" {
+			return identity.ForbiddenError{}
+		}
+		n, err := work.Exec(ctx, insertProviderLoginSAMLTransactionSQL,
+			string(b.TenantID), string(selected.Proof.Key.OrganizationID), string(selected.ProviderID),
+			strconv.FormatUint(selected.ProviderVersion, 10), strconv.FormatUint(selected.CredentialGeneration, 10), strconv.FormatUint(mapping, 10),
+			string(b.CommandID), string(state.callbackCommand), int64(state.stateKey), state.stateDigest[:],
+			sealedBinding, state.issuedAt, state.expiresAt, providerLoginDeadline(selected, authority.organization))
+		return providerLoginInsertOutcome(n, err)
+	}
+	if state.pkceKey == 0 || state.pkceCommitment == ([32]byte{}) {
+		return identity.ForbiddenError{}
+	}
 	sealedVerifier, err := state.verifier.MarshalBinary()
 	defer clear(sealedVerifier)
 	if err != nil || len(sealedVerifier) == 0 || len(sealedVerifier) > 4096 {
 		return identity.ForbiddenError{}
 	}
-	if err := r.requireProviderLoginAuthority(ctx, work, owner, authority, mapping); err != nil {
-		return err
-	}
 	query := insertProviderLoginTransactionSQL
-	if authority.route.Protocol() == providerProtocolOAuth2 {
+	if protocol == providerProtocolOAuth2 {
 		query = insertProviderLoginOAuth2TransactionSQL
 	}
 	n, err := work.Exec(ctx, query,
@@ -73,6 +93,10 @@ func (r *ProviderRouter) persistProviderLoginStart(ctx context.Context, work ker
 		strconv.FormatUint(selected.ProviderVersion, 10), strconv.FormatUint(selected.CredentialGeneration, 10), strconv.FormatUint(mapping, 10),
 		string(b.CommandID), string(state.callbackCommand), int64(state.stateKey), state.stateDigest[:], int64(state.pkceKey), state.pkceCommitment[:],
 		sealedBinding, sealedVerifier, state.issuedAt, state.expiresAt, providerLoginDeadline(selected, authority.organization))
+	return providerLoginInsertOutcome(n, err)
+}
+
+func providerLoginInsertOutcome(n int64, err error) error {
 	if err != nil {
 		return err
 	}

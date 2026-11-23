@@ -115,17 +115,28 @@ func (c providerLoginPayloadConfig) openProviderLoginProtocolCallbackTerminal(ct
 }
 
 func (c providerLoginPayloadConfig) validProviderLoginBindingMetadata(row providerLoginRowIdentity, m providerLoginBindingMetadata) bool {
-	if m.Schema != 1 || m.Input.validate() != nil || !reflect.DeepEqual(m.Input.rowIdentity(), row) || m.StateKey == 0 || m.PKCEKey == 0 || c.StateKeys[m.StateKey] == ([32]byte{}) || c.PKCEKeys[m.PKCEKey] == ([32]byte{}) || m.PKCECommitment == ([32]byte{}) || m.CallbackCommand == row.StartCommandID {
+	if m.Schema != 1 || m.Input.validate() != nil || !reflect.DeepEqual(m.Input.rowIdentity(), row) || m.StateKey == 0 ||
+		c.StateKeys[m.StateKey] == ([32]byte{}) || m.CallbackCommand == row.StartCommandID {
 		return false
 	}
 	if _, err := identity.ParseCommandID(string(m.CallbackCommand)); err != nil {
 		return false
 	}
-	values := []string{m.Public.State, m.Public.Challenge}
-	if row.Protocol == "" {
-		values = append(values, m.Public.Nonce)
-	} else if m.Public.Nonce != "" {
-		return false
+	values := []string{m.Public.State}
+	if row.Protocol == providerProtocolSAML {
+		if m.PKCEKey != 0 || m.PKCECommitment != ([32]byte{}) || m.Public.Challenge != "" || m.Public.Nonce != "" {
+			return false
+		}
+	} else {
+		if m.PKCEKey == 0 || c.PKCEKeys[m.PKCEKey] == ([32]byte{}) || m.PKCECommitment == ([32]byte{}) {
+			return false
+		}
+		values = append(values, m.Public.Challenge)
+		if row.Protocol == "" {
+			values = append(values, m.Public.Nonce)
+		} else if m.Public.Nonce != "" {
+			return false
+		}
 	}
 	for _, value := range values {
 		if len(value) != 43 {
@@ -146,6 +157,13 @@ func (c providerLoginPayloadConfig) validProviderLoginBindingMetadata(row provid
 
 func (c providerLoginPayloadConfig) validProviderLoginPendingBinding(row providerLoginRowIdentity, stored providerLoginStoredBinding) bool {
 	if !c.validProviderLoginBindingMetadata(row, stored.Metadata) || c.Issuer == nil {
+		return false
+	}
+	if row.Protocol == providerProtocolSAML {
+		if _, err := parseRetainedSAMLRedirect(stored.SAMLRedirect, stored.Metadata.Public.State); err != nil {
+			return false
+		}
+	} else if stored.SAMLRedirect != "" {
 		return false
 	}
 	grant := kernel.CapabilityPlan(stored.Plan.Grant)

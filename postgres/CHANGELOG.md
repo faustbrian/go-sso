@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Start an explicitly configured SP-initiated SAML sign-in using its original
+  ACS browser flow and installed signer. Retain the exact signed redirect
+  through restarts and optional key retries without PKCE or renewed expiry.
+  This does not install an HTTP route or complete the ACS/session flow.
+
 - Expand shared login transaction custody for SAML without PKCE, preserving
   populated OIDC and OAuth 2.0 rows and their original verifier rules.
 
