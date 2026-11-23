@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/faustbrian/go-identity/session"
 	sessionpg "github.com/faustbrian/go-identity/session/postgres"
 	migrations "github.com/faustbrian/go-migrations/v3"
+	"github.com/faustbrian/go-sso"
 	ssopg "github.com/faustbrian/go-sso/postgres"
 )
 
@@ -165,12 +167,74 @@ func TestNativeSAMLIDPConfirmationCommitsLinkedMemberSessionAndReplayPairOnce(t 
 	assertNativeIDPArrivalCounts(t, f, 1, existingSessions)
 	var originalEnvelope, originalBrowser, originalForm []byte
 	var originalKey int64
-	var originalExpiry time.Time
-	if err := f.pool.Raw().QueryRow(f.ctx, `SELECT binding_envelope,confirmation_key_version,browser_digest,form_digest,expires_at
+	var originalIssued, originalExpiry time.Time
+	if err := f.pool.Raw().QueryRow(f.ctx, `SELECT binding_envelope,confirmation_key_version,browser_digest,form_digest,issued_at,expires_at
 FROM sso_providers.saml_idp_confirmations WHERE tenant_id=$1`, tenant).
-		Scan(&originalEnvelope, &originalKey, &originalBrowser, &originalForm, &originalExpiry); err != nil || len(originalEnvelope) == 0 ||
+		Scan(&originalEnvelope, &originalKey, &originalBrowser, &originalForm, &originalIssued, &originalExpiry); err != nil || len(originalEnvelope) == 0 ||
 		len(originalBrowser) != 32 || len(originalForm) != 32 || bytes.Equal(originalBrowser, originalForm) || !originalExpiry.Truncate(time.Second).Equal(expiry) {
 		t.Fatal("read original encrypted confirmation custody", err)
+	}
+	rateCustody := func() string {
+		t.Helper()
+		var custody string
+		if err := f.pool.Raw().QueryRow(f.ctx, `SELECT json_build_array(
+ (SELECT json_agg(ROW(xmin::text,p)) FROM sso_providers.saml_idp_confirmations p WHERE tenant_id=$1),
+ (SELECT json_agg(ROW(xmin::text,c)) FROM identity.commands c WHERE tenant_id=$1),
+ (SELECT json_agg(ROW(xmin::text,g)) FROM public.capability_identity_one_use g WHERE tenant_id=$1),
+ (SELECT count(*) FROM organization_sessions.sessions),
+ (SELECT count(*) FROM organization_sessions.session_issuances),
+ (SELECT count(*) FROM sso_providers.saml_replay_members))::text`, tenant).Scan(&custody); err != nil {
+			t.Fatal("observe native pending, command, grant, replay and session custody", err)
+		}
+		return custody
+	}
+	wantRate := ssopg.ProviderLoginCallbackRateContext{ProviderID: request.ProviderID,
+		TransactionID: string(pending.CommandID), Lifetime: originalExpiry.Sub(originalIssued)}
+	beforeRate := rateCustody()
+	for i := 0; i < 3; i++ {
+		gotRate, err := service.ConfirmationRateSource(f.ctx, request)
+		if err != nil || gotRate != wantRate || gotRate.FlowID != "" || gotRate.Lifetime <= 0 {
+			t.Fatal("rate attribution did not expose only canonical pending identity and immutable initial lifetime", err)
+		}
+	}
+	for name, alter := range map[string]func(*ssopg.SAMLIDPConfirmationRequest){
+		"wrong tenant":    func(r *ssopg.SAMLIDPConfirmationRequest) { r.TenantID = "foreign-tenant" },
+		"wrong provider":  func(r *ssopg.SAMLIDPConfirmationRequest) { r.ProviderID = "foreign-provider" },
+		"wrong origin":    func(r *ssopg.SAMLIDPConfirmationRequest) { r.Origin = "https://foreign.example.test" },
+		"missing pending": func(r *ssopg.SAMLIDPConfirmationRequest) { r.PendingID = "" },
+		"wrong pending": func(r *ssopg.SAMLIDPConfirmationRequest) {
+			r.PendingID = identity.CommandID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xef}, 16)))
+		},
+		"wrong browser": func(r *ssopg.SAMLIDPConfirmationRequest) {
+			r.Browser = authentication.NewBearerCredential(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xee}, 32)))
+		},
+		"wrong form": func(r *ssopg.SAMLIDPConfirmationRequest) {
+			r.Form = authentication.NewBearerCredential(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0xee}, 32)))
+		},
+		"swapped browser pair": func(r *ssopg.SAMLIDPConfirmationRequest) { r.Browser, r.Form = r.Form, r.Browser },
+	} {
+		t.Run("rate source/"+name, func(t *testing.T) {
+			wrong := request
+			alter(&wrong)
+			if gotRate, err := service.ConfirmationRateSource(f.ctx, wrong); !errors.Is(err, sso.ErrForbidden) || gotRate != (ssopg.ProviderLoginCallbackRateContext{}) {
+				t.Fatal("unmatched pending confirmation disclosed rate correlation", err)
+			}
+		})
+	}
+	cancelled, cancelRate := context.WithCancel(f.ctx)
+	cancelRate()
+	if gotRate, err := service.ConfirmationRateSource(cancelled, request); !errors.Is(err, context.Canceled) || gotRate != (ssopg.ProviderLoginCallbackRateContext{}) {
+		t.Fatal("cancelled pending attribution disclosed correlation or ignored cancellation", err)
+	}
+	if gotRate, err := service.ConfirmationRateSource(nil, request); !errors.Is(err, sso.ErrInvalidInput) || gotRate != (ssopg.ProviderLoginCallbackRateContext{}) {
+		t.Fatal("nil context disclosed pending correlation", err)
+	}
+	var absentService *ssopg.ProviderSAMLIDPConfirmationService
+	if gotRate, err := absentService.ConfirmationRateSource(f.ctx, request); !errors.Is(err, sso.ErrInvalidInput) || gotRate != (ssopg.ProviderLoginCallbackRateContext{}) {
+		t.Fatal("missing confirmation composition disclosed pending correlation", err)
+	}
+	if verifications != 1 || rateCustody() != beforeRate {
+		t.Fatal("rate attribution verified SAML, renewed pending cutoff or changed native custody")
 	}
 	for _, mode := range []string{"wrong origin", "wrong form"} {
 		wrong := request
@@ -274,6 +338,13 @@ WHERE p.tenant_id=$1 AND p.confirmation_id=decode(translate($5,'-_','+/')||'==',
 		}
 	}
 	assertCommitted()
+	afterRate := rateCustody()
+	if gotRate, err := service.ConfirmationRateSource(f.ctx, request); !errors.Is(err, sso.ErrForbidden) || gotRate != (ssopg.ProviderLoginCallbackRateContext{}) {
+		t.Fatal("terminal confirmation disclosed new pending rate correlation", err)
+	}
+	if verifications != 1 || rateCustody() != afterRate {
+		t.Fatal("terminal attribution repeated SAML verification or changed native custody")
+	}
 	b := got.Completion.Binding
 	query := identity.RecoveryQuery{TenantID: b.TenantID, UserID: b.UserID, ActorID: b.ActorID, ActorKind: b.ActorKind,
 		OperationID: b.OperationID, CommandID: b.CommandID, RecordID: b.RecordID}

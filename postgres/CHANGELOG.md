@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Expose authenticated read-only quota correlation for an original pending
+  SAML IdP confirmation. Return only its provider, ID and retained lifetime.
+
 - Confirm explicitly selected unsolicited SAML for a linked member from the
   original same-origin browser pair. Consume pending custody, the one-use
   grant and both replay IDs with the session in one transaction. Receipt
