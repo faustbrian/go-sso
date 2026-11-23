@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the immutable enterprise token refresh request. It binds one exact
+  grant version to a caller retry key without exposing either implicitly.
+
 - Add immutable enterprise grant revocation input bound to the original token
   version and exact retry key. It carries no provider endpoint or access proof.
 

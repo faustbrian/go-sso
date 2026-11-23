@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add optional forward-only schema for enterprise OAuth2 refresh generations
+  and safe outcome history. Applying it alone does not enable refresh.
+
 - Add opt-in native revocation for restorable enterprise OAuth2 grants. Check
   current session, factor and organization authority, fence the provider call,
   and recover the committed provider disposition with the original key. Erase
