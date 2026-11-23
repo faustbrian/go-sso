@@ -16,6 +16,13 @@ and passing that hash to the importer does not authenticate the document.
 The importer makes no network requests or provider state changes. Unlisted
 roles, endpoints and encryption keys cannot stand in for the selected profile.
 
+Use `FetchIDPMetadata(ctx, sourceURL, expectedEntityID, approvedSHA256)` for an
+exact approved HTTPS source URL. Fetch only during provider setup, not during
+sign-in. It uses verified TLS and direct public-address connections, follows
+no redirects, and checks the raw document against the approved digest before
+returning the same registration fields. A changed document requires fresh
+approval. Neither API activates or refreshes a provider.
+
 ## Publish SP metadata and start sign-in
 
 - `ExportSPMetadata` publishes one default HTTP-POST assertion consumer URL and

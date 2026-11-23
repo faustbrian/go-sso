@@ -1,4 +1,14 @@
+github.com/faustbrian/go-circuit-breaker v1.0.1 h1:lClA7sa8CItC6KRAlQxR3nuqaq8dx+2yt5HfJmXefPc=
+github.com/faustbrian/go-circuit-breaker v1.0.1/go.mod h1:Mf7ob9yMmEnsrw7t2mnYkgmRqyXAgPiH3eovU3IJTyQ=
+github.com/faustbrian/go-http-client/v2 v2.1.0 h1:+T/J2HpuEbejoNMA2CVa+L+KzrIlWtWCKinXmamBIKk=
+github.com/faustbrian/go-http-client/v2 v2.1.0/go.mod h1:JSy0AqXH6QLNc23ZerwmGE46JZU4NKXQQmuEjTNKAKw=
 github.com/knroy/go-xml/v2 v2.3.1 h1:ogU5WL+S0mhsY+uXAwYAtxiLgKxIJIoNlRKfnCP/JQY=
 github.com/knroy/go-xml/v2 v2.3.1/go.mod h1:q3hL666HVFOGRuv+qwUQCyql/QteEB1qCk6EUdNk7pw=
-golang.org/x/text v0.41.0 h1:vz/seA0lnX87Othu2f/0L24RcgrXD9/YFTSuGjj3rH8=
-golang.org/x/text v0.41.0/go.mod h1:jvf1O8ajNzZqhSrQBPbutR/EB83Cc0CFrezNQIwbb5M=
+go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
+go.uber.org/goleak v1.3.0/go.mod h1:CoHD4mav9JJNrW/WLlf7HGZPjdw8EucARQHekz1X6bE=
+golang.org/x/net v0.60.0 h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=
+golang.org/x/net v0.60.0/go.mod h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg=
+golang.org/x/oauth2 v0.37.0 h1:JUlcxA8oAtauLfiH8FX2/FkAWHAdi0QtGCGc+hofE98=
+golang.org/x/oauth2 v0.37.0/go.mod h1:IxwZNxUULJmpBFf9K/9NTMSIfZZuvuTy1gGxhigP/58=
+golang.org/x/text v0.42.0 h1:JbOZXgfeCPU9gacVtYliJqOhD+zhrEqK4LfdpmlUZqI=
+golang.org/x/text v0.42.0/go.mod h1:ojzP1Z+2QtioaF8DTtO8K5q7JWVVYwZKenzujK0Zd0E=

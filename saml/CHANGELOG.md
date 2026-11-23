@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fetch approved IdP metadata over bounded, direct HTTPS before importing the
+  exact digest-pinned document. No automatic redirect, trust update or activation.
+
 - Import bounded offline IdP metadata only when its exact entity and raw
   SHA-256 digest match separate approval. Return detached explicit Redirect
   registration inputs, with exclusive entity/role expiry checks and no trust
