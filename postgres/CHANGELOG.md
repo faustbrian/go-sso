@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add optional forward-only SAML replay storage after the provider and
+  identity command migrations. Reserve the authenticated Response and
+  Assertion IDs atomically and retain the exact pair for recovery. This
+  prerequisite enables neither a SAML callback nor local session issuance.
+
 - Add opt-in native grant refresh for linked enterprise OAuth2 members. Use
   one provider attempt per generation, commit the encrypted successor and
   receipt together, and recover the original result without resending.

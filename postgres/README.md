@@ -12,6 +12,19 @@ OIDC sign-in start and completion are separate opt-ins. Completion defaults
 to existing linked members. First-login provisioning requires a further
 selection; it never links an existing local account by email.
 
+### Optional SAML replay schema
+
+Install `SAMLReplayMigrationSource` after the native identity command and
+SSO provider migrations. Choose the next unused version in that migration
+history. Installation creates an empty table, bounds the foreign-key lock
+wait to five seconds, and requires no backfill. Keep the table on code
+rollback so a previously recorded ID cannot be reused.
+
+The schema records the exact authenticated Response and consumed Assertion
+as a pair under the installed tenant, organization, provider, and issuer.
+An ID is unique within that scope regardless of its role. Applying the
+migration does not enable a SAML callback, issue sessions, or delete records.
+
 ### Static OIDC login custody schema
 
 `LoginTransactionMigrationSource` is an additive schema prerequisite. Install
