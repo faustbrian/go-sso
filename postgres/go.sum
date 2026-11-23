@@ -135,6 +135,8 @@ github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789 h
 github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789/go.mod h1:O/hmm6Lqqb8SknW6SGEhv+EornZU+sR8KVKCXK5h+uY=
 github.com/faustbrian/go-identity/risk v0.0.0-20261122182603-6cd2f7b96e47 h1:D7kWorVVc0b/B6GzErLcHD+B/y7hTLX7t1whwl8i3i4=
 github.com/faustbrian/go-identity/risk v0.0.0-20261122182603-6cd2f7b96e47/go.mod h1:zgNZ4X6AUlAWF12+6VIXijPginf0xGML8wBYVkv+FvY=
+github.com/faustbrian/go-identity/risk v0.0.0-20261123053209-79b6d35cbf8f h1:fgEkCPOm3mdv54ZQeRNBijkvOAv3BkQx2Uy158ufD2g=
+github.com/faustbrian/go-identity/risk v0.0.0-20261123053209-79b6d35cbf8f/go.mod h1:zgNZ4X6AUlAWF12+6VIXijPginf0xGML8wBYVkv+FvY=
 github.com/faustbrian/go-identity/risk/hibp v0.0.0-20261018021354-75e10d9681e0 h1:CdkeHkuX+7SrhNC6rLBHMXc3vJ2dH9epaU+1L1f8p5o=
 github.com/faustbrian/go-identity/risk/hibp v0.0.0-20261018021354-75e10d9681e0/go.mod h1:hmFfP+7i0J5142s8cSWtkOG2tyv0jc6rnBMwX93UaAc=
 github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261122024644-105adde9ae64 h1:/xylgUx2LyOoKUy7aA7ZA+6w3hdOjAahT/56INyKRcg=
@@ -181,6 +183,10 @@ github.com/faustbrian/go-sso v0.0.0-20261123024009-0a38750d1bed h1:8En2/Eg2Yp0TD
 github.com/faustbrian/go-sso v0.0.0-20261123024009-0a38750d1bed/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso v0.0.0-20261123030857-31976cb601e9 h1:dOCQ0eWE8enFcf5Ql+pm7ts799u4bxPoxMdG/QSTuTo=
 github.com/faustbrian/go-sso v0.0.0-20261123030857-31976cb601e9/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
+github.com/faustbrian/go-sso v0.0.0-20261123052539-b88ea5fcd9ae h1:p2IIHhpKqBvdtzsFHt+mbPOoS86BOKyyUCdxqJah8gs=
+github.com/faustbrian/go-sso v0.0.0-20261123052539-b88ea5fcd9ae/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
+github.com/faustbrian/go-sso v0.0.0-20261123054346-bee4787a773a h1:gPbgT+nquxj91meIQDNaS/95bxzNeAz7j8I9EPG3ers=
+github.com/faustbrian/go-sso v0.0.0-20261123054346-bee4787a773a/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734 h1:wi/Fl8h5KagSJogEvLMKRfY2dkNGRTC1HNcndrUL45o=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734/go.mod h1:WI4BJ4aQ1ki49oDREV0ORq21xMfxr+CvP+fshGTPEkQ=
 github.com/faustbrian/go-sso/oidc v0.0.0-20261123000546-023dd34bb0c7 h1:uTAK484FW2rqPpGoQcRdJq20C0WgMSEUJLbhG9r9KEo=

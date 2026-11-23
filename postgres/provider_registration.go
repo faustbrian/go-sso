@@ -138,7 +138,7 @@ func (s *ProviderService) ProviderRegisterOidc(ctx context.Context, r sso.Provid
 		return sso.ProviderRegisterOidcResult{}, sso.ErrInvalidInput
 	}
 	request := providerCommandInput{CommandID: r.CommandID, OrganizationID: r.OrganizationID, Issuer: r.Issuer, Domains: r.Domains, Mapping: r.Mapping}
-	result, err := s.registerDisabledProvider(ctx, request, r.IdempotencyKey, func() ([]byte, error) {
+	result, err := s.registerDisabledProvider(ctx, request, r.IdempotencyKey, func(context.Context) ([]byte, error) {
 		metadata, _ := r.StaticMetadata.Spec()
 		mapping, _ := r.Mapping.Spec()
 		return json.Marshal(providerConfiguration{Metadata: metadata, Mapping: mapping, Domains: append([]string(nil), r.Domains...)})
@@ -146,7 +146,7 @@ func (s *ProviderService) ProviderRegisterOidc(ctx context.Context, r sso.Provid
 	return sso.ProviderRegisterOidcResult(result), err
 }
 
-func (s *ProviderService) registerDisabledProvider(ctx context.Context, r providerCommandInput, key identity.IdempotencyKey, encode func() ([]byte, error)) (providerRegistrationResult, error) {
+func (s *ProviderService) registerDisabledProvider(ctx context.Context, r providerCommandInput, key identity.IdempotencyKey, encode func(context.Context) ([]byte, error)) (providerRegistrationResult, error) {
 	var out providerRegistrationResult
 	ctx, cancel := context.WithTimeout(ctx, s.config.MaximumDuration)
 	defer cancel()
@@ -154,11 +154,14 @@ func (s *ProviderService) registerDisabledProvider(ctx context.Context, r provid
 	if err != nil {
 		return out, err
 	}
-	configuration, err := encode()
+	configuration, err := encode(ctx)
+	defer clear(configuration)
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
 	if err != nil || len(configuration) > providerConfigurationMaximumBytes {
 		return out, sso.ErrInvalidInput
 	}
-	defer clear(configuration)
 	intentHash := sha256.Sum256(configuration)
 	intent, err := identity.NewRequestIntent([]identity.FeatureField{
 		{Name: "organization", Value: identity.FeatureValue{Kind: identity.FeatureText, Text: r.OrganizationID}},

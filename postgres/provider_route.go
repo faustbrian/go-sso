@@ -165,7 +165,7 @@ func (r *ProviderRouter) route(ctx context.Context, request sso.DomainRouteReque
 	for _, candidate := range stored {
 		if r.protocolRegistry {
 			switch candidate.protocol {
-			case providerProtocolOIDC, providerProtocolOAuth2:
+			case providerProtocolOIDC, providerProtocolOAuth2, providerProtocolSAML:
 			default:
 				return sso.DomainRoute{}, sso.ErrUnavailable
 			}

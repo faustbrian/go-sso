@@ -64,6 +64,8 @@ type ProviderService struct {
 	enableAuthorization  ProviderEnableAuthorization
 	disableAuthorization ProviderDisableAuthorization
 	oauthRegistration    bool
+	samlOrigin           string
+	samlValidator        sso.SAMLRegistrationValidator
 }
 
 func (ProviderService) Format(s fmt.State, _ rune) {
@@ -203,7 +205,7 @@ func (s *ProviderService) admit(ctx context.Context, organizationID, action stri
 
 func (s *ProviderService) providerMetadataSelect() string {
 	const columns = `SELECT provider_id,COALESCE(metadata_mapping_version,mapping_version)::text,metadata_version::text,enabled`
-	if s.oauthRegistration {
+	if s.oauthRegistration || s.samlOrigin != "" {
 		return columns + ",protocol"
 	}
 	return columns
@@ -213,7 +215,7 @@ func (s *ProviderService) scanProviderMetadata(row interface{ Scan(...any) error
 	p := sso.Provider{OrganizationID: organizationID, Protocol: providerProtocolOIDC, VerifiedDomains: []string{}}
 	var mappingVersion, providerVersion string
 	var err error
-	if s.oauthRegistration {
+	if s.oauthRegistration || s.samlOrigin != "" {
 		err = row.Scan(&p.ID, &mappingVersion, &providerVersion, &p.Enabled, &p.Protocol)
 	} else {
 		err = row.Scan(&p.ID, &mappingVersion, &providerVersion, &p.Enabled)
@@ -221,7 +223,9 @@ func (s *ProviderService) scanProviderMetadata(row interface{ Scan(...any) error
 	if err != nil {
 		return sso.Provider{}, err
 	}
-	if p.Protocol != providerProtocolOIDC && p.Protocol != providerProtocolOAuth2 {
+	switch p.Protocol {
+	case providerProtocolOIDC, providerProtocolOAuth2, providerProtocolSAML:
+	default:
 		return sso.Provider{}, sso.ErrUnavailable
 	}
 	if p.MappingVersion, err = strconv.ParseUint(mappingVersion, 10, 64); err != nil || p.MappingVersion == 0 {

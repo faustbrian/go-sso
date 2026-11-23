@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Register explicitly configured, disabled SAML providers through the
+  current organization authority and keyed native coordinator. Retain pinned
+  IdP configuration encrypted and return only safe metadata. Mixed readers
+  preserve the protocol; registration alone cannot activate login.
+
 - Add optional forward-only provider protocol expansion for SAML and a
   distinct stable namespace for existing SAML account links. Neither change
   enables registration or a sign-in route.

@@ -11,13 +11,16 @@ import (
 const (
 	providerProtocolOIDC   = "oidc"
 	providerProtocolOAuth2 = "oauth2"
+	providerProtocolSAML   = "saml"
 )
 
 func (r providerCommandInput) providerProtocol() string {
-	if r.protocol == providerProtocolOAuth2 {
-		return providerProtocolOAuth2
+	switch r.protocol {
+	case providerProtocolOAuth2, providerProtocolSAML:
+		return r.protocol
+	default:
+		return providerProtocolOIDC
 	}
-	return providerProtocolOIDC
 }
 
 func providerOAuthRegistrationOperation() identity.FeatureOperation {
@@ -65,7 +68,7 @@ func (s *ProviderService) ProviderRegisterOauth(ctx context.Context, r sso.Provi
 	proof, _ := r.IdentityProofPolicy.Spec()
 	request := providerCommandInput{CommandID: r.CommandID, OrganizationID: r.OrganizationID,
 		Issuer: proof.Issuer, Domains: r.Domains, Mapping: r.Mapping, protocol: providerProtocolOAuth2}
-	result, err := s.registerDisabledProvider(ctx, request, r.IdempotencyKey, func() ([]byte, error) {
+	result, err := s.registerDisabledProvider(ctx, request, r.IdempotencyKey, func(context.Context) ([]byte, error) {
 		mapping, _ := r.Mapping.Spec()
 		return json.Marshal(providerOAuthConfiguration{
 			AuthorizationEndpoint: r.AuthorizationEndpoint.String(), TokenEndpoint: r.TokenEndpoint.String(),

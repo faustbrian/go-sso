@@ -45,10 +45,14 @@ func (p *ProviderContributor) operation() identity.FeatureOperation {
 	if p.update != nil {
 		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.update", SchemaID: "sso-disabled-static-oidc-update-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 	}
-	if p.request.protocol == providerProtocolOAuth2 {
+	switch p.request.protocol {
+	case providerProtocolOAuth2:
 		return providerOAuthRegistrationOperation()
+	case providerProtocolSAML:
+		return providerSAMLRegistrationOperation()
+	default:
+		return providerOperation()
 	}
-	return providerOperation()
 }
 func (p *ProviderContributor) beforeVersion() uint64 {
 	if p.disable != nil {
@@ -238,9 +242,12 @@ func (p *ProviderContributor) writeProvider(ctx context.Context, w kernel.Work, 
 	var err error
 	if p.update == nil {
 		issuer := sha256.Sum256([]byte(p.request.Issuer))
-		if p.request.protocol == providerProtocolOAuth2 {
+		switch p.request.protocol {
+		case providerProtocolOAuth2:
 			n, err = w.Exec(ctx, `INSERT INTO sso_providers.providers(tenant_id,organization_id,provider_id,issuer_digest,configuration_envelope,mapping_version,pending_domains,protocol) VALUES($1,$2,$3,$4,$5,$6::numeric,$7,'oauth2') ON CONFLICT DO NOTHING`, string(b.TenantID), p.request.OrganizationID, b.RecordID, issuer[:], p.configuration, strconv.FormatUint(mapping.Version, 10), int32(len(p.request.Domains)))
-		} else {
+		case providerProtocolSAML:
+			n, err = w.Exec(ctx, providerSAMLInsertSQL, string(b.TenantID), p.request.OrganizationID, b.RecordID, issuer[:], p.configuration, strconv.FormatUint(mapping.Version, 10), int32(len(p.request.Domains)))
+		default:
 			n, err = w.Exec(ctx, `INSERT INTO sso_providers.providers(tenant_id,organization_id,provider_id,issuer_digest,configuration_envelope,mapping_version,pending_domains) VALUES($1,$2,$3,$4,$5,$6::numeric,$7) ON CONFLICT DO NOTHING`, string(b.TenantID), p.request.OrganizationID, b.RecordID, issuer[:], p.configuration, strconv.FormatUint(mapping.Version, 10), int32(len(p.request.Domains)))
 		}
 	} else {

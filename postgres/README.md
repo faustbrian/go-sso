@@ -19,8 +19,23 @@ Before enabling SAML provider writes, apply both versions of
 history. The first version expands the check atomically without scanning
 existing rows; the second validates in a separate transaction. Both bound
 lock acquisition. These migrations leave OIDC/OAuth2 rows unchanged and
-do not enable any writer. Keep the expansion on rollback; do not write SAML
-providers while any registry consumer still assumes only OIDC or OAuth2.
+do not enable any writer. Keep the expansion on rollback. Upgrade registry
+readers, mutators and routers to understand protocol discriminators before
+writing any SAML provider; legacy OIDC-only readers assume OIDC metadata.
+
+After migration, select `ProviderService.WithSAMLRegistration` with the
+deployment's exact external HTTPS origin and the SAML module's
+`ValidateRegistration` function. Call `ProviderRegisterSaml` with an
+explicit `sso.SAMLConfiguration` and the original command and idempotency
+key. This native bearer operation checks current `org:sso-write` authority,
+validates the pinned IdP certificate material through the local port without
+fetching URLs or depending on a wire module, and
+persists one disabled SAML provider with pending domain verification. It
+returns safe metadata; it does not install an SP key, activate a route,
+publish SP metadata, or grant sign-in. Keep the original origin and request
+inputs for keyed retries. The aggregate encoded configuration has the native
+registry's 48 KiB storage limit in addition to wire-profile limits. Ordinary
+OAuth2 writes remain separately selected.
 
 Install `SAMLReplayMigrationSource` after the native identity command and
 SSO provider migrations. Choose the next unused version in that migration
