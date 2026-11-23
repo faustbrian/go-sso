@@ -44,48 +44,53 @@ type IDPMetadata struct {
 // returns a zero result and ErrInvalidInput, or the actual context error on
 // cancellation; errors never contain document or configuration data.
 func ImportIDPMetadata(ctx context.Context, document []byte, expectedEntityID string, approvedSHA256 [32]byte, now time.Time) (IDPMetadata, error) {
+	metadata, _, err := importApprovedIDPMetadata(ctx, document, expectedEntityID, approvedSHA256, now)
+	return metadata, err
+}
+
+func importApprovedIDPMetadata(ctx context.Context, document []byte, expectedEntityID string, approvedSHA256 [32]byte, now time.Time) (IDPMetadata, *xdm.Node, error) {
 	if ctx == nil {
-		return IDPMetadata{}, ErrInvalidInput
+		return IDPMetadata{}, nil, ErrInvalidInput
 	}
 	if err := ctx.Err(); err != nil {
-		return IDPMetadata{}, err
+		return IDPMetadata{}, nil, err
 	}
 	if len(document) == 0 || len(document) > maximumSAMLXMLBytes || approvedSHA256 == [32]byte{} ||
 		!samlIdPEntityID(expectedEntityID) || !validSAMLTime(now) {
-		return IDPMetadata{}, ErrInvalidInput
+		return IDPMetadata{}, nil, ErrInvalidInput
 	}
 	if sha256.Sum256(document) != approvedSHA256 {
-		return IDPMetadata{}, ErrInvalidInput
+		return IDPMetadata{}, nil, ErrInvalidInput
 	}
 	root, err := parseSAMLDocument(ctx, document)
 	if err != nil {
-		return IDPMetadata{}, err
+		return IDPMetadata{}, nil, err
 	}
 	if !samlElement(root, samlMetadataNamespace, "EntityDescriptor") || samlAttr(root, "entityID") != expectedEntityID || !freshIDPMetadata(root, now) {
-		return IDPMetadata{}, ErrInvalidInput
+		return IDPMetadata{}, nil, ErrInvalidInput
 	}
 	for node := range root.Descendants() {
 		if err := ctx.Err(); err != nil {
-			return IDPMetadata{}, err
+			return IDPMetadata{}, nil, err
 		}
 		if samlElement(node, samlMetadataNamespace, "EntityDescriptor") {
-			return IDPMetadata{}, ErrInvalidInput
+			return IDPMetadata{}, nil, ErrInvalidInput
 		}
 	}
 
 	role := selectedIDPMetadataRole(root)
 	if role == nil || !freshIDPMetadata(role, now) {
-		return IDPMetadata{}, ErrInvalidInput
+		return IDPMetadata{}, nil, ErrInvalidInput
 	}
 	result, err := importIDPMetadataRole(ctx, role)
 	if err != nil {
-		return IDPMetadata{}, err
+		return IDPMetadata{}, nil, err
 	}
 	result.EntityID = strings.Clone(expectedEntityID)
 	if err := ValidateRegistration(ctx, result.EntityID, result.RedirectEndpoint, result.SigningCertificates); err != nil {
-		return IDPMetadata{}, err
+		return IDPMetadata{}, nil, err
 	}
-	return result, nil
+	return result, role, nil
 }
 
 // Metadata 2.0 §§2.3.2 and 2.4.1.1 permit an explicit exclusive expiry at

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Verify signed inbound HTTP-POST LogoutRequest and LogoutResponse as
+  different message types. A response exposes its signed correlation and
+  status, never a subject or session selector.
+
+- Discover the distinct approved IdP logout destinations and optionally
+  advertise the SP's canonical POST-only Single Logout endpoint.
+
 - Sign an outbound SP LogoutRequest with the fixed HTTP-Redirect profile.
   Preserve the authenticated NameID and require its correlated SessionIndex.
   Both login verifiers can return the exact signed logout subject context

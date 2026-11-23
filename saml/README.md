@@ -110,3 +110,18 @@ that tree and not serialized and parsed again.
 - [Canonicalization source v2.3.1](https://github.com/knroy/go-xml/tree/97fbb7fcad33cc8dc92f03c3ede289222a51de61)
 - [OASIS SAML Core](https://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf)
 - [W3C XML Signature 1.1](https://www.w3.org/TR/xmldsig-core1/)
+
+## Compose Single Logout wire messages
+
+`ImportIDPMetadataWithSingleLogout` selects the approved IdP Redirect
+request destination and POST response destination separately. When the
+native configuration actually installs the SP's inbound POST route, use
+`ExportSPMetadataWithEndpoints` with `SingleLogout: true` to advertise it.
+
+Use `NewLogoutRedirectProfile` to sign a request after the native owner
+selects the original session's strongly matching NameID and session index.
+`NewLogoutPOSTProfile` verifies inbound messages at the exact SP destination.
+Only its request result contains a logout target. Its response result contains
+an authenticated request ID and status; resolve the local session exclusively
+from the outstanding request. Neither wire operation revokes a local session,
+reserves replay state or proves that the IdP revoked its session.
