@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Sign outbound HTTP-POST LogoutResponse messages for the approved IdP
+  response destination. Preserve the original request correlation and selected
+  Success or PartialLogout status without exposing signing material.
+
 - Verify signed inbound HTTP-POST LogoutRequest and LogoutResponse as
   different message types. A response exposes its signed correlation and
   status, never a subject or session selector.
