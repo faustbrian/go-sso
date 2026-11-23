@@ -61,6 +61,18 @@
       "coverage_required": true,
       "build_required": true,
       "build_tags": []
+    },
+    {
+      "module_directory": "saml",
+      "directory": "saml",
+      "name": "saml",
+      "import_path": "github.com/faustbrian/go-sso/saml",
+      "kind": "public",
+      "production": true,
+      "executable": true,
+      "coverage_required": true,
+      "build_required": true,
+      "build_tags": []
     }
   ]
 }

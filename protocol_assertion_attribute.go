@@ -3,6 +3,8 @@ package sso
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -31,12 +33,19 @@ const (
 	// authenticated OAuth identity endpoint, never an access token alone. This
 	// label does not authenticate the endpoint, subject or supplied claims.
 	AttributeSourceOAuthIdentityEndpoint AttributeSource = "oauth-identity-endpoint"
+	// AttributeSourceSAMLAssertion identifies an already authenticated SAML
+	// assertion. Selecting it does not validate XML, signatures, issuer, audience
+	// or the supplied claims, and grants no authority.
+	AttributeSourceSAMLAssertion AttributeSource = "saml-assertion"
 )
 
 // AttributeProvenance binds a claim observation to its exact configured provider,
-// positive validation-profile version, verified HTTPS issuer and evidence source.
+// positive validation-profile version, issuer and evidence source.
 // It is descriptive data supplied by the protocol validator, never proof by
-// itself. The issuer is bounded to 2048 bytes, as in OIDCStaticMetadataSpec.
+// itself. OIDC and OAuth require an HTTPS issuer of at most 2048 bytes, as in
+// OIDCStaticMetadataSpec. SAML uses the activated IdP's exact absolute entity-ID
+// URI of 1..1024 printable ASCII bytes, including URNs; userinfo and fragments
+// are unsupported. No identifier normalization or source inference is performed.
 type AttributeProvenance struct {
 	ProviderID             ProviderID
 	ProviderProfileVersion uint64
@@ -49,6 +58,11 @@ func (p AttributeProvenance) validate() error {
 		return ErrInvalidInput
 	}
 	switch p.Source {
+	case AttributeSourceSAMLAssertion:
+		if !samlAttributeIssuer(p.Issuer) {
+			return ErrInvalidInput
+		}
+		return nil
 	case AttributeSourceOIDCIDToken, AttributeSourceOAuthIdentityEndpoint:
 	default:
 		return ErrInvalidInput
@@ -58,6 +72,42 @@ func (p AttributeProvenance) validate() error {
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+func samlAttributeIssuer(raw string) bool {
+	// REFERENCE_CONFIGURATION.md's saml.idp_entity_id is an exact
+	// absolute URI of 1..1024 bytes, not an OIDC HTTPS issuer. This profile
+	// excludes userinfo/fragments and non-URI bytes instead of normalizing them.
+	if len(raw) == 0 || len(raw) > 1024 {
+		return false
+	}
+	for _, char := range raw {
+		if char <= ' ' || char >= 127 || strings.ContainsRune("\"<>\\^`{|}#", char) {
+			return false
+		}
+	}
+	// net/url preserves opaque identifiers such as URNs without checking their
+	// percent escapes. Validate escapes across every component before parsing.
+	if _, err := url.PathUnescape(raw); err != nil {
+		return false
+	}
+	issuer, err := url.Parse(raw)
+	if err != nil || !issuer.IsAbs() || issuer.User != nil {
+		return false
+	}
+	// net/url lowercases the scheme. Restore only its original spelling for
+	// the roundtrip check; the configured identifier remains byte-exact.
+	issuer.Scheme = raw[:len(issuer.Scheme)]
+	if issuer.String() != raw {
+		return false
+	}
+	if issuer.Host == "" && issuer.Path == "" && issuer.Opaque == "" {
+		return false
+	}
+	if strings.HasPrefix(raw[len(issuer.Scheme)+1:], "//") && issuer.Hostname() == "" {
+		return false
+	}
+	return true
 }
 
 // VerifiedAttributeSpec describes a flat, case-exact claim and its evidence

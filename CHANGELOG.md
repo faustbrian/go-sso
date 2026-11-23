@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve exact configured SAML IdP entity IDs as assertion claim provenance.
+  Existing OIDC and OAuth issuer checks and explicit trust flags are unchanged.
+
 - Add the immutable enterprise token refresh request. It binds one exact
   grant version to a caller retry key without exposing either implicitly.
 

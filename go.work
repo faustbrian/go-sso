@@ -6,4 +6,5 @@ use (
 	./oauth2
 	./oidc
 	./postgres
+	./saml
 )
