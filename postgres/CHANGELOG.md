@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Admit detached IdP-initiated SAML evidence for explicitly allowed current
+  providers, without an SP start or RelayState. Recheck current native
+  provider and domain authority after the borrowed wire verification.
+
 - Expose the exact installed SAML SP entity, ACS and public signing certificate
   for the selected current route, without exporting credential custody.
 

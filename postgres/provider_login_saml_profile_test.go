@@ -34,6 +34,29 @@ func samlLoginProfileStoredConfiguration() providerSAMLConfiguration {
 	}
 }
 
+func TestNativeSAMLIDPAdmissionSelectsDistinctCanonicalDestination(t *testing.T) {
+	configured := StaticSAMLIDPAdmissionProfile{Provider: samlLoginProfileConfiguration(), MaximumAge: time.Minute}
+	got, destination, err := normalizeStaticSAMLIDPAdmissionProfile(configured)
+	const expected = "https://identity.example:8443/saml2/_exact-Provider/idp-init"
+	if err != nil || got != configured || destination != expected {
+		t.Fatal("unsolicited destination did not retain the exact installed origin and provider segment", err)
+	}
+	for _, age := range []time.Duration{0, time.Second - 1, 5*time.Minute + 1} {
+		invalid := configured
+		invalid.MaximumAge = age
+		if _, got, err := normalizeStaticSAMLIDPAdmissionProfile(invalid); !errors.Is(err, sso.ErrInvalidInput) || got != "" {
+			t.Fatalf("invalid unsolicited age %v selected a destination: %v", age, err)
+		}
+	}
+	for _, provider := range []sso.ProviderID{"..", "foreign/provider", "foreign%2Fprovider"} {
+		invalid := configured
+		invalid.Provider.ProviderID = provider
+		if _, got, err := normalizeStaticSAMLIDPAdmissionProfile(invalid); !errors.Is(err, sso.ErrInvalidInput) || got != "" {
+			t.Fatal("noncanonical provider alias selected a destination", err)
+		}
+	}
+}
+
 func TestNativeSAMLLoginProfileRequiresExactDeploymentAndCanonicalProviderPath(t *testing.T) {
 	configured := samlLoginProfileConfiguration()
 	if got, err := normalizeStaticSAMLLoginProfile(configured); err != nil || got != configured {

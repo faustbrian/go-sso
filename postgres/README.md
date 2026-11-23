@@ -71,12 +71,22 @@ authority.
 
 For an exact native SAML lookup, select `WithProtocolRegistry` and then
 `WithSAMLRouteValidation`, using the deployment's local SP signer validator.
+
 Pass both the provider ID and verified domain to `RouteSAML`. The provider
 must still be enabled, the original domain proof must still be current, and
 the encrypted signer generation must authenticate. The route's original
 expiry is no later than the matched certificate's expiry. A missing or
 ineligible provider does not fall back to an OIDC/OAuth provider or a default.
 This lookup emits neither browser state nor a redirect.
+
+For IdP-initiated protocol admission, select `NewProviderSAMLIDPAdmissionService`
+with an explicit tenant and installed provider allowlist. Connect its verifier
+to the SAML module's `NewIDPInitiatedPOSTResponseProfile`; use only the supplied
+installed IdP keys, authoritative time and configured destination. This path
+does not consult an SP start or RelayState. It reads the primary and checks the
+provider and domain again after verification. Returned evidence is bounded by
+the original route and wire deadlines. It does not confirm the browser,
+reserve replay IDs, enable an HTTP endpoint or grant a session.
 
 Before installing a native SAML start writer, append both versions of
 `LoginTransactionSAMLProtocolMigrationSource` after the OAuth/OIDC login

@@ -226,6 +226,10 @@ func (s *ProviderLoginService) requireAcknowledgedSAMLStart(ctx context.Context,
 }
 
 func validSAMLCallbackEvidence(e SAMLVerifiedResponse, now, originalExpiry time.Time) bool {
+	return !e.ValidUntil.After(originalExpiry) && validSAMLResponseEvidence(e, now)
+}
+
+func validSAMLResponseEvidence(e SAMLVerifiedResponse, now time.Time) bool {
 	// The wire adapter owns XML/NCName validation. Here the native boundary
 	// enforces its detached scalar contracts before hashing or account lookup.
 	validText := func(value string, maximum int) bool {
@@ -238,8 +242,7 @@ func validSAMLCallbackEvidence(e SAMLVerifiedResponse, now, originalExpiry time.
 		(e.SubjectFormat != "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent" && e.SubjectFormat != "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress") {
 		return false
 	}
-	if !validSAMLReplayTime(e.AssertionExpiresAt) || !validSAMLReplayTime(e.ValidUntil) ||
-		!now.Before(e.ValidUntil) || e.ValidUntil.After(originalExpiry) {
+	if !validSAMLReplayTime(e.AssertionExpiresAt) || !validSAMLReplayTime(e.ValidUntil) || !now.Before(e.ValidUntil) {
 		return false
 	}
 	_, err := samlReplayRetainUntil(now, e.AssertionExpiresAt)
