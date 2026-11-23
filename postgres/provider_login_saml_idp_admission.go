@@ -68,6 +68,7 @@ type ProviderSAMLIDPAdmissionService struct {
 	tenant   identity.TenantID
 	profiles map[sso.ProviderID]staticSAMLIDPAdmissionSelection
 	verify   SAMLIDPResponseVerifier
+	linked   *samlIDPLinkedRecipientSelection
 }
 
 type staticSAMLIDPAdmissionSelection struct {
@@ -185,7 +186,7 @@ func (s *ProviderSAMLIDPAdmissionService) Verify(ctx context.Context, request SA
 	if now.Before(verifiedAt) || now.Before(proof.ObservedAt) || !now.Before(cutoff) || !now.Before(proof.ExpiresAt) {
 		return out, sso.ErrForbidden
 	}
-	return ProviderSAMLIDPAdmission{wire: wire, route: binding, verifiedAt: verifiedAt, validUntil: cutoff}, nil
+	return ProviderSAMLIDPAdmission{wire: wire, route: binding, issuer: installed.configuration.EntityID, verifiedAt: verifiedAt, validUntil: cutoff}, nil
 }
 
 // ProviderSAMLIDPAdmission is an opaque observation, not durable replay or
@@ -194,6 +195,7 @@ func (s *ProviderSAMLIDPAdmissionService) Verify(ctx context.Context, request SA
 type ProviderSAMLIDPAdmission struct {
 	wire       SAMLVerifiedResponse
 	route      sso.DomainRouteBinding
+	issuer     string
 	verifiedAt time.Time
 	validUntil time.Time
 }

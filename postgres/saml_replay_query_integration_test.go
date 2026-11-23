@@ -23,6 +23,15 @@ import (
 // recovery lifecycle. All cost population and measured writes roll back; copied
 // provider custody and foundation-only commands never establish SAML authority.
 func TestNativeSAMLReplayQueryScale(t *testing.T) {
+	testNativeSAMLReplayQueryScale(t, false)
+}
+
+func TestNativeSAMLIDPReplayQueryScale(t *testing.T) {
+	testNativeSAMLReplayQueryScale(t, true)
+}
+
+func testNativeSAMLReplayQueryScale(t *testing.T, idp bool) {
+	t.Helper()
 	f, providers, _ := newProviderFixtureWithUpdates(t, false)
 	registration := providerRequest(t, "https://replay-cost.example.com", "saml-replay-cost")
 	created, err := providers.ProviderRegisterOidc(f.ctx, registration)
@@ -36,13 +45,20 @@ func TestNativeSAMLReplayQueryScale(t *testing.T) {
 	if _, err := f.pool.Raw().Exec(f.ctx, history[0].UpSQL()); err != nil {
 		t.Fatal("install replay-member schema on populated provider fixture", err)
 	}
+	purpose := "identity.sso.saml-acs"
+	reserve := ssopg.ReserveSAMLReplayForTest
+	if idp {
+		purpose = "identity.sso.saml-idp-init"
+		reserve = ssopg.ReserveSAMLIDPReplayForTest
+		installSAMLIDPStorage(t, f, ssopg.SAMLIDPReplayMigrationSource{Version: 391, ValidationVersion: 392})
+	}
 	const tenant identity.TenantID = "org-test-basic"
 	claim := ssopg.SAMLReplayClaimForTest{
 		Tenant: tenant, OrganizationID: registration.OrganizationID, ProviderID: created.Provider.ID,
 		ResponseDigest:  sha256.Sum256([]byte("replay-cost-response")),
 		AssertionDigest: sha256.Sum256([]byte("replay-cost-assertion")),
 		Fingerprint:     sha256.Sum256([]byte("replay-cost-execution")),
-		CommandID:       seedProviderGrantAttemptForTest(t, f, tenant, "identity.sso.saml-acs"),
+		CommandID:       seedProviderGrantAttemptForTest(t, f, tenant, purpose),
 		Generation:      1, RetainUntil: time.Now().UTC().Truncate(time.Microsecond).Add(time.Hour),
 	}
 	var issuer []byte
@@ -77,10 +93,16 @@ func TestNativeSAMLReplayQueryScale(t *testing.T) {
 	if _, err := tx.Exec(f.ctx, "SET LOCAL statement_timeout='15s'; SET LOCAL lock_timeout='1s'"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ssopg.ReserveSAMLReplayForTest(f.ctx, tx, claim); err != nil {
+	if err := reserve(f.ctx, tx, claim); err != nil {
 		t.Fatal("capture real pair insertion", err)
 	}
-	if found, err := ssopg.ObserveSAMLReplayForTest(f.ctx, tx, claim); err != nil || !found {
+	var found bool
+	if idp {
+		found, err = ssopg.ObserveSAMLIDPReplayForTest(f.ctx, tx, claim)
+	} else {
+		found, err = ssopg.ObserveSAMLReplayForTest(f.ctx, tx, claim)
+	}
+	if err != nil || !found {
 		t.Fatal("capture real exact-pair Boolean recovery query", found, err)
 	}
 	trace.mu.Lock()
@@ -112,7 +134,7 @@ func TestNativeSAMLReplayQueryScale(t *testing.T) {
 	if _, err := tx.Exec(f.ctx, "SAVEPOINT replay_conflict_api"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ssopg.ReserveSAMLReplayForTest(f.ctx, tx, claim); !errors.Is(err, identity.ConflictError{}) {
+	if err := reserve(f.ctx, tx, claim); !errors.Is(err, identity.ConflictError{}) {
 		t.Fatal("real pair conflict did not retain its API meaning", err)
 	}
 	if _, err := tx.Exec(f.ctx, "ROLLBACK TO SAVEPOINT replay_conflict_api; RELEASE SAVEPOINT replay_conflict_api"); err != nil {

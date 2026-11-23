@@ -62,6 +62,25 @@ WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3 AND issuer_digest=$
  AND execution_generation=$7::text::identity.version AND retain_until=$8::timestamptz
  AND ((member_kind=1 AND member_digest=$9) OR (member_kind=2 AND member_digest=$10))`
 
+// IdP confirmation shares the replay keys and deterministic member ordering
+// with SP callbacks, but its command foreign key must use its distinct purpose.
+// PROTOCOL_BASELINES.md's SAML profile requires atomic replay before authority
+// issuance; the capability owner has already consumed confirmation in this Work.
+const insertSAMLIDPReplayPairSQL = `INSERT INTO sso_providers.saml_replay_members
+ (tenant_id,organization_id,provider_id,issuer_digest,member_digest,member_kind,
+ callback_command_id,execution_fingerprint,execution_generation,retain_until,callback_purpose)
+SELECT $1,$2,$3,$4,m.digest,m.kind,$5,$6,$7::text::identity.version,$8::timestamptz,'identity.sso.saml-idp-init'
+FROM (VALUES ($9::bytea,1::smallint),($10::bytea,2::smallint)) AS m(digest,kind)
+ORDER BY m.digest`
+
+const observeSAMLIDPReplayPairSQL = `SELECT count(*)=2
+FROM sso_providers.saml_replay_members
+WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3 AND issuer_digest=$4
+ AND callback_command_id=$5 AND execution_fingerprint=$6
+ AND execution_generation=$7::text::identity.version AND retain_until=$8::timestamptz
+ AND callback_purpose='identity.sso.saml-idp-init'
+ AND ((member_kind=1 AND member_digest=$9) OR (member_kind=2 AND member_digest=$10))`
+
 // Derive once from the trusted original validation instant and the assertion's
 // raw expiry, not from the earlier usable proof/certificate cutoff or a retry.
 // Round up to PostgreSQL precision so serialization cannot shorten protection.
@@ -123,7 +142,28 @@ func reserveSAMLReplayInWork(ctx context.Context, w kernel.Work, participant ker
 	return insertSAMLReplayPair(ctx, w.Exec, claim)
 }
 
+func reserveSAMLIDPReplayInWork(ctx context.Context, w kernel.Work, participant kernel.FeatureExecutionContributor, claim samlReplayClaim) error {
+	binding, feature, _, err := w.FeatureScope(participant)
+	if err != nil || feature.Operation != kernel.SSOSAMLIDPConfirmationOperation() ||
+		binding.TenantID != claim.Tenant || binding.CommandID != claim.CommandID {
+		return identity.ForbiddenError{}
+	}
+	consumed, err := w.SSOSAMLIDPConfirmationConsumption(participant)
+	if err != nil || consumed.Command != binding || consumed.Fingerprint != claim.Fingerprint || consumed.Generation != claim.Generation {
+		return identity.ForbiddenError{}
+	}
+	return insertSAMLIDPReplayPair(ctx, w.Exec, claim)
+}
+
 func insertSAMLReplayPair(ctx context.Context, exec samlReplayExec, claim samlReplayClaim) error {
+	return insertSAMLReplayPairWithStatement(ctx, exec, insertSAMLReplayPairSQL, claim)
+}
+
+func insertSAMLIDPReplayPair(ctx context.Context, exec samlReplayExec, claim samlReplayClaim) error {
+	return insertSAMLReplayPairWithStatement(ctx, exec, insertSAMLIDPReplayPairSQL, claim)
+}
+
+func insertSAMLReplayPairWithStatement(ctx context.Context, exec samlReplayExec, statement string, claim samlReplayClaim) error {
 	if ctx == nil || exec == nil {
 		return identity.InvalidInputError{Field: "saml_replay"}
 	}
@@ -134,7 +174,7 @@ func insertSAMLReplayPair(ctx context.Context, exec samlReplayExec, claim samlRe
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	rows, err := exec(ctx, insertSAMLReplayPairSQL, args...)
+	rows, err := exec(ctx, statement, args...)
 	if err != nil {
 		return samlReplayWriteFailure(ctx, err)
 	}
@@ -181,6 +221,26 @@ func observeSAMLReplayInRecovery(ctx context.Context, w kernel.RecoveryWork, par
 	}, claim)
 }
 
+func observeSAMLIDPReplayInRecovery(ctx context.Context, w kernel.RecoveryWork, participant kernel.FeatureExecutionContributor, claim samlReplayClaim) (bool, error) {
+	binding, feature, _, err := w.FeatureScope(participant)
+	if err != nil || feature.Operation != kernel.SSOSAMLIDPConfirmationOperation() ||
+		binding.TenantID != claim.Tenant || binding.CommandID != claim.CommandID {
+		return false, identity.ForbiddenError{}
+	}
+	return observeSAMLIDPReplayPair(ctx, func(ctx context.Context, sql string, args ...any) (bool, error) {
+		rows, err := w.Query(ctx, sql, args...)
+		if err != nil {
+			return false, err
+		}
+		defer rows.Close()
+		var exact bool
+		if !rows.Next() || rows.Scan(&exact) != nil || rows.Next() || rows.Err() != nil {
+			return false, identity.UnavailableError{}
+		}
+		return exact, nil
+	}, claim)
+}
+
 // The native negative recovery vote cannot ignore a partial or contradictory
 // replay set. The existing command index bounds this lookup to two members.
 const samlReplayCommandExistsSQL = `SELECT EXISTS(SELECT 1 FROM sso_providers.saml_replay_members
@@ -191,6 +251,18 @@ func verifySAMLReplayAbsentInRecovery(ctx context.Context, w kernel.RecoveryWork
 	if err != nil || feature.Operation != kernel.SSOSAMLSigninOperation() {
 		return kernel.RecoveryUnknown, identity.ForbiddenError{}
 	}
+	return verifySAMLReplayAbsentForBinding(ctx, w, binding)
+}
+
+func verifySAMLIDPReplayAbsentInRecovery(ctx context.Context, w kernel.RecoveryWork, participant kernel.FeatureExecutionContributor) (kernel.RecoveryStatus, error) {
+	binding, feature, _, err := w.FeatureScope(participant)
+	if err != nil || feature.Operation != kernel.SSOSAMLIDPConfirmationOperation() {
+		return kernel.RecoveryUnknown, identity.ForbiddenError{}
+	}
+	return verifySAMLReplayAbsentForBinding(ctx, w, binding)
+}
+
+func verifySAMLReplayAbsentForBinding(ctx context.Context, w kernel.RecoveryWork, binding identity.CommandBinding) (kernel.RecoveryStatus, error) {
 	command, err := base64.RawURLEncoding.Strict().DecodeString(string(binding.CommandID))
 	if err != nil || len(command) != 16 {
 		return kernel.RecoveryUnknown, identity.ForbiddenError{}
@@ -211,6 +283,14 @@ func verifySAMLReplayAbsentInRecovery(ctx context.Context, w kernel.RecoveryWork
 }
 
 func observeSAMLReplayPair(ctx context.Context, lookup samlReplayLookup, claim samlReplayClaim) (bool, error) {
+	return observeSAMLReplayPairWithStatement(ctx, lookup, observeSAMLReplayPairSQL, claim)
+}
+
+func observeSAMLIDPReplayPair(ctx context.Context, lookup samlReplayLookup, claim samlReplayClaim) (bool, error) {
+	return observeSAMLReplayPairWithStatement(ctx, lookup, observeSAMLIDPReplayPairSQL, claim)
+}
+
+func observeSAMLReplayPairWithStatement(ctx context.Context, lookup samlReplayLookup, statement string, claim samlReplayClaim) (bool, error) {
 	if ctx == nil || lookup == nil {
 		return false, identity.InvalidInputError{Field: "saml_replay"}
 	}
@@ -221,7 +301,7 @@ func observeSAMLReplayPair(ctx context.Context, lookup samlReplayLookup, claim s
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	exact, err := lookup(ctx, observeSAMLReplayPairSQL, args...)
+	exact, err := lookup(ctx, statement, args...)
 	if err != nil {
 		if cancelled := ctx.Err(); cancelled != nil {
 			return false, cancelled

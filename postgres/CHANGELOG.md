@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Resolve eligible linked users from verified unsolicited SAML evidence on
+  the existing native account, organization, factor, and policy readers.
+  Preserve bounded original evidence without a prior SP start. Add the
+  separate, exact-purpose IdP replay reservation and recovery statements.
+  These paths alone do not write a session or expose a route.
+
 - Add optional PostgreSQL storage for pending unsolicited SAML confirmation.
   Preserve the original expiry, erase pending custody only on exact completion,
   and extend the existing replay table without splitting replay uniqueness.

@@ -112,12 +112,38 @@ func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, 
 		return providerLoginCallbackRecipient{}, err
 	}
 	now := s.router.config.Clock.Now().UTC()
-	observedAt := now
+	if original.Command.TenantID != s.config.TenantID || original.Proof.TenantID != s.config.TenantID ||
+		original.Organization.TenantID != s.config.TenantID || original.Organization.OrganizationID != original.Proof.OrganizationID ||
+		original.Organization.Version == 0 || original.Organization.CredentialVersion == 0 ||
+		original.Issued.IsZero() || now.Before(original.Issued) || !now.Before(original.Expires) ||
+		subject == "" || !now.Before(proofExpires) {
+		return providerLoginCallbackRecipient{}, sso.ErrForbidden
+	}
+	return s.router.readLinkedRecipient(ctx, s.directory, linkedRecipientRequest{
+		tenant: s.config.TenantID, organization: original.Proof.OrganizationID, provider: original.ProviderID,
+		protocol: original.Protocol, issuer: original.Issuer, subject: subject, policyNamespace: policyNamespace,
+		observedAt: now, deadline: earlierLoginTime(original.Expires, proofExpires), maximumDuration: s.config.Coordinator.MaximumDuration,
+	})
+}
+
+// linkedRecipientRequest contains authenticated installed-provider scope, not
+// a prior browser transaction. Its deadline is supplied by the original
+// admission owner and must never be replaced by a fresh lookup clock.
+type linkedRecipientRequest struct {
+	tenant                                     identity.TenantID
+	organization                               organization.ID
+	provider                                   sso.ProviderID
+	protocol, issuer, subject, policyNamespace string
+	observedAt, deadline                       time.Time
+	maximumDuration                            time.Duration
+}
+
+func (r *ProviderRouter) readLinkedRecipient(ctx context.Context, directory *kernel.Repository, selected linkedRecipientRequest) (providerLoginCallbackRecipient, error) {
 	accountNamespace := SSOOIDCAccountProviderNamespace
 	accountFields := kernel.SSOOIDCSigninAccountFields
 	readFactors := mfapg.ReadSSOOIDCSigninFactors
-	readAccount := s.directory.GetSSOOIDCSigninAccount
-	switch original.Protocol {
+	readAccount := directory.GetSSOOIDCSigninAccount
+	switch selected.protocol {
 	case "":
 	case providerProtocolOAuth2:
 		accountNamespace = SSOOAuth2AccountProviderNamespace
@@ -127,39 +153,35 @@ func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, 
 		accountNamespace = SSOSAMLAccountProviderNamespace
 		accountFields = kernel.SSOSAMLSigninAccountFields
 		readFactors = mfapg.ReadSSOSAMLSigninFactors
-		readAccount = s.directory.GetSSOSAMLSigninAccount
+		readAccount = directory.GetSSOSAMLSigninAccount
 	default:
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	if original.Command.TenantID != s.config.TenantID || original.Proof.TenantID != s.config.TenantID ||
-		original.Organization.TenantID != s.config.TenantID || original.Organization.OrganizationID != original.Proof.OrganizationID ||
-		original.Organization.Version == 0 || original.Organization.CredentialVersion == 0 ||
-		original.Issued.IsZero() || now.Before(original.Issued) || !now.Before(original.Expires) ||
-		subject == "" || !now.Before(proofExpires) {
+	now := r.config.Clock.Now().UTC()
+	if selected.observedAt.IsZero() || now.Before(selected.observedAt) || !now.Before(selected.deadline) {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	provider, err := accountNamespace(original.Proof.OrganizationID, original.ProviderID)
+	provider, err := accountNamespace(selected.organization, selected.provider)
 	if err != nil {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	query := kernel.ProviderSigninAccountQuery{TenantID: s.config.TenantID, Provider: provider, Issuer: original.Issuer, Subject: subject}
-	policyScope := authoritypg.AuthorityScope{TenantID: authorization.TenantID(query.TenantID), SubjectID: "scope-validation", PolicyNamespace: policyNamespace}
+	query := kernel.ProviderSigninAccountQuery{TenantID: selected.tenant, Provider: provider, Issuer: selected.issuer, Subject: selected.subject}
+	policyScope := authoritypg.AuthorityScope{TenantID: authorization.TenantID(query.TenantID), SubjectID: "scope-validation", PolicyNamespace: selected.policyNamespace}
 	if query.Validate() != nil || policyScope.Validate() != nil {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	maximumDuration := min(s.config.Coordinator.MaximumDuration, 5*time.Second)
+	maximumDuration := min(selected.maximumDuration, 5*time.Second)
 	if maximumDuration < time.Millisecond {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	deadline := earlierLoginTime(original.Expires, proofExpires)
-	ctx, cancel := context.WithTimeout(ctx, min(maximumDuration, deadline.Sub(now)))
+	ctx, cancel := context.WithTimeout(ctx, min(maximumDuration, selected.deadline.Sub(now)))
 	defer cancel()
 
 	account, err := readAccount(ctx, query)
 	if err != nil {
 		var forbidden identity.ForbiddenError
 		if ctx.Err() == nil && errors.As(err, &forbidden) {
-			if original.Protocol == providerProtocolSAML {
+			if selected.protocol == providerProtocolSAML {
 				return providerLoginCallbackRecipient{}, sso.ErrForbidden
 			}
 			// This can mean an existing unusable or retired account. The JIT
@@ -172,22 +194,22 @@ func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, 
 		account.Account.Provider != query.Provider || account.Account.Issuer != query.Issuer || account.Account.Subject != query.Subject {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
-	memberQuery := organization.CredentialAuthorityQuery{TenantID: query.TenantID, OrganizationID: original.Proof.OrganizationID, ActorID: account.Account.UserID}
-	member, err := s.router.organizations.ObserveCredentialAuthority(ctx, memberQuery)
+	memberQuery := organization.CredentialAuthorityQuery{TenantID: query.TenantID, OrganizationID: selected.organization, ActorID: account.Account.UserID}
+	member, err := r.organizations.ObserveCredentialAuthority(ctx, memberQuery)
 	if err != nil {
 		if ctx.Err() == nil && errors.Is(err, organization.ErrForbidden) {
-			if original.Protocol == providerProtocolSAML {
+			if selected.protocol == providerProtocolSAML {
 				return providerLoginCallbackRecipient{}, sso.ErrForbidden
 			}
 			return providerLoginCallbackRecipient{}, errProviderLoginRecipientIneligible
 		}
 		return providerLoginCallbackRecipient{}, providerError(ctx, err)
 	}
-	factors, err := readFactors(ctx, s.router.pool, query.TenantID, account.Account.UserID, maximumDuration)
+	factors, err := readFactors(ctx, r.pool, query.TenantID, account.Account.UserID, maximumDuration)
 	if err != nil {
 		return providerLoginCallbackRecipient{}, providerError(ctx, err)
 	}
-	policy, err := authoritypg.NewAuthorityStore(s.router.pool.Raw(), maximumDuration)
+	policy, err := authoritypg.NewAuthorityStore(r.pool.Raw(), maximumDuration)
 	if err != nil {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
@@ -205,8 +227,8 @@ func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, 
 	if err := ctx.Err(); err != nil {
 		return providerLoginCallbackRecipient{}, err
 	}
-	now = s.router.config.Clock.Now().UTC()
-	if now.Before(observedAt) || !now.Before(deadline) || member.Validate(memberQuery, now) != nil || factors.Version() == 0 ||
+	now = r.config.Clock.Now().UTC()
+	if now.Before(selected.observedAt) || !now.Before(selected.deadline) || member.Validate(memberQuery, now) != nil || factors.Version() == 0 ||
 		currentPolicy.Scope != policyScope || currentPolicy.Version == 0 {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
