@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add immutable enterprise grant revocation input bound to the original token
+  version and exact retry key. It carries no provider endpoint or access proof.
+
 - Define the shared enterprise protocol adapter and its original-transaction
   projection. Validate exact provider and credential generation, preserve the
   resolved session policy and enforce original redirect expiry without giving
