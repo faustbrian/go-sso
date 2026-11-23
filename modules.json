@@ -752,7 +752,7 @@
       "tag_prefix": "saml/v",
       "owned_dependencies": [],
       "reverse_owned_dependencies": [],
-      "external_runtime_dependencies": [],
+      "external_runtime_dependencies": ["github.com/knroy/go-xml/v2"],
       "required_services": [],
       "build_tags": [],
       "test_tags": [],
