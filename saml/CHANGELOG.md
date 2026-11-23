@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Sign an outbound SP LogoutRequest with the fixed HTTP-Redirect profile.
+  Preserve the authenticated NameID and require its correlated SessionIndex.
+  Both login verifiers can return the exact signed logout subject context
+  without changing the existing login evidence contract.
+
 - Add opt-in SP metadata export for an installed IdP-initiated SAML
   destination. The extra exact HTTP-POST ACS is non-default; ordinary SP
   metadata continues to advertise only its existing default ACS.

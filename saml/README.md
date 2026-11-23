@@ -63,6 +63,11 @@ account linking, and session issuance belong to other owners.
 
 ## Validate the response
 
+Both login verifiers expose `LogoutSubject()` separately from `Evidence()`.
+It preserves the signed NameID value, format, optional qualifiers and optional
+session index. Bind it to the issued session in the native owner; it does not
+authorize a session read or revocation.
+
 Construct `NewPOSTResponseProfile` with the exact SP entity and canonical ACS
 also used at start, plus the selected IdP entity ID and active signing
 certificates. Pass the original reserved request ID, original issue/expiry

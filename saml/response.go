@@ -130,15 +130,15 @@ type POSTResponseEvidence struct {
 
 // VerifiedPOSTResponse is detached evidence, not a replay reservation,
 // application principal, session, or permission to issue one.
-type VerifiedPOSTResponse struct{ verified POSTResponseEvidence }
+type VerifiedPOSTResponse struct{ verified verifiedPOSTResponseData }
 
 // Evidence explicitly returns the detached identity fields and replay set.
 // A zero or denied result returns no evidence.
 func (v VerifiedPOSTResponse) Evidence() (POSTResponseEvidence, error) {
-	if v.verified.AssertionID == "" {
+	if v.verified.evidence.AssertionID == "" {
 		return POSTResponseEvidence{}, ErrInvalidInput
 	}
-	return v.verified, nil
+	return v.verified.evidence, nil
 }
 
 // Validate authenticates the exact Response and its one Assertion from the
@@ -164,49 +164,49 @@ type postResponseBinding struct {
 	maximumUnsolicitedAge    time.Duration
 }
 
-func (p POSTResponseProfile) validatePOSTResponse(ctx context.Context, encoded string, binding postResponseBinding) (POSTResponseEvidence, error) {
+func (p POSTResponseProfile) validatePOSTResponse(ctx context.Context, encoded string, binding postResponseBinding) (verifiedPOSTResponseData, error) {
 	if err := ctx.Err(); err != nil {
-		return POSTResponseEvidence{}, err
+		return verifiedPOSTResponseData{}, err
 	}
 	document, err := decodePOSTResponse(encoded)
 	if err != nil {
-		return POSTResponseEvidence{}, err
+		return verifiedPOSTResponseData{}, err
 	}
 	response, err := parseSAMLDocument(ctx, document)
 	if err != nil {
-		return POSTResponseEvidence{}, err
+		return verifiedPOSTResponseData{}, err
 	}
 	if !samlElement(response, samlProtocolNS, "Response") || !uniqueSAMLDocumentIDs(response) || !p.matchIssuer(response) {
-		return POSTResponseEvidence{}, ErrInvalidInput
+		return verifiedPOSTResponseData{}, ErrInvalidInput
 	}
 	keys, expiries := p.activeSigningKeys(binding.now)
 	responseSigner, err := verifySAMLSignature(ctx, response, keys)
 	if err != nil {
-		return POSTResponseEvidence{}, err
+		return verifiedPOSTResponseData{}, err
 	}
 	assertion := p.responseAssertion(response, binding)
 	if assertion == nil || !p.matchIssuer(assertion) {
-		return POSTResponseEvidence{}, ErrInvalidInput
+		return verifiedPOSTResponseData{}, ErrInvalidInput
 	}
 	responseCutoff, ok := p.issueCutoff(response, binding)
 	if !ok {
-		return POSTResponseEvidence{}, ErrInvalidInput
+		return verifiedPOSTResponseData{}, ErrInvalidInput
 	}
 	binding.expiresAt = responseCutoff
 	assertionSigner, err := verifySAMLSignature(ctx, assertion, keys)
 	if err != nil {
-		return POSTResponseEvidence{}, err
+		return verifiedPOSTResponseData{}, err
 	}
 	evidence, ok := p.bindAssertion(assertion, binding)
 	if !ok {
-		return POSTResponseEvidence{}, ErrInvalidInput
+		return verifiedPOSTResponseData{}, ErrInvalidInput
 	}
 	if err := ctx.Err(); err != nil {
-		return POSTResponseEvidence{}, err
+		return verifiedPOSTResponseData{}, err
 	}
-	evidence.ResponseID = samlAttr(response, "ID")
-	evidence.ValidUntil = earlierSAMLTime(evidence.ValidUntil, expiries[responseSigner])
-	evidence.ValidUntil = earlierSAMLTime(evidence.ValidUntil, expiries[assertionSigner])
+	evidence.evidence.ResponseID = samlAttr(response, "ID")
+	evidence.evidence.ValidUntil = earlierSAMLTime(evidence.evidence.ValidUntil, expiries[responseSigner])
+	evidence.evidence.ValidUntil = earlierSAMLTime(evidence.evidence.ValidUntil, expiries[assertionSigner])
 	return evidence, nil
 }
 

@@ -107,6 +107,36 @@ func (p AuthnRedirectProfile) RedirectWithSPSigningCredential(ctx context.Contex
 	return redirect, certificate.NotAfter, nil
 }
 
+// RedirectWithSPSigningCredential signs the original correlated LogoutRequest
+// with the plaintext bundle described by EncodeSPSigningCredential. It applies
+// exactly ValidateSPSigningCredential's key, certificate and half-open lifetime
+// policy, then Redirect's fixed outbound binding profile. The returned cutoff is
+// the certificate's original exclusive NotAfter, never a renewed lifetime.
+// It neither revokes a local session nor establishes remote logout success.
+//
+// The caller owns clearing the borrowed secret plaintext bundle; it must not be
+// logged or concurrently mutated. Parsing creates Go-managed key objects that
+// clearing the bundle cannot erase. No I/O, clock lookup, provider admission or
+// stored mutation occurs. Nil contexts and invalid input return ErrInvalidInput;
+// noncompliant signing returns ErrSigning and cancellation returns ctx.Err().
+// Cancellation is checked between bounded operations and before disclosure;
+// standard-library parsing and signing are not interruptible. Every failure
+// returns a zero redirect and zero time. Concurrent calls do not share state.
+func (p LogoutRedirectProfile) RedirectWithSPSigningCredential(ctx context.Context, request LogoutRequest, bundle []byte, now time.Time) (LogoutRedirect, time.Time, error) {
+	key, certificate, err := parseSPSigningCredentialBundle(ctx, bundle, now)
+	if err != nil {
+		return LogoutRedirect{}, time.Time{}, err
+	}
+	redirect, err := p.Redirect(ctx, request, key)
+	if err != nil {
+		return LogoutRedirect{}, time.Time{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return LogoutRedirect{}, time.Time{}, err
+	}
+	return redirect, certificate.NotAfter, nil
+}
+
 func parseSPSigningCredentialBundle(ctx context.Context, bundle []byte, now time.Time) (*rsa.PrivateKey, *x509.Certificate, error) {
 	if ctx == nil {
 		return nil, nil, ErrInvalidInput

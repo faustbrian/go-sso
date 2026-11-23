@@ -109,12 +109,8 @@ func (p AuthnRedirectProfile) Redirect(ctx context.Context, request AuthnRequest
 	if err := ctx.Err(); err != nil {
 		return AuthnRedirect{}, err
 	}
-	if local, ok := signer.(*rsa.PrivateKey); ok && local == nil {
-		return AuthnRedirect{}, ErrInvalidInput
-	}
-	key, ok := signer.Public().(*rsa.PublicKey)
-	if !ok || key == nil || key.N == nil || key.N.Sign() != 1 || key.N.BitLen() < 2048 ||
-		key.Size() > maximumRedirectBytes || key.E < 3 || key.E%2 == 0 {
+	key, ok := redirectSigningKey(signer)
+	if !ok {
 		return AuthnRedirect{}, ErrInvalidInput
 	}
 
@@ -122,39 +118,64 @@ func (p AuthnRedirectProfile) Redirect(ctx context.Context, request AuthnRequest
 	if err != nil {
 		return AuthnRedirect{}, err
 	}
+	destination, err := signRedirectRequest(ctx, p.endpoint, encoded, request.RelayState, signer, key)
+	if err != nil {
+		return AuthnRedirect{}, err
+	}
+	return AuthnRedirect{destination: destination}, nil
+}
+
+func redirectSigningKey(signer crypto.Signer) (*rsa.PublicKey, bool) {
+	if signer == nil {
+		return nil, false
+	}
+	if local, ok := signer.(*rsa.PrivateKey); ok && local == nil {
+		return nil, false
+	}
+	key, ok := signer.Public().(*rsa.PublicKey)
+	if !ok || key == nil || key.N == nil || key.N.Sign() != 1 || key.N.BitLen() < 2048 ||
+		key.Size() > maximumRedirectBytes || key.E < 3 || key.E%2 == 0 {
+		return nil, false
+	}
+	return key, true
+}
+
+// signRedirectRequest owns only the closed outbound SAMLRequest binding. It
+// accepts already bounded, encoded XML and an already validated RSA public key.
+func signRedirectRequest(ctx context.Context, endpoint url.URL, encoded, relayState string, signer crypto.Signer, key *rsa.PublicKey) (url.URL, error) {
 	// The configured fixed query is not signature input. Bindings §3.4.4.1
 	// orders the percent-encoded protocol fields and omits absent RelayState.
 	signed := "SAMLRequest=" + url.QueryEscape(encoded)
-	if request.RelayState != "" {
-		signed += "&RelayState=" + url.QueryEscape(request.RelayState)
+	if relayState != "" {
+		signed += "&RelayState=" + url.QueryEscape(relayState)
 	}
 	signed += "&SigAlg=" + url.QueryEscape(SignatureAlgorithmRSAPSSSHA256)
 
 	if err := ctx.Err(); err != nil {
-		return AuthnRedirect{}, err
+		return url.URL{}, err
 	}
 	digest := sha256.Sum256([]byte(signed))
 	signerDigest := digest
 	signingOptions := &rsa.PSSOptions{Hash: crypto.SHA256, SaltLength: sha256.Size}
 	signature, err := signer.Sign(rand.Reader, signerDigest[:], signingOptions)
 	if canceled := ctx.Err(); canceled != nil {
-		return AuthnRedirect{}, canceled
+		return url.URL{}, canceled
 	}
 	// Verify against the profile, not the mutable arguments borrowed by the
 	// signer. A signer backend cannot select a digest or salt policy for us.
 	verificationOptions := &rsa.PSSOptions{Hash: crypto.SHA256, SaltLength: sha256.Size}
 	if err != nil || len(signature) != key.Size() || rsa.VerifyPSS(key, crypto.SHA256, digest[:], signature, verificationOptions) != nil {
-		return AuthnRedirect{}, ErrSigning
+		return url.URL{}, ErrSigning
 	}
-	result := p.endpoint
+	result := endpoint
 	if result.RawQuery != "" {
 		result.RawQuery += "&"
 	}
 	result.RawQuery += signed + "&Signature=" + url.QueryEscape(base64.StdEncoding.EncodeToString(signature))
 	if len(result.String()) > maximumRedirectBytes {
-		return AuthnRedirect{}, ErrInvalidInput
+		return url.URL{}, ErrInvalidInput
 	}
-	return AuthnRedirect{destination: result}, nil
+	return result, nil
 }
 
 type requestXML struct {
@@ -177,6 +198,10 @@ func (p AuthnRedirectProfile) encodeAuthnRequest(request AuthnRequest) (string, 
 	if err != nil {
 		return "", ErrInvalidInput
 	}
+	return deflateRedirectRequest(document)
+}
+
+func deflateRedirectRequest(document []byte) (string, error) {
 	var compressed bytes.Buffer
 	writer, err := flate.NewWriter(&compressed, flate.DefaultCompression)
 	if err != nil {

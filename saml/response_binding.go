@@ -36,35 +36,35 @@ func successfulSAMLStatus(status *xdm.Node) bool {
 	return empty && code.NumAttrs() == 1 && samlAttr(code, "Value") == samlStatusSuccess
 }
 
-func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResponseBinding) (POSTResponseEvidence, bool) {
+func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResponseBinding) (verifiedPOSTResponseData, bool) {
 	localCutoff, ok := p.issueCutoff(assertion, binding)
 	if assertion.NumAttrs() != 3 || samlAttr(assertion, "Version") != "2.0" || !ok {
-		return POSTResponseEvidence{}, false
+		return verifiedPOSTResponseData{}, false
 	}
 	parts, ok := samlElementChildren(assertion, maximumSAMLXMLNodes)
 	if !ok || len(parts) < 5 || !samlElement(parts[0], samlAssertionNS, "Issuer") ||
 		!samlElement(parts[1], xmlSignatureNamespace, "Signature") || !samlElement(parts[2], samlAssertionNS, "Subject") ||
 		!samlElement(parts[3], samlAssertionNS, "Conditions") || !samlElement(parts[4], samlAssertionNS, "AuthnStatement") {
-		return POSTResponseEvidence{}, false
+		return verifiedPOSTResponseData{}, false
 	}
 	// Unselected AttributeStatements confer no privilege. They remain signed,
 	// but are not mapped by the existing-linked-NameID profile.
 	for _, part := range parts[5:] {
 		if !samlElement(part, samlAssertionNS, "AttributeStatement") {
-			return POSTResponseEvidence{}, false
+			return verifiedPOSTResponseData{}, false
 		}
 	}
 	assertionExpiry, ok := p.bindConditions(parts[3], binding.now)
 	if !ok {
-		return POSTResponseEvidence{}, false
+		return verifiedPOSTResponseData{}, false
 	}
-	subject, format, confirmationExpiry, ok := p.bindSubject(parts[2], binding)
+	subject, confirmationExpiry, ok := p.bindSubject(parts[2], binding)
 	if !ok {
-		return POSTResponseEvidence{}, false
+		return verifiedPOSTResponseData{}, false
 	}
 	remoteSessionIndex, remoteExpiry, ok := p.bindAuthnStatement(parts[4], binding.now)
 	if !ok {
-		return POSTResponseEvidence{}, false
+		return verifiedPOSTResponseData{}, false
 	}
 	validUntil := earlierSAMLTime(localCutoff, assertionExpiry.Add(p.skew))
 	validUntil = earlierSAMLTime(validUntil, confirmationExpiry.Add(p.skew))
@@ -72,11 +72,14 @@ func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResp
 		validUntil = earlierSAMLTime(validUntil, remoteExpiry.Add(p.skew))
 	}
 	if !binding.now.Before(validUntil) {
-		return POSTResponseEvidence{}, false
+		return verifiedPOSTResponseData{}, false
 	}
-	return POSTResponseEvidence{
-		AssertionID: samlAttr(assertion, "ID"), ProviderSubject: subject, SubjectFormat: format,
-		SessionIndex: remoteSessionIndex, AssertionExpiresAt: assertionExpiry, ValidUntil: validUntil,
+	return verifiedPOSTResponseData{
+		evidence: POSTResponseEvidence{
+			AssertionID: samlAttr(assertion, "ID"), ProviderSubject: subject.value, SubjectFormat: subject.format,
+			SessionIndex: remoteSessionIndex, AssertionExpiresAt: assertionExpiry, ValidUntil: validUntil,
+		},
+		nameQualifier: subject.nameQualifier, spNameQualifier: subject.spNameQualifier,
 	}, true
 }
 
@@ -100,57 +103,64 @@ func (p POSTResponseProfile) bindConditions(n *xdm.Node, now time.Time) (time.Ti
 	return expires, ok && value == p.sp
 }
 
-func (p POSTResponseProfile) bindSubject(n *xdm.Node, binding postResponseBinding) (string, string, time.Time, bool) {
+type samlNameID struct{ value, format, nameQualifier, spNameQualifier string }
+
+func (p POSTResponseProfile) bindSubject(n *xdm.Node, binding postResponseBinding) (samlNameID, time.Time, bool) {
 	children, ok := samlElementChildren(n, 2)
 	if !ok || len(children) != 2 || n.NumAttrs() != 0 || !samlElement(children[0], samlAssertionNS, "NameID") ||
 		!samlElement(children[1], samlAssertionNS, "SubjectConfirmation") {
-		return "", "", time.Time{}, false
+		return samlNameID{}, time.Time{}, false
 	}
 	name := children[0]
-	format := samlAttr(name, "Format")
-	if format != samlPersistentNameID && format != samlEmailNameID {
-		return "", "", time.Time{}, false
+	subject := samlNameID{format: samlAttr(name, "Format")}
+	if subject.format != samlPersistentNameID && subject.format != samlEmailNameID {
+		return samlNameID{}, time.Time{}, false
 	}
 	for i := range name.NumAttrs() {
 		attribute := name.AttrAt(i)
 		qname := attribute.Name()
 		if qname.URI != "" {
-			return "", "", time.Time{}, false
+			return samlNameID{}, time.Time{}, false
 		}
 		switch qname.Local {
 		case "Format":
 		case "NameQualifier":
 			if attribute.Value() != p.idp {
-				return "", "", time.Time{}, false
+				return samlNameID{}, time.Time{}, false
 			}
+			subject.nameQualifier = attribute.Value()
 		case "SPNameQualifier":
 			if attribute.Value() != p.sp {
-				return "", "", time.Time{}, false
+				return samlNameID{}, time.Time{}, false
 			}
+			subject.spNameQualifier = attribute.Value()
 		default:
-			return "", "", time.Time{}, false
+			return samlNameID{}, time.Time{}, false
 		}
 	}
-	subject, ok := samlSimpleText(name, 512) // SSO ProtocolAssertion subject limit.
-	if !ok || strings.TrimSpace(subject) == "" {
-		return "", "", time.Time{}, false
+	subject.value, ok = samlSimpleText(name, 512) // SSO ProtocolAssertion subject limit.
+	if !ok || strings.TrimSpace(subject.value) == "" {
+		return samlNameID{}, time.Time{}, false
 	}
 	confirmation := children[1]
 	if confirmation.NumAttrs() != 1 || samlAttr(confirmation, "Method") != samlBearerConfirmation {
-		return "", "", time.Time{}, false
+		return samlNameID{}, time.Time{}, false
 	}
 	data, ok := samlElementChildren(confirmation, 1)
 	if !ok || len(data) != 1 || !samlElement(data[0], samlAssertionNS, "SubjectConfirmationData") {
-		return "", "", time.Time{}, false
+		return samlNameID{}, time.Time{}, false
 	}
 	// OASIS Profiles §§4.1.4.2, 4.1.5: bind the bearer confirmation to the
 	// recipient, expiry and selected request mode. Do not ignore extra fields.
 	if !binding.matchesRequest(data[0], 2) || samlAttr(data[0], "Recipient") != p.acs {
-		return "", "", time.Time{}, false
+		return samlNameID{}, time.Time{}, false
 	}
 	_, empty := samlElementChildren(data[0], 0)
 	expiry, ok := parseSAMLTime(samlAttr(data[0], "NotOnOrAfter"))
-	return subject, format, expiry, empty && ok && binding.now.Before(expiry.Add(p.skew))
+	if !empty || !ok || !binding.now.Before(expiry.Add(p.skew)) {
+		return samlNameID{}, time.Time{}, false
+	}
+	return subject, expiry, true
 }
 
 func (p POSTResponseProfile) bindAuthnStatement(n *xdm.Node, now time.Time) (string, time.Time, bool) {

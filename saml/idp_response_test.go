@@ -245,6 +245,7 @@ type idpResponseFixture struct {
 	destination, recipient, audience                               string
 	responseCorrelation, confirmationCorrelation                   string
 	qualifiedResponseCorrelation, qualifiedConfirmationCorrelation string
+	nameIDQualifiers, sessionIndexAttribute                        string
 	responseIssuedAt, assertionIssuedAt                            time.Time
 	conditionsExpiresAt                                            time.Time
 	omitResponseSignature, omitAssertionSignature                  bool
@@ -256,7 +257,8 @@ func newIDPResponseFixture() idpResponseFixture {
 	return idpResponseFixture{
 		responseID: "_response", assertionID: "_assertion", responseIssuer: fixtureIdP, assertionIssuer: fixtureIdP,
 		destination: fixtureIDPInitiatedURL, recipient: fixtureIDPInitiatedURL, audience: fixtureSP,
-		responseIssuedAt: issued, assertionIssuedAt: issued, conditionsExpiresAt: issued.Add(210 * time.Second),
+		sessionIndexAttribute: ` SessionIndex="member-session"`,
+		responseIssuedAt:      issued, assertionIssuedAt: issued, conditionsExpiresAt: issued.Add(210 * time.Second),
 	}
 }
 
@@ -275,7 +277,7 @@ func signedIDPResponseFixture(t *testing.T, key *ecdsa.PrivateKey, f idpResponse
 	}
 	assertionOpen := fmt.Sprintf(`<a:Assertion xmlns:a="urn:oasis:names:tc:SAML:2.0:assertion" ID="%s" IssueInstant="%s" Version="2.0">`, f.assertionID, f.assertionIssuedAt.Format(time.RFC3339Nano))
 	assertionIssuer := `<a:Issuer>` + f.assertionIssuer + `</a:Issuer>`
-	assertionContent := fmt.Sprintf(`<a:Subject><a:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">member-042</a:NameID><a:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><a:SubjectConfirmationData%s%s NotOnOrAfter="2026-11-23T04:03:00Z" Recipient="%s"%s></a:SubjectConfirmationData></a:SubjectConfirmation></a:Subject><a:Conditions NotBefore="2026-11-23T04:00:00Z" NotOnOrAfter="%s"><a:AudienceRestriction><a:Audience>%s</a:Audience></a:AudienceRestriction></a:Conditions><a:AuthnStatement AuthnInstant="2026-11-23T03:59:00Z" SessionIndex="member-session"><a:AuthnContext><a:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</a:AuthnContextClassRef></a:AuthnContext></a:AuthnStatement></a:Assertion>`, confirmationNamespace, f.confirmationCorrelation, f.recipient, f.qualifiedConfirmationCorrelation, f.conditionsExpiresAt.Format(time.RFC3339Nano), f.audience)
+	assertionContent := fmt.Sprintf(`<a:Subject><a:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"%s>member-042</a:NameID><a:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><a:SubjectConfirmationData%s%s NotOnOrAfter="2026-11-23T04:03:00Z" Recipient="%s"%s></a:SubjectConfirmationData></a:SubjectConfirmation></a:Subject><a:Conditions NotBefore="2026-11-23T04:00:00Z" NotOnOrAfter="%s"><a:AudienceRestriction><a:Audience>%s</a:Audience></a:AudienceRestriction></a:Conditions><a:AuthnStatement AuthnInstant="2026-11-23T03:59:00Z"%s><a:AuthnContext><a:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</a:AuthnContextClassRef></a:AuthnContext></a:AuthnStatement></a:Assertion>`, f.nameIDQualifiers, confirmationNamespace, f.confirmationCorrelation, f.recipient, f.qualifiedConfirmationCorrelation, f.conditionsExpiresAt.Format(time.RFC3339Nano), f.audience, f.sessionIndexAttribute)
 	assertionSigner := key
 	if f.assertionSigner != nil {
 		assertionSigner = f.assertionSigner

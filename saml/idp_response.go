@@ -74,7 +74,7 @@ type IDPInitiatedPOSTResponseInput struct {
 
 // VerifiedIDPInitiatedPOSTResponse is distinct from SP-initiated evidence.
 // It is not browser confirmation, a replay reservation or a session grant.
-type VerifiedIDPInitiatedPOSTResponse struct{ verified POSTResponseEvidence }
+type VerifiedIDPInitiatedPOSTResponse struct{ verified verifiedPOSTResponseData }
 
 // Validate checks both signed objects without inventing request correlation.
 func (p IDPInitiatedPOSTResponseProfile) Validate(ctx context.Context, input IDPInitiatedPOSTResponseInput) (VerifiedIDPInitiatedPOSTResponse, error) {
@@ -90,10 +90,10 @@ func (p IDPInitiatedPOSTResponseProfile) Validate(ctx context.Context, input IDP
 // Evidence explicitly returns the verified identity fields and replay set.
 // The native owner must reserve both IDs atomically before issuing authority.
 func (v VerifiedIDPInitiatedPOSTResponse) Evidence() (POSTResponseEvidence, error) {
-	if v.verified.AssertionID == "" {
+	if v.verified.evidence.AssertionID == "" {
 		return POSTResponseEvidence{}, ErrInvalidInput
 	}
-	return v.verified, nil
+	return v.verified.evidence, nil
 }
 
 func (IDPInitiatedPOSTResponseInput) Format(s fmt.State, _ rune) {
