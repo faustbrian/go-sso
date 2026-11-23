@@ -48,6 +48,24 @@ func TestSSOOIDCAccountProviderNamespaceRejectsMalformedSourceIdentifiers(t *tes
 	}
 }
 
+func TestSSOSAMLAccountProviderNamespaceDoesNotAliasEnterpriseOAuth(t *testing.T) {
+	oidc, _ := SSOOIDCAccountProviderNamespace("org-a", "provider-a")
+	oauth, _ := SSOOAuth2AccountProviderNamespace("org-a", "provider-a")
+	saml, err := SSOSAMLAccountProviderNamespace("org-a", "provider-a")
+	if err != nil || saml == oidc || saml == oauth || !strings.HasPrefix(saml, "sso.saml.v1.") || len(saml) != len("sso.saml.v1.")+64 {
+		t.Fatal("SAML did not receive its distinct stable account namespace", err)
+	}
+	if got, err := SSOSAMLAccountProviderNamespace("org-a", "provider-a"); err != nil || got != saml {
+		t.Fatal("SAML provider namespace was not stable", err)
+	}
+	if got, err := SSOSAMLAccountProviderNamespace("org-b", "provider-a"); err != nil || got == saml {
+		t.Fatal("SAML account namespace lost its organization binding", err)
+	}
+	if got, err := SSOSAMLAccountProviderNamespace("org-a", "foreign provider"); !errors.Is(err, sso.ErrInvalidInput) || got != "" {
+		t.Fatal("invalid provider received a SAML namespace", err)
+	}
+}
+
 func TestProviderLoginCallbackRecipientRejectsMissingOriginalAuthority(t *testing.T) {
 	for _, service := range []*ProviderLoginService{nil, {}, {router: &ProviderRouter{}}} {
 		got, err := service.resolveProviderLoginCallbackRecipient(context.Background(), providerLoginStartInput{}, oauth.ProviderIdentity{}, "policy")

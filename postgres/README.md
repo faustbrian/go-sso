@@ -14,6 +14,14 @@ selection; it never links an existing local account by email.
 
 ### Optional SAML replay schema
 
+Before enabling SAML provider writes, apply both versions of
+`ProviderSAMLProtocolMigrationSource` after the existing provider protocol
+history. The first version expands the check atomically without scanning
+existing rows; the second validates in a separate transaction. Both bound
+lock acquisition. These migrations leave OIDC/OAuth2 rows unchanged and
+do not enable any writer. Keep the expansion on rollback; do not write SAML
+providers while any registry consumer still assumes only OIDC or OAuth2.
+
 Install `SAMLReplayMigrationSource` after the native identity command and
 SSO provider migrations. Choose the next unused version in that migration
 history. Installation creates an empty table, bounds the foreign-key lock

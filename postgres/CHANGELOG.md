@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add optional forward-only provider protocol expansion for SAML and a
+  distinct stable namespace for existing SAML account links. Neither change
+  enables registration or a sign-in route.
+
 - Add optional forward-only SAML replay storage after the provider and
   identity command migrations. Reserve the authenticated Response and
   Assertion IDs atomically and retain the exact pair for recovery. This

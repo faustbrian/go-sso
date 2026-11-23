@@ -56,6 +56,14 @@ func SSOOAuth2AccountProviderNamespace(organizationID organization.ID, provider 
 	return ssoAccountProviderNamespace(organizationID, provider, "oauth2")
 }
 
+// SSOSAMLAccountProviderNamespace identifies an existing SAML account under
+// the exact installed organization and provider. The issuer and NameID still
+// have to match the signed assertion and the authoritative account. This
+// namespace creates neither a link nor authority and is distinct from OAuth.
+func SSOSAMLAccountProviderNamespace(organizationID organization.ID, provider sso.ProviderID) (string, error) {
+	return ssoAccountProviderNamespace(organizationID, provider, "saml")
+}
+
 func ssoAccountProviderNamespace(organizationID organization.ID, provider sso.ProviderID, protocol string) (string, error) {
 	if !providerID(string(organizationID)) || !providerID(string(provider)) {
 		return "", sso.ErrInvalidInput
