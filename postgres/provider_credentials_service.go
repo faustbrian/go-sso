@@ -49,9 +49,10 @@ type ProviderCredentialsConfig struct {
 }
 
 // ProviderCredentialsService initializes or replaces a disabled static
-// provider's client secret. OAuth 2.0 requires WithOAuthRegistration on the
-// organization-bound ProviderService. Configure that base service
-// first and install ProviderCredentialsMigrationSource. No constructor performs
+// provider's credential. OAuth 2.0 requires WithOAuthRegistration on the
+// organization-bound ProviderService. SAML SP signing material requires
+// WithSAMLSigningCredentialValidator. Configure that base service first and
+// install ProviderCredentialsMigrationSource. No constructor performs
 // I/O, grants current authorization or bypasses canonical native risk policy.
 // Concurrent calls use independent native contributors; the caller owns all
 // existing pool/key/policy resources for the complete recovery lifetime.
@@ -161,6 +162,9 @@ func (s *ProviderCredentialsService) ProviderCredentialsRotate(ctx context.Conte
 		return out, sso.ErrForbidden
 	}
 	if reference.Protocol == providerProtocolOAuth2 && !s.base.oauthRegistration {
+		return out, sso.ErrForbidden
+	}
+	if reference.Protocol == providerProtocolSAML && s.base.samlSigningValidator == nil {
 		return out, sso.ErrForbidden
 	}
 	wire, err := r.CredentialReference.EncryptedEnvelope().MarshalBinary()

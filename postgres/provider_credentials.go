@@ -198,9 +198,13 @@ func (p *ProviderCredentialsContributor) prepare(ctx context.Context, b kernel.R
 	// The public factory's service is not native authority: authenticate again
 	// using only this configured owner, exact immutable ingress key/profile and
 	// original primary-time window before any native command is admitted.
-	native, err := sso.NewEncryptedCredentialReference(ctx, s.config.Envelope, p.credentialWire, p.request.CredentialReference.Context())
-	if err != nil {
-		return providerError(ctx, err)
+	native := p.request.CredentialReference
+	binding := native.Context()
+	if binding.Protocol != providerProtocolSAML {
+		native, err = sso.NewEncryptedCredentialReference(ctx, s.config.Envelope, p.credentialWire, binding)
+		if err != nil {
+			return providerError(ctx, err)
+		}
 	}
 	if native.ValidateAt(p.admission.verified) != nil || native.ValidateAt(s.config.Clock.Now()) != nil {
 		return sso.ErrForbidden
@@ -210,6 +214,22 @@ func (p *ProviderCredentialsContributor) prepare(ctx context.Context, b kernel.R
 	}
 	if err = p.loadConfiguration(ctx); err != nil {
 		return err
+	}
+	if binding.Protocol == providerProtocolSAML {
+		contextWire, err := json.Marshal(binding)
+		if err != nil {
+			return sso.ErrInvalidInput
+		}
+		// Check the admitted, exact provider before borrowing its credential.
+		// The same bound marks the absolute deadline for protected Work.
+		until, err := s.validateSAMLSigningExpiry(ctx, binding.TenantID, binding.OrganizationID, binding.ProviderID,
+			p.credentialWire, contextWire, binding.Generation, binding.ProviderVersion+1, p.admission.verified)
+		if err != nil {
+			return providerError(ctx, err)
+		}
+		if until.Before(p.admission.until) {
+			p.admission.until = until
+		}
 	}
 	op := credentialsOperation()
 	p.binding = identity.CommandBinding{CommandID: b.Admission.CommandID, TenantID: bound.TenantID, UserID: bound.UserID, ActorID: identity.ActorID(bound.UserID), ActorKind: authorization.SubjectUser, OperationID: op.OperationID, RecordID: p.request.ProviderID, SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion, PolicyID: s.config.PolicyID, PolicyVersion: s.config.PolicyVersion, CorrelationID: string(p.request.CommandID)}
@@ -298,7 +318,12 @@ func (p *ProviderCredentialsContributor) loadConfiguration(ctx context.Context) 
 	if pending < 1 || pending > 128 {
 		return sso.ErrUnavailable
 	}
-	_, err = readProviderConfigurationDomains(p.request.CredentialReference.Context().Protocol, p.metadata, p.mappingVersion, int(pending))
+	protocol := p.request.CredentialReference.Context().Protocol
+	if protocol == providerProtocolSAML {
+		_, err = s.readProviderSAMLConfiguration(p.metadata, p.mappingVersion, int(pending))
+		return err
+	}
+	_, err = readProviderConfigurationDomains(protocol, p.metadata, p.mappingVersion, int(pending))
 	return err
 }
 

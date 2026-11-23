@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Select SAML SP signing credential installation and disabled-provider
+  replacement through the existing encrypted rotation transaction. Require
+  the current trusted origin and a local signer validator; retain the
+  certificate's exclusive expiry in the write admission. No provider is
+  enabled by installing a credential.
+
 - Register explicitly configured, disabled SAML providers through the
   current organization authority and keyed native coordinator. Retain pinned
   IdP configuration encrypted and return only safe metadata. Mixed readers

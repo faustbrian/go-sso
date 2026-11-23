@@ -37,6 +37,21 @@ inputs for keyed retries. The aggregate encoded configuration has the native
 registry's 48 KiB storage limit in addition to wire-profile limits. Ordinary
 OAuth2 writes remain separately selected.
 
+To install a SAML SP signing credential, opt the organization-bound provider
+service into `WithSAMLSigningCredentialValidator` with the optional SAML
+module's `ValidateSPSigningCredential`. Apply `ProviderCredentialsMigrationSource`
+using an unused migration version. The trusted caller passes signer material
+through `saml.EncodeSPSigningCredential`, then seals that transient bundle in
+the configured secret envelope with protocol `saml`, purpose `sp-signing-key`
+and the exact credential successor binding. Clear the plaintext after sealing.
+Submit the authenticated envelope to `ProviderCredentialsRotate` using the
+original command, provider version and explicit no-overlap policy.
+
+The selected profile installs or replaces one credential while the provider
+is disabled. The fresh credentials authority and the original certificate
+expiry bound the write. Original retries recover only the historical result;
+successful installation does not enable the provider or publish SP metadata.
+
 Install `SAMLReplayMigrationSource` after the native identity command and
 SSO provider migrations. Choose the next unused version in that migration
 history. Installation creates an empty table, bounds the foreign-key lock

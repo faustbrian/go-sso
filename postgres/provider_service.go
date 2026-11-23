@@ -66,6 +66,7 @@ type ProviderService struct {
 	oauthRegistration    bool
 	samlOrigin           string
 	samlValidator        sso.SAMLRegistrationValidator
+	samlSigningValidator sso.SAMLSigningCredentialValidator
 }
 
 func (ProviderService) Format(s fmt.State, _ rune) {
