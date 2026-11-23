@@ -1,9 +1,22 @@
 # Enterprise SAML service-provider wire operations
 
 `github.com/faustbrian/go-sso/saml` is an experimental optional Go 1.27 module.
-It can export SP metadata, produce a signed HTTP-Redirect `AuthnRequest`, and
-validate the signed HTTP-POST `SAMLResponse` for an original SP request. It
-does not install HTTP routes, consume replay state, or complete sign-in.
+It can import approved IdP metadata, export SP metadata, produce a signed
+HTTP-Redirect `AuthnRequest`, and validate the signed HTTP-POST `SAMLResponse`
+for an original SP request. It does not install HTTP routes, consume replay
+state, or complete sign-in.
+
+## Import an approved IdP document
+
+`ImportIDPMetadata(ctx, document, expectedEntityID, approvedSHA256, now)`
+returns the explicit entity ID, Redirect endpoint and DER signing certificates
+for native SAML registration. Obtain the exact entity and SHA-256 digest
+through independent configuration approval. Hashing an untrusted download
+and passing that hash to the importer does not authenticate the document.
+The importer makes no network requests or provider state changes. Unlisted
+roles, endpoints and encryption keys cannot stand in for the selected profile.
+
+## Publish SP metadata and start sign-in
 
 - `ExportSPMetadata` publishes one default HTTP-POST assertion consumer URL and
   one to five approved public RSA signing certificates in DER format. It does

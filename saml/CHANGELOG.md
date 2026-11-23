@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Import bounded offline IdP metadata only when its exact entity and raw
+  SHA-256 digest match separate approval. Return detached explicit Redirect
+  registration inputs, with exclusive entity/role expiry checks and no trust
+  discovery, metadata fetching, provider activation or certificate-time claim.
+
 - Project the exact public signing certificate and original exclusive expiry
   from a validated active SP signing credential bundle. The returned DER is
   detached from secret storage; no private key or provider authority is exposed.
