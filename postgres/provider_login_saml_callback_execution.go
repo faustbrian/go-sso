@@ -15,9 +15,10 @@ import (
 )
 
 type samlLoginCallbackPhase struct {
-	effect   *sessionpg.SSOSAMLSigninEffect
-	admitted samlCallbackAdmission
-	replay   samlCallbackReplay
+	effect        *sessionpg.SSOSAMLSigninEffect
+	admitted      samlCallbackAdmission
+	replay        samlCallbackReplay
+	logoutSubject *samlStoredLogoutSubject
 }
 
 // Persist the replay commitment and the original reconciliation cutoff, not
@@ -35,6 +36,31 @@ type samlCallbackOutput struct {
 	ObservedAt, ValidUntil time.Time
 	Replay                 samlCallbackReplay
 	Terminal               []byte
+	LogoutSubject          *samlStoredLogoutSubject `json:",omitempty"`
+}
+
+func encodeSAMLCallbackOutput(saved samlCallbackOutput, subject *samlStoredLogoutSubject) ([]byte, error) {
+	if subject != nil {
+		saved.Schema, saved.LogoutSubject = 2, subject
+	}
+	return providerLoginPayloadEncode(saved)
+}
+
+func decodeSAMLCallbackOutput(plain []byte, selected *samlStoredLogoutSubject) (samlCallbackOutput, error) {
+	var saved samlCallbackOutput
+	if err := providerLoginPayloadDecode(plain, &saved); err != nil {
+		clear(saved.Terminal)
+		return samlCallbackOutput{}, err
+	}
+	valid := saved.Schema == 1 && saved.LogoutSubject == nil && selected == nil
+	if selected != nil {
+		valid = saved.Schema == 2 && saved.LogoutSubject != nil && *saved.LogoutSubject == *selected
+	}
+	if !valid {
+		clear(saved.Terminal)
+		return samlCallbackOutput{}, identity.ForbiddenError{}
+	}
+	return saved, nil
 }
 
 var _ kernel.SSOSAMLSigninContributor = (*providerLoginCallbackPhase)(nil)
@@ -86,8 +112,8 @@ func (p *providerLoginCallbackPhase) generateSAMLAccepted(ctx context.Context, g
 		return nil, err
 	}
 	defer clear(terminal)
-	plain, err := providerLoginPayloadEncode(samlCallbackOutput{Schema: 1, Fields: fields, Risk: providerLoginStoredAdmission(admission.Prepared()),
-		ObservedAt: p.found.ObservedAt, ValidUntil: until, Replay: replay, Terminal: terminal})
+	plain, err := encodeSAMLCallbackOutput(samlCallbackOutput{Schema: 1, Fields: fields, Risk: providerLoginStoredAdmission(admission.Prepared()),
+		ObservedAt: p.found.ObservedAt, ValidUntil: until, Replay: replay, Terminal: terminal}, p.saml.logoutSubject)
 	defer clear(plain)
 	if err != nil || len(plain) > providerLoginCallbackPlainLimit {
 		return nil, identity.UnavailableError{}
@@ -119,11 +145,12 @@ func (p *providerLoginCallbackPhase) restoreSAMLAccepted(ctx context.Context, ge
 			clear(saved.Terminal)
 		}
 	}()
-	if err := providerLoginPayloadDecode(plain, &saved); err != nil {
+	saved, err = decodeSAMLCallbackOutput(plain, p.saml.logoutSubject)
+	if err != nil {
 		return identity.ForbiddenError{}
 	}
 	selected := p.saml.admitted
-	if saved.Schema != 1 || saved.ObservedAt.Before(p.found.Row.IssuedAt) || saved.ObservedAt.After(p.found.ObservedAt) ||
+	if saved.ObservedAt.Before(p.found.Row.IssuedAt) || saved.ObservedAt.After(p.found.ObservedAt) ||
 		!saved.ValidUntil.After(saved.ObservedAt) || saved.ValidUntil.After(saved.ObservedAt.Add(20*time.Second)) ||
 		saved.ValidUntil.After(p.found.Row.ExpiresAt) || !saved.Replay.RetainUntil.After(saved.ValidUntil) ||
 		saved.Replay.RetainUntil.Nanosecond()%1000 != 0 || saved.Replay.Response == saved.Replay.Assertion ||
@@ -169,6 +196,7 @@ func (p *providerLoginCallbackPhase) restoreSAMLAccepted(ctx context.Context, ge
 	p.execution = &providerLoginCallbackExecution{command: command, record: record, admission: admission, terminal: saved.Terminal,
 		generation: generation, digest: digest, validUntil: earlierLoginTime(saved.ValidUntil, selected.validUntil)}
 	p.saml.replay = saved.Replay
+	p.saml.logoutSubject = saved.LogoutSubject
 	owned = true
 	return nil
 }

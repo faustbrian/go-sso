@@ -61,12 +61,13 @@ type ProviderSAMLLoginCompletionConfig struct {
 // ProviderSAMLLoginCompletionService owns SP-initiated linked-member SAML ACS
 // over the selected start. It has no network, pool, migration or route lifecycle.
 type ProviderSAMLLoginCompletionService struct {
-	start   *ProviderLoginService
-	policy  sessionpg.IdentifierAdmissionConfig
-	issuer  session.IssuerConfig
-	csrfKey session.CSRFKey
-	verify  SAMLResponseVerifier
-	effect  *sessionpg.SSOSAMLSigninEffect
+	start               *ProviderLoginService
+	policy              sessionpg.IdentifierAdmissionConfig
+	issuer              session.IssuerConfig
+	csrfKey             session.CSRFKey
+	verify              SAMLResponseVerifier
+	verifyLogoutSubject SAMLResponseWithLogoutSubjectVerifier
+	effect              *sessionpg.SSOSAMLSigninEffect
 }
 
 func (SAMLSigninCallbackRequest) Format(f fmt.State, _ rune) {
@@ -108,8 +109,12 @@ func (SAMLVerifiedResponse) LogValue() slog.Value {
 // matching primary session storage and a trusted SAML POST verifier. Install
 // the replay, preparation erasure and SAML session issuance histories first.
 func NewProviderSAMLLoginCompletionService(start *ProviderLoginService, c ProviderSAMLLoginCompletionConfig) (*ProviderSAMLLoginCompletionService, error) {
+	return newProviderSAMLLoginCompletionService(start, c, nil)
+}
+
+func newProviderSAMLLoginCompletionService(start *ProviderLoginService, c ProviderSAMLLoginCompletionConfig, verify SAMLResponseWithLogoutSubjectVerifier) (*ProviderSAMLLoginCompletionService, error) {
 	if start == nil || start.saml == nil || start.router == nil || start.router.organizations == nil ||
-		c.Verify == nil || c.Issuer.MaximumDuration > start.config.Coordinator.MaximumDuration {
+		(c.Verify == nil && verify == nil) || (c.Verify != nil && verify != nil) || c.Issuer.MaximumDuration > start.config.Coordinator.MaximumDuration {
 		return nil, sso.ErrInvalidInput
 	}
 	policy := sessionpg.IdentifierAdmissionConfig{GlobalAuthorityID: start.config.GlobalAuthorityID,
@@ -123,7 +128,18 @@ func NewProviderSAMLLoginCompletionService(start *ProviderLoginService, c Provid
 	if _, err := session.NewSSOSAMLSessionIssuerWithCSRF(&providerLoginCallbackPhase{}, c.Issuer, c.CSRFKey); err != nil {
 		return nil, sso.ErrInvalidInput
 	}
-	return &ProviderSAMLLoginCompletionService{start: start, policy: policy, issuer: c.Issuer, csrfKey: c.CSRFKey, verify: c.Verify, effect: effect}, nil
+	return &ProviderSAMLLoginCompletionService{start: start, policy: policy, issuer: c.Issuer, csrfKey: c.CSRFKey, verify: c.Verify, verifyLogoutSubject: verify, effect: effect}, nil
+}
+
+// NewProviderSAMLLoginCompletionServiceWithLogoutSubject explicitly selects
+// original signed subject custody for logout. c.Verify must be nil: one
+// verifier supplies both results, never two cryptographic parses. Existing
+// isolated installations may keep the original constructor unchanged.
+func NewProviderSAMLLoginCompletionServiceWithLogoutSubject(start *ProviderLoginService, c ProviderSAMLLoginCompletionConfig, verify SAMLResponseWithLogoutSubjectVerifier) (*ProviderSAMLLoginCompletionService, error) {
+	if c.Verify != nil || verify == nil {
+		return nil, sso.ErrInvalidInput
+	}
+	return newProviderSAMLLoginCompletionService(start, c, verify)
 }
 
 // SigninCallback verifies the exact original prompt and browser, then commits
@@ -156,7 +172,20 @@ func (s *ProviderSAMLLoginCompletionService) SigninCallback(ctx context.Context,
 	if found.CompletedAt != nil || found.Row.ProviderID != string(request.ProviderID) {
 		return out, sso.ErrForbidden
 	}
-	admitted, err := s.start.admitSAMLCallback(ctx, found, request, s.verify, s.policy)
+	var logoutSubject *samlStoredLogoutSubject
+	verify := s.verify
+	if s.verifyLogoutSubject != nil {
+		verify = func(ctx context.Context, input SAMLResponseVerificationInput) (SAMLVerifiedResponse, error) {
+			verified, err := s.verifyLoginResponse(ctx, input)
+			if err != nil {
+				return SAMLVerifiedResponse{}, err
+			}
+			subject := samlStoredLogoutSubject(verified.LogoutSubject)
+			logoutSubject = &subject
+			return verified.Evidence, nil
+		}
+	}
+	admitted, err := s.start.admitSAMLCallback(ctx, found, request, verify, s.policy)
 	if err != nil {
 		return out, err
 	}
@@ -167,7 +196,7 @@ func (s *ProviderSAMLLoginCompletionService) SigninCallback(ctx context.Context,
 	phase := &providerLoginCallbackPhase{
 		providerLoginCallbackInvocation: providerLoginCallbackInvocation{service: s.start, found: found, original: admitted.original,
 			authority: admitted.authority, flow: admitted.flow, browser: request.Browser, command: command},
-		grant: admitted.grant, policy: s.policy, saml: &samlLoginCallbackPhase{effect: s.effect, admitted: admitted},
+		grant: admitted.grant, policy: s.policy, saml: &samlLoginCallbackPhase{effect: s.effect, admitted: admitted, logoutSubject: logoutSubject},
 	}
 	defer func() {
 		if phase.execution != nil {

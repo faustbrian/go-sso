@@ -267,6 +267,41 @@ type samlIDPArrivalOrigin struct {
 	PolicyVersion                uint64
 	Grant                        providerLoginStoredGrant
 	Proof                        []byte
+	LogoutSubject                *samlStoredLogoutSubject `json:",omitempty"`
+}
+
+func encodeSAMLIDPArrivalOrigin(origin samlIDPArrivalOrigin, subject *samlStoredLogoutSubject) ([]byte, error) {
+	if subject != nil {
+		origin.Version, origin.LogoutSubject = 2, subject
+	}
+	return providerLoginPayloadEncode(origin)
+}
+
+func decodeSAMLIDPArrivalOrigin(plain []byte, selected bool) (samlIDPArrivalOrigin, error) {
+	var origin samlIDPArrivalOrigin
+	if err := providerLoginPayloadDecode(plain, &origin); err != nil {
+		clear(origin.Proof)
+		return samlIDPArrivalOrigin{}, err
+	}
+	if !validSAMLIDPArrivalOriginVersion(origin, selected) {
+		clear(origin.Proof)
+		return samlIDPArrivalOrigin{}, identity.ForbiddenError{}
+	}
+	return origin, nil
+}
+
+func validSAMLIDPArrivalOriginVersion(origin samlIDPArrivalOrigin, selected bool) bool {
+	if !selected {
+		return origin.Version == 1 && origin.LogoutSubject == nil
+	}
+	if origin.Version != 2 || origin.LogoutSubject == nil {
+		return false
+	}
+	// The SP entity is derived exactly as in readProviderSAMLLoginProfile.
+	// Absent signed qualifiers remain absent; configured values never fill them.
+	sp := origin.ExternalOrigin + "/saml2/" + string(origin.Route.ProviderID) + "/metadata"
+	verified := SAMLVerifiedLoginResponse{Evidence: SAMLVerifiedResponse(origin.Evidence), LogoutSubject: SAMLLogoutSubject(*origin.LogoutSubject)}
+	return validSAMLLoginLogoutSubject(verified, origin.Issuer, sp)
 }
 
 // Public diagnostic encoders deliberately reject these observations. The
@@ -355,7 +390,7 @@ func (s *ProviderSAMLIDPArrivalService) prepareArrival(ctx context.Context, a Pr
 		FactorVersion: a.recipient.factorVersion, PolicyVersion: a.recipient.policyVersion, Grant: providerLoginStoredGrant(declaration.Grants[0])}
 	err = grant.TransferForDelivery(ctx, 0, func(ctx context.Context, proof []byte) error {
 		origin.Proof = proof
-		plain, err := providerLoginPayloadEncode(origin)
+		plain, err := encodeSAMLIDPArrivalOrigin(origin, a.admission.logoutSubject)
 		defer clear(plain)
 		if err != nil || len(plain) > 32768 {
 			return identity.UnavailableError{}

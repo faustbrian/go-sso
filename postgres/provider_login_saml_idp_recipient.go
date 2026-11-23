@@ -23,7 +23,7 @@ type samlIDPLinkedRecipientSelection struct {
 // The account and policy repositories read the router's same primary. There is
 // no request-selected namespace, SP start, JIT account or session authority.
 func (s *ProviderSAMLIDPAdmissionService) WithLinkedRecipientPolicy(namespace string) (*ProviderSAMLIDPAdmissionService, error) {
-	if s == nil || s.router == nil || s.verify == nil || len(s.profiles) == 0 {
+	if s == nil || s.router == nil || (s.verify == nil && s.verifyLogoutSubject == nil) || len(s.profiles) == 0 {
 		return nil, sso.ErrInvalidInput
 	}
 	scope := authoritypg.AuthorityScope{TenantID: authorization.TenantID(s.tenant), SubjectID: "scope-validation", PolicyNamespace: namespace}

@@ -174,6 +174,35 @@ func TestNativeSAMLIDPAdmissionWithoutSPStartUsesInstalledTrustAndEarliestCutoff
 	}
 }
 
+func TestNativeSAMLIDPAdmissionWithLogoutSubjectStillSelectsLinkedRecipient(t *testing.T) {
+	f := newNativeSAMLIDPAdmissionFixture(t)
+	seedSAMLIDPLinkedRecipient(t, f)
+	calls := 0
+	service, err := ssopg.NewProviderSAMLIDPAdmissionServiceWithLogoutSubject(f.router, ssopg.ProviderSAMLIDPAdmissionConfig{
+		TenantID: f.enable.proof.TenantID,
+		Profiles: []ssopg.StaticSAMLIDPAdmissionProfile{{Provider: f.profile, MaximumAge: time.Minute}},
+	}, func(ctx context.Context, input ssopg.SAMLIDPResponseVerificationInput) (ssopg.SAMLVerifiedLoginResponse, error) {
+		calls++
+		f.assertVerifierInput(t, ctx, input, time.Minute)
+		evidence := nativeSAMLIDPEvidence(input.Now)
+		return ssopg.SAMLVerifiedLoginResponse{Evidence: evidence, LogoutSubject: ssopg.SAMLLogoutSubject{
+			ProviderSubject: evidence.ProviderSubject, SubjectFormat: evidence.SubjectFormat, SessionIndex: evidence.SessionIndex,
+			NameQualifier: input.IdentityProviderEntityID, SPNameQualifier: input.SPEntityID,
+		}}, nil
+	})
+	if err != nil {
+		t.Fatal("compose the selected combined verifier", err)
+	}
+	selected, err := service.WithLinkedRecipientPolicy("users")
+	if err != nil {
+		t.Fatal("optional logout subject disabled linked-recipient policy", err)
+	}
+	result, err := selected.VerifyLinkedRecipient(f.enable.f.ctx, f.request())
+	if err != nil || result.LinkedUser() != "owner" || calls != 1 {
+		t.Fatal("combined verification did not admit exactly the existing recipient", err)
+	}
+}
+
 func TestNativeSAMLIDPAdmissionRejectsWrongDestinationAndUnselectedScopeBeforeVerifier(t *testing.T) {
 	f := newNativeSAMLIDPAdmissionFixture(t)
 	calls := 0

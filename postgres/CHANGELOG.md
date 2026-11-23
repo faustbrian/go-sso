@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Let selected SAML sign-in verifiers return the exact signed logout subject
+  alongside login evidence. Preserve it in existing encrypted preparation for
+  both sign-in paths; existing callers and payloads are unchanged.
+
 - Expose authenticated read-only quota correlation for an original pending
   SAML IdP confirmation. Return only its provider, ID and retained lifetime.
 

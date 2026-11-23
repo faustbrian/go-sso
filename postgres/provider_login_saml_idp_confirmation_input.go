@@ -104,7 +104,8 @@ func (s *ProviderSAMLIDPArrivalService) readPendingConfirmation(ctx context.Cont
 		return pending, original, err
 	}
 	defer clear(plain)
-	if err := providerLoginPayloadDecode(plain, &original); err != nil || !s.matchesSAMLIDPConfirmationOrigin(pending, original, selected) {
+	original, err = decodeSAMLIDPArrivalOrigin(plain, s.admission.verifyLogoutSubject != nil)
+	if err != nil || !s.matchesSAMLIDPConfirmationOrigin(pending, original, selected) {
 		return pending, original, sso.ErrForbidden
 	}
 	pending.Binding = original.Binding
@@ -114,7 +115,7 @@ func (s *ProviderSAMLIDPArrivalService) readPendingConfirmation(ctx context.Cont
 func (s *ProviderSAMLIDPArrivalService) matchesSAMLIDPConfirmationOrigin(pending samlIDPPendingArrival, original samlIDPArrivalOrigin, selected staticSAMLIDPAdmissionSelection) bool {
 	b, route, grant, profile := original.Binding, original.Route, kernel.CapabilityPlan(original.Grant), selected.profile.Provider
 	now := s.admission.router.config.Clock.Now().UTC()
-	if original.Version != 1 || b.ValidateFor(kernel.SSOSAMLIDPArrivalOperation()) != nil || b.CommandID != pending.Binding.CommandID || b.RecordID != string(b.CommandID) ||
+	if !validSAMLIDPArrivalOriginVersion(original, s.admission.verifyLogoutSubject != nil) || b.ValidateFor(kernel.SSOSAMLIDPArrivalOperation()) != nil || b.CommandID != pending.Binding.CommandID || b.RecordID != string(b.CommandID) ||
 		b.TenantID != pending.Binding.TenantID || b.UserID != pending.Binding.UserID || b.ActorKind != authorization.SubjectServiceAccount ||
 		b.ActorID != s.config.ActorID || b.PolicyID != s.config.PolicyID || b.PolicyVersion != s.config.PolicyVersion || b.CorrelationID != string(b.CommandID) {
 		return false

@@ -64,11 +64,12 @@ type ProviderSAMLIDPAdmissionConfig struct {
 // bounded primary reads and does not expose a route, reserve replay state,
 // confirm visible user intent or grant a session. The zero value denies.
 type ProviderSAMLIDPAdmissionService struct {
-	router   *ProviderRouter
-	tenant   identity.TenantID
-	profiles map[sso.ProviderID]staticSAMLIDPAdmissionSelection
-	verify   SAMLIDPResponseVerifier
-	linked   *samlIDPLinkedRecipientSelection
+	router              *ProviderRouter
+	tenant              identity.TenantID
+	profiles            map[sso.ProviderID]staticSAMLIDPAdmissionSelection
+	verify              SAMLIDPResponseVerifier
+	verifyLogoutSubject SAMLIDPResponseWithLogoutSubjectVerifier
+	linked              *samlIDPLinkedRecipientSelection
 }
 
 type staticSAMLIDPAdmissionSelection struct {
@@ -79,9 +80,13 @@ type staticSAMLIDPAdmissionSelection struct {
 // NewProviderSAMLIDPAdmissionService snapshots the allowlist and borrows the
 // already composed, protocol-aware primary router. It performs no I/O.
 func NewProviderSAMLIDPAdmissionService(router *ProviderRouter, config ProviderSAMLIDPAdmissionConfig) (*ProviderSAMLIDPAdmissionService, error) {
+	return newProviderSAMLIDPAdmissionService(router, config, nil)
+}
+
+func newProviderSAMLIDPAdmissionService(router *ProviderRouter, config ProviderSAMLIDPAdmissionConfig, verify SAMLIDPResponseWithLogoutSubjectVerifier) (*ProviderSAMLIDPAdmissionService, error) {
 	if router == nil || router.pool == nil || router.organizations == nil || router.config.Clock == nil ||
 		router.config.Envelope == nil || !router.protocolRegistry || router.samlRouteValidate == nil ||
-		!providerID(string(config.TenantID)) || config.Verify == nil || len(config.Profiles) == 0 || len(config.Profiles) > 128 {
+		!providerID(string(config.TenantID)) || (config.Verify == nil && verify == nil) || (config.Verify != nil && verify != nil) || len(config.Profiles) == 0 || len(config.Profiles) > 128 {
 		return nil, sso.ErrInvalidInput
 	}
 	profiles := make(map[sso.ProviderID]staticSAMLIDPAdmissionSelection, len(config.Profiles))
@@ -95,7 +100,17 @@ func NewProviderSAMLIDPAdmissionService(router *ProviderRouter, config ProviderS
 		}
 		profiles[selected.Provider.ProviderID] = staticSAMLIDPAdmissionSelection{profile: selected, destination: destination}
 	}
-	return &ProviderSAMLIDPAdmissionService{router: router, tenant: config.TenantID, profiles: profiles, verify: config.Verify}, nil
+	return &ProviderSAMLIDPAdmissionService{router: router, tenant: config.TenantID, profiles: profiles, verify: config.Verify, verifyLogoutSubject: verify}, nil
+}
+
+// NewProviderSAMLIDPAdmissionServiceWithLogoutSubject selects one trusted
+// verifier returning both assertion evidence and its exact logout subject.
+// config.Verify must be nil. The original constructor retains its behavior.
+func NewProviderSAMLIDPAdmissionServiceWithLogoutSubject(router *ProviderRouter, config ProviderSAMLIDPAdmissionConfig, verify SAMLIDPResponseWithLogoutSubjectVerifier) (*ProviderSAMLIDPAdmissionService, error) {
+	if config.Verify != nil || verify == nil {
+		return nil, sso.ErrInvalidInput
+	}
+	return newProviderSAMLIDPAdmissionService(router, config, verify)
 }
 
 func normalizeStaticSAMLIDPAdmissionProfile(profile StaticSAMLIDPAdmissionProfile) (StaticSAMLIDPAdmissionProfile, string, error) {
@@ -114,7 +129,7 @@ func normalizeStaticSAMLIDPAdmissionProfile(profile StaticSAMLIDPAdmissionProfil
 // certificate set, verifies the response and then checks current native
 // authority again. It creates no SP start, replay reservation or command.
 func (s *ProviderSAMLIDPAdmissionService) Verify(ctx context.Context, request SAMLIDPAdmissionRequest) (out ProviderSAMLIDPAdmission, err error) {
-	if ctx == nil || s == nil || s.router == nil || s.verify == nil ||
+	if ctx == nil || s == nil || s.router == nil || (s.verify == nil && s.verifyLogoutSubject == nil) ||
 		len(request.SAMLResponse) == 0 || len(request.SAMLResponse) > base64.StdEncoding.EncodedLen(1<<20) {
 		return out, sso.ErrInvalidInput
 	}
@@ -153,12 +168,13 @@ func (s *ProviderSAMLIDPAdmissionService) Verify(ctx context.Context, request SA
 	if verifiedAt.Before(binding.ObservedAt) || !verifiedAt.Before(binding.ValidUntil) {
 		return out, sso.ErrForbidden
 	}
-	wire, verifyErr := s.verify(ctx, SAMLIDPResponseVerificationInput{
+	verified, verifyErr := s.verifyLoginResponse(ctx, SAMLIDPResponseVerificationInput{
 		SPEntityID: installed.spEntityID, IdentityProviderEntityID: installed.configuration.EntityID,
 		ExternalOrigin: selected.profile.Provider.TrustedOrigin, AssertionConsumerURL: selected.destination,
 		ProviderID: request.ProviderID, SigningCertificates: installed.configuration.SigningCertificates,
 		SAMLResponse: request.SAMLResponse, Now: verifiedAt, MaximumAge: selected.profile.MaximumAge,
 	})
+	wire := verified.Evidence
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
@@ -186,18 +202,24 @@ func (s *ProviderSAMLIDPAdmissionService) Verify(ctx context.Context, request SA
 	if now.Before(verifiedAt) || now.Before(proof.ObservedAt) || !now.Before(cutoff) || !now.Before(proof.ExpiresAt) {
 		return out, sso.ErrForbidden
 	}
-	return ProviderSAMLIDPAdmission{wire: wire, route: binding, issuer: installed.configuration.EntityID, verifiedAt: verifiedAt, validUntil: cutoff}, nil
+	var logoutSubject *samlStoredLogoutSubject
+	if s.verifyLogoutSubject != nil {
+		subject := samlStoredLogoutSubject(verified.LogoutSubject)
+		logoutSubject = &subject
+	}
+	return ProviderSAMLIDPAdmission{wire: wire, route: binding, issuer: installed.configuration.EntityID, verifiedAt: verifiedAt, validUntil: cutoff, logoutSubject: logoutSubject}, nil
 }
 
 // ProviderSAMLIDPAdmission is an opaque observation, not durable replay or
 // browser confirmation. In particular it is not authorization to issue a
 // session, and must not renew the original route or wire observation.
 type ProviderSAMLIDPAdmission struct {
-	wire       SAMLVerifiedResponse
-	route      sso.DomainRouteBinding
-	issuer     string
-	verifiedAt time.Time
-	validUntil time.Time
+	wire          SAMLVerifiedResponse
+	route         sso.DomainRouteBinding
+	issuer        string
+	verifiedAt    time.Time
+	validUntil    time.Time
+	logoutSubject *samlStoredLogoutSubject
 }
 
 // Evidence returns detached verified scalars with the earliest original route,
