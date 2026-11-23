@@ -70,31 +70,65 @@ func EncodeSPSigningCredential(ctx context.Context, privateKeyPKCS8, certificate
 // validation occurs. Nil contexts and malformed, noncanonical, oversized or
 // inactive inputs return ErrInvalidInput; cancellation returns ctx.Err().
 func ValidateSPSigningCredential(ctx context.Context, bundle []byte, now time.Time) (time.Time, error) {
-	if ctx == nil {
-		return time.Time{}, ErrInvalidInput
-	}
-	if err := ctx.Err(); err != nil {
-		return time.Time{}, err
-	}
-	if len(bundle) < spSigningCredentialHeaderBytes || len(bundle) > maximumSPSigningCredentialBytes ||
-		string(bundle[:len(spSigningCredentialTag)]) != spSigningCredentialTag {
-		return time.Time{}, ErrInvalidInput
-	}
-	keyBytes := binary.BigEndian.Uint32(bundle[8:12])
-	certificateBytes := binary.BigEndian.Uint32(bundle[12:16])
-	if keyBytes == 0 || keyBytes > maximumSPPrivateKeyBytes || certificateBytes == 0 || certificateBytes > maximumSPCertificateBytes {
-		return time.Time{}, ErrInvalidInput
-	}
-	// Lengths are bounded before conversion and addition, including on 32-bit Go.
-	certificateOffset := spSigningCredentialHeaderBytes + int(keyBytes)
-	if certificateOffset+int(certificateBytes) != len(bundle) {
-		return time.Time{}, ErrInvalidInput
-	}
-	_, certificate, err := parseSPSigningCredential(ctx, bundle[spSigningCredentialHeaderBytes:certificateOffset], bundle[certificateOffset:], now)
+	_, certificate, err := parseSPSigningCredentialBundle(ctx, bundle, now)
 	if err != nil {
 		return time.Time{}, err
 	}
 	return certificate.NotAfter, nil
+}
+
+// RedirectWithSPSigningCredential signs the original request with the plaintext
+// credential bundle described by EncodeSPSigningCredential. It applies exactly
+// ValidateSPSigningCredential's key, certificate and half-open lifetime policy,
+// then uses Redirect's fixed signing profile without exposing the parsed key.
+// It returns the certificate's original NotAfter as an exclusive cutoff for the
+// caller's transaction lifetime; it does not extend that lifetime or admit a
+// provider. Every failure returns a zero redirect and zero time.
+//
+// The bundle is borrowed synchronously without modification or retention. The
+// caller owns clearing its secret plaintext buffer and must not log it or mutate
+// it concurrently. Clearing that buffer does not erase Go-managed parsed key
+// objects. There is no I/O, clock lookup, trust-chain validation or stored state.
+// Nil contexts and invalid input return ErrInvalidInput; cancellation returns
+// ctx.Err(). Cancellation is checked between bounded parsing steps and before
+// disclosure, but standard-library parsing and signing cannot be interrupted.
+func (p AuthnRedirectProfile) RedirectWithSPSigningCredential(ctx context.Context, request AuthnRequest, bundle []byte, now time.Time) (AuthnRedirect, time.Time, error) {
+	key, certificate, err := parseSPSigningCredentialBundle(ctx, bundle, now)
+	if err != nil {
+		return AuthnRedirect{}, time.Time{}, err
+	}
+	redirect, err := p.Redirect(ctx, request, key)
+	if err != nil {
+		return AuthnRedirect{}, time.Time{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return AuthnRedirect{}, time.Time{}, err
+	}
+	return redirect, certificate.NotAfter, nil
+}
+
+func parseSPSigningCredentialBundle(ctx context.Context, bundle []byte, now time.Time) (*rsa.PrivateKey, *x509.Certificate, error) {
+	if ctx == nil {
+		return nil, nil, ErrInvalidInput
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(bundle) < spSigningCredentialHeaderBytes || len(bundle) > maximumSPSigningCredentialBytes ||
+		string(bundle[:len(spSigningCredentialTag)]) != spSigningCredentialTag {
+		return nil, nil, ErrInvalidInput
+	}
+	keyBytes := binary.BigEndian.Uint32(bundle[8:12])
+	certificateBytes := binary.BigEndian.Uint32(bundle[12:16])
+	if keyBytes == 0 || keyBytes > maximumSPPrivateKeyBytes || certificateBytes == 0 || certificateBytes > maximumSPCertificateBytes {
+		return nil, nil, ErrInvalidInput
+	}
+	// Lengths are bounded before conversion and addition, including on 32-bit Go.
+	certificateOffset := spSigningCredentialHeaderBytes + int(keyBytes)
+	if certificateOffset+int(certificateBytes) != len(bundle) {
+		return nil, nil, ErrInvalidInput
+	}
+	return parseSPSigningCredential(ctx, bundle[spSigningCredentialHeaderBytes:certificateOffset], bundle[certificateOffset:], now)
 }
 
 func parseSPSigningCredential(ctx context.Context, privateDER, certificateDER []byte, now time.Time) (*rsa.PrivateKey, *x509.Certificate, error) {

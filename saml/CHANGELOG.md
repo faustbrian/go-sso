@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Sign an original AuthnRequest directly with a validated SP signing credential
+  bundle without exporting its parsed private key. Return the certificate's
+  original exclusive expiry for transaction fencing; the caller retains
+  ownership of clearing the plaintext bundle.
+
 - Add a bounded versioned plaintext codec for a validated two-prime RSA SP signing key
   and matching active certificate. Callers must seal and clear the returned
   bytes; validation returns the certificate's original exclusive expiry and
