@@ -86,6 +86,26 @@ func TestNativeSAMLIDPArrivalCommitsOnlyPendingCustodyAndGrant(t *testing.T) {
 	if _, _, _, ok := result.TakeConfirmation(); ok {
 		t.Fatal("the same arrival result disclosed the browser pair twice")
 	}
+	confirmation := ssopg.SAMLIDPConfirmationRequest{TenantID: tenant, ProviderID: x.profile.ProviderID, PendingID: result.CommandID,
+		Origin: x.profile.TrustedOrigin, Browser: browser, Form: form}
+	if err := ssopg.CheckSAMLIDPConfirmationInputForTest(f.ctx, service, confirmation); err != nil {
+		t.Fatal("the original same-origin browser pair could not open committed custody", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*ssopg.SAMLIDPConfirmationRequest)
+	}{
+		{"other tenant", func(r *ssopg.SAMLIDPConfirmationRequest) { r.TenantID = "foreign" }},
+		{"other provider", func(r *ssopg.SAMLIDPConfirmationRequest) { r.ProviderID = "foreign" }},
+		{"other origin", func(r *ssopg.SAMLIDPConfirmationRequest) { r.Origin = "https://foreign.example.test" }},
+		{"swapped values", func(r *ssopg.SAMLIDPConfirmationRequest) { r.Browser, r.Form = r.Form, r.Browser }},
+	} {
+		request := confirmation
+		tc.change(&request)
+		if err := ssopg.CheckSAMLIDPConfirmationInputForTest(f.ctx, service, request); !errors.Is(err, sso.ErrForbidden) {
+			t.Fatal("altered confirmation input did not fail closed", tc.name, err)
+		}
+	}
 	query := identity.RecoveryQuery{CommandID: result.CommandID, TenantID: tenant, UserID: "owner", ActorID: "native-saml-arrival",
 		ActorKind: authorization.SubjectServiceAccount, OperationID: kernel.SSOSAMLIDPArrivalOperation().OperationID, RecordID: string(result.CommandID)}
 	decision := authorization.DecisionContext{PolicyRevision: 1, Request: authorization.Request{

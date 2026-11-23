@@ -152,6 +152,26 @@ acknowledged commit returns the normal session and its CSRF synchronizer;
 terminal replay and an unknown commit return neither credential. This native
 selection alone installs no route and does not select unsolicited login or SLO.
 
+For the distinct, opt-in IdP-initiated linked-member profile, compose
+`NewProviderSAMLIDPAdmissionService` with the installed SAML verifier, select
+linked-recipient policy, and use `NewProviderSAMLIDPArrivalService` and
+`NewProviderSAMLIDPConfirmationService` on that same primary. In addition to
+the session/CSRF and replay prerequisites above, install
+`SAMLIDPConfirmationMigrationSource`, `SAMLIDPReplayMigrationSource`, the
+kernel `SSOSAMLIDPConfirmationPreparationErasureMigrationSource`, and the
+session adapter `SSOSAMLIDPSigninMigrationSource` after their predecessors.
+Use the documented Capability PostgreSQL identity history for one-use grants.
+
+At the exact installed IdP-initiated destination, call `Prepare` and deliver
+the one-shot independent values to the original browser only, using a scoped
+Secure, HttpOnly cookie for the browser value and the other value in explicit
+confirmation. Call `Confirm` with the trusted route, validated same-origin
+request and both values. It consumes the pending record, original grant and
+both replay IDs with the normal session. Only a freshly acknowledged commit
+returns session and CSRF credentials. `RecoverConfirmation` can recover the
+authorized receipt, never the credentials. This native composition does not
+expose an HTTP endpoint, create a pre-auth flow or support SLO.
+
 ### Static OIDC login custody schema
 
 `LoginTransactionMigrationSource` is an additive schema prerequisite. Install

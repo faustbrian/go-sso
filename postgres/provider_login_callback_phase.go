@@ -83,6 +83,7 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 	registration := providerLoginCallbackRegistration()
 	lifecycle := providerLoginCallbackLifecycle()
 	action, retention, actor := "identity.sso.login", "protected", audit.ActorService
+	subject := providerLoginSubject
 	purpose := providerOIDCCallback
 	if op := kernel.SSOOAuth2SigninOperation(); binding.SchemaID == op.SchemaID {
 		registration = kernel.FeatureRegistration{Contributor: providerOAuth2LoginCallbackDescriptor(), Operation: op}
@@ -91,6 +92,10 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 	if op := kernel.SSOSAMLSigninOperation(); binding.SchemaID == op.SchemaID {
 		registration = kernel.FeatureRegistration{Contributor: providerSAMLLoginCallbackDescriptor(), Operation: op}
 		purpose = op.OperationID
+	}
+	if op := kernel.SSOSAMLIDPConfirmationOperation(); binding.SchemaID == op.SchemaID {
+		registration = kernel.FeatureRegistration{Contributor: samlIDPConfirmationDescriptor(), Operation: op}
+		purpose, subject = op.OperationID, "sso_saml_confirmation"
 	}
 	if op := kernel.SSOOIDCExplicitLinkCallbackOperation(); binding.SchemaID == op.SchemaID {
 		if binding.ActorKind != authorization.SubjectUser || string(binding.ActorID) != string(binding.UserID) {
@@ -110,21 +115,21 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 		return kernel.CommandPlan{}, err
 	}
 	auditSeed, err := builder.Build(audit.RecordInput{OccurredAt: occurred, Action: action, Outcome: audit.OutcomeSucceeded, ReasonCode: "completed",
-		Actor: audit.ActorInput{Kind: actor, ID: string(binding.ActorID)}, Subject: audit.SubjectInput{Type: providerLoginSubject, ID: binding.RecordID},
+		Actor: audit.ActorInput{Kind: actor, ID: string(binding.ActorID)}, Subject: audit.SubjectInput{Type: subject, ID: binding.RecordID},
 		Context: audit.ContextInput{TenantID: string(binding.TenantID), CorrelationID: binding.CorrelationID},
 		Policy:  audit.PolicyMetadata{PolicyID: binding.PolicyID, Version: strconv.FormatUint(binding.PolicyVersion, 10)},
 		Changes: audit.ChangeSetInput{Redacted: true}, Attributes: map[string]string{
 			"identity.profile": "identity.security.v1", "command.id": string(binding.CommandID), "retention.class": retention,
-			"aggregate.type": providerLoginSubject, "aggregate.id": binding.RecordID, "aggregate.before_version": "1", "aggregate.after_version": "2",
+			"aggregate.type": subject, "aggregate.id": binding.RecordID, "aggregate.before_version": "1", "aggregate.after_version": "2",
 		}})
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
-	digest, err := kernel.FeatureAuditBindingDigest(binding, registration.Operation, providerLoginSubject, auditSeed)
+	digest, err := kernel.FeatureAuditBindingDigest(binding, registration.Operation, subject, auditSeed)
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
-	return kernel.CommandPlan{Contributors: slices.Clone(contributors), Feature: &registration, SubjectType: providerLoginSubject, Capability: &grant, Lifecycle: &lifecycle,
+	return kernel.CommandPlan{Contributors: slices.Clone(contributors), Feature: &registration, SubjectType: subject, Capability: &grant, Lifecycle: &lifecycle,
 		Audits: []kernel.AuditPlan{{EventType: action, SchemaVersion: 1, BindingDigest: digest, RetentionClass: retention, RetentionPolicyVersion: auditRetention,
 			Required: true, RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384}}}, nil
 }

@@ -20,6 +20,8 @@ func TestNativeSAMLIDPPendingQueryScale(t *testing.T) {
 	installSAMLIDPStorage(t, f, ssopg.SAMLIDPConfirmationMigrationSource{Version: 394})
 	tenant, org, provider := string(x.enable.proof.TenantID), string(x.profile.OrganizationID), string(x.profile.ProviderID)
 	command := samlIDPMigrationCommandBytes(t, f, x.enable.proof.TenantID, "identity.sso.saml-idp-prepare")
+	expiredCommand := samlIDPMigrationCommandBytes(t, f, x.enable.proof.TenantID, "identity.sso.saml-idp-prepare")
+	completion := samlIDPMigrationCommandBytes(t, f, x.enable.proof.TenantID, "identity.sso.saml-idp-init")
 	const n = 20000
 	tx, err := f.pool.Raw().Begin(f.ctx)
 	if err != nil {
@@ -63,6 +65,24 @@ func TestNativeSAMLIDPPendingQueryScale(t *testing.T) {
 	measureSAMLIDPPendingStatement(t, f, tx, "recovery-hit", ssopg.SAMLIDPObservePendingForTest, insert[:2], 1, true)
 	missing := append(bytes.Clone(command[:15]), command[15]^1)
 	measureSAMLIDPPendingStatement(t, f, tx, "recovery-miss", ssopg.SAMLIDPObservePendingForTest, []any{tenant, missing}, 0, true)
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-read", ssopg.SAMLIDPReadPendingForTest, insert[:2], 1, true)
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-read-miss", ssopg.SAMLIDPReadPendingForTest, []any{tenant, missing}, 0, true)
+	confirmed := append(insert, completion)
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-write", ssopg.SAMLIDPCompletePendingForTest, confirmed, 1, true)
+	unmatched := slices.Clone(confirmed)
+	unmatched[1] = missing
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-write-miss", ssopg.SAMLIDPCompletePendingForTest, unmatched, 0, true)
+	expired := slices.Clone(confirmed)
+	expired[1], expired[9], expired[10] = expiredCommand, issued.Add(-time.Second), issued
+	if tag, err := tx.Exec(f.ctx, `INSERT INTO sso_providers.saml_idp_confirmations
+ (tenant_id,confirmation_id,organization_id,provider_id,user_id,binding_envelope,confirmation_key_version,browser_digest,form_digest,issued_at,expires_at)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, expired[:11]...); err != nil || tag.RowsAffected() != 1 {
+		t.Fatal("seed the already expired original pending row", err)
+	}
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-read-expired", ssopg.SAMLIDPReadPendingForTest, expired[:2], 0, true)
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-write-expired", ssopg.SAMLIDPCompletePendingForTest, expired, 0, true)
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-recovery-hit", ssopg.SAMLIDPRecoverConfirmationPendingForTest, []any{tenant, command, "owner"}, 1, true)
+	measureSAMLIDPPendingStatement(t, f, tx, "confirmation-recovery-miss", ssopg.SAMLIDPRecoverConfirmationPendingForTest, []any{tenant, missing, "owner"}, 0, true)
 }
 
 func measureSAMLIDPPendingStatement(t *testing.T, f *orgFixture, tx pgx.Tx, name, query string, args []any, rows int64, index bool) {
@@ -90,8 +110,8 @@ func measureSAMLIDPPendingStatement(t *testing.T, f *orgFixture, tx pgx.Tx, name
 			t.Fatal("decode structural plan", name, err)
 		}
 		p := plans[0].Plan
-		if index && (p.IndexName != "saml_idp_confirmations_pkey" || p.ActualRows > 1 || p.FilteredRows != 0) {
-			t.Fatal("pending recovery did not perform one exact primary-key lookup", p.IndexName, p.ActualRows, p.FilteredRows)
+		if indexes, bounded := samlIDPPendingQueryIndexes(p); index && (!bounded || indexes == 0) {
+			t.Fatal("pending custody query performed an unbounded or non-primary-key lookup", name, indexes)
 		}
 		if _, err := tx.Exec(f.ctx, "ROLLBACK TO SAVEPOINT sample_pending"); err != nil {
 			t.Fatal(err)
@@ -114,4 +134,20 @@ func measureSAMLIDPPendingStatement(t *testing.T, f *orgFixture, tx pgx.Tx, name
 	}
 	slices.Sort(elapsed)
 	t.Logf("%s: median %s over 4 warmed client executions (20000 retained rows)", name, elapsed[len(elapsed)/2])
+}
+
+func samlIDPPendingQueryIndexes(plan nativeOAuth2CallbackPlan) (indexes int, bounded bool) {
+	bounded = true
+	if plan.RelationName == "saml_idp_confirmations" && plan.NodeType != "ModifyTable" {
+		if plan.IndexName != "saml_idp_confirmations_pkey" || plan.ActualRows > 1 || plan.FilteredRows > 1 {
+			return 0, false
+		}
+		indexes++
+	}
+	for _, child := range plan.ChildPlans {
+		n, ok := samlIDPPendingQueryIndexes(child)
+		indexes += n
+		bounded = bounded && ok
+	}
+	return indexes, bounded
 }

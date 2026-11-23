@@ -56,12 +56,13 @@ func (ProviderSAMLIDPArrivalConfig) MarshalText() ([]byte, error) {
 // pending confirmation. It never publishes the issued grant, reserves SAML
 // replay, creates sessions, performs SP initiation or exposes an HTTP route.
 type ProviderSAMLIDPArrivalService struct {
-	admission  *ProviderSAMLIDPAdmissionService
-	issuer     *capabilitypg.Issuer
-	issuerName string
-	audience   string
-	config     ProviderSAMLIDPArrivalConfig
-	payload    providerLoginPayloadConfig
+	admission   *ProviderSAMLIDPAdmissionService
+	issuer      *capabilitypg.Issuer
+	issuerName  string
+	audience    string
+	proofLimits capability.Limits
+	config      ProviderSAMLIDPArrivalConfig
+	payload     providerLoginPayloadConfig
 }
 
 // NewProviderSAMLIDPArrivalService borrows a linked admission service on the
@@ -84,7 +85,7 @@ func NewProviderSAMLIDPArrivalService(admission *ProviderSAMLIDPAdmissionService
 	if err != nil {
 		return nil, sso.ErrInvalidInput
 	}
-	issuerName, audience := config.Capability.Crypto.Issuer, config.Capability.Audience
+	issuerName, audience, proofLimits := config.Capability.Crypto.Issuer, config.Capability.Audience, config.Capability.Crypto.Limits
 	config.Capability = capabilitypg.IssuerConfig{}
 	config.ConfirmationKeys = maps.Clone(config.ConfirmationKeys)
 	config.Coordinator.RetainedFingerprintKeys = maps.Clone(config.Coordinator.RetainedFingerprintKeys)
@@ -96,7 +97,7 @@ func NewProviderSAMLIDPArrivalService(admission *ProviderSAMLIDPAdmissionService
 	}
 	config.Coordinator.AdmissionPolicy = nil
 	config.Coordinator.FinalAuthentication = nil
-	s := &ProviderSAMLIDPArrivalService{admission: admission, issuer: issuer, issuerName: issuerName, audience: audience, config: config,
+	s := &ProviderSAMLIDPArrivalService{admission: admission, issuer: issuer, issuerName: issuerName, audience: audience, proofLimits: proofLimits, config: config,
 		payload: providerLoginPayloadConfig{Envelope: admission.router.config.Envelope, KeyReference: config.KeyReference}}
 	if _, _, err := s.coordinator(&samlIDPArrivalPhase{service: s}); err != nil {
 		return nil, providerError(context.Background(), err)
@@ -255,7 +256,7 @@ type samlIDPArrivalOrigin struct {
 	Version                      uint8
 	Binding                      identity.CommandBinding
 	Route                        samlIDPArrivalRoute
-	Issuer                       string
+	Issuer, ExternalOrigin       string
 	MappingVersion               uint64
 	Evidence                     samlIDPArrivalEvidence
 	Account                      samlIDPArrivalAccount
@@ -343,7 +344,8 @@ func (s *ProviderSAMLIDPArrivalService) prepareArrival(ctx context.Context, a Pr
 		return nil, nil, err
 	}
 	account, credential := a.recipient.account, a.recipient.account.Credential
-	origin := samlIDPArrivalOrigin{Version: 1, Binding: binding, Issuer: a.admission.issuer, MappingVersion: selected.profile.Provider.MappingVersion,
+	origin := samlIDPArrivalOrigin{Version: 1, Binding: binding, Issuer: a.admission.issuer, ExternalOrigin: selected.profile.Provider.TrustedOrigin,
+		MappingVersion: selected.profile.Provider.MappingVersion,
 		Route: samlIDPArrivalRoute{ProviderID: route.ProviderID, ProviderVersion: route.ProviderVersion, CredentialGeneration: route.CredentialGeneration,
 			PolicyVersion: route.PolicyVersion, ProofKey: route.Proof.Key, ProofVersion: route.Proof.ProofVersion, ObservedAt: route.ObservedAt, ValidUntil: route.ValidUntil},
 		Evidence: samlIDPArrivalEvidence(a.admission.wire), Member: a.recipient.member,

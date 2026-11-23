@@ -1,0 +1,7 @@
+//go:build integration
+
+package postgres
+
+const SAMLIDPCompletePendingForTest = completeSAMLIDPPendingConfirmationSQL
+const SAMLIDPReadPendingForTest = readSAMLIDPPendingConfirmationSQL
+const SAMLIDPRecoverConfirmationPendingForTest = recoverSAMLIDPConfirmationPendingSQL

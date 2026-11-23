@@ -14,14 +14,14 @@ require (
 	github.com/faustbrian/go-identifier/v2 v2.0.3-0.20261015083104-9892f17723c0
 	github.com/faustbrian/go-identity v0.0.0-20261123113741-94b876278a93
 	github.com/faustbrian/go-identity/email v0.0.0-20261018110349-e38aa409e7d8
-	github.com/faustbrian/go-identity/mfa/postgres v0.0.0-20261123052042-be549065067c
+	github.com/faustbrian/go-identity/mfa/postgres v0.0.0-20261123124922-9033b57f9ae7
 	github.com/faustbrian/go-identity/oauth v0.0.0-20261123033150-16bb95b21f95
 	github.com/faustbrian/go-identity/password/postgres v0.0.0-20261028082559-7ca5d4db76d2
 	github.com/faustbrian/go-identity/postgres v0.0.0-20261123131413-d636e93e93f7
 	github.com/faustbrian/go-identity/risk v0.0.0-20261123053209-79b6d35cbf8f
 	github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261122024644-105adde9ae64
-	github.com/faustbrian/go-identity/session v0.0.0-20261123050557-a6c96119b992
-	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261123053245-76ad96d0a546
+	github.com/faustbrian/go-identity/session v0.0.0-20261123125537-8d9afa5e1a45
+	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261123125537-8d9afa5e1a45
 	github.com/faustbrian/go-migrations/v3 v3.1.1-0.20261015110643-ca105f265cfc
 	github.com/faustbrian/go-organization v0.0.0-20261122135635-30af6abd1547
 	github.com/faustbrian/go-organization/postgres v0.0.0-20261122154603-bcb59fce9eed

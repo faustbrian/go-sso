@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Confirm explicitly selected unsolicited SAML for a linked member from the
+  original same-origin browser pair. Consume pending custody, the one-use
+  grant and both replay IDs with the session in one transaction. Receipt
+  recovery is authorized and never reissues credentials. No HTTP route is
+  installed by the PostgreSQL adapter.
+
 - Prepare an explicitly selected unsolicited SAML arrival by committing the
   existing linked user's encrypted pending record and single confirmation
   grant together. Return the independent browser pair only after a fresh
