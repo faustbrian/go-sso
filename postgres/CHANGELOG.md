@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add the optional enterprise grant-attempt fence. Competing revocation and
+  refresh commands cannot both claim the same grant generation. The private
+  revocation transport distinguishes acknowledgement, refusal and ambiguity
+  without resending; no public lifecycle operation is enabled yet.
+
 - Allow an opt-in OAuth2 vault format that retains restorable encrypted grant
   custody after callback preparation is erased. Keep OIDC and legacy OAuth2
   writes unchanged by default; no provider-token lifecycle API is enabled.

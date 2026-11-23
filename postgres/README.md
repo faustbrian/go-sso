@@ -127,6 +127,14 @@ new deposits. It does not change OIDC or convert earlier OAuth2 deposits,
 which cannot be opened independently after callback cleanup. This setting
 does not expose tokens or enable upstream refresh or revocation.
 
+Install `ProviderGrantFenceMigrationSource` on the same primary after both
+OAuth2 vault protocol migrations and the identity command history, before
+selecting a future grant lifecycle writer. It adds an empty table without
+changing running callback readers or writers. Leave the table installed on
+rollback. The fence prevents another attempt against the same grant version;
+its presence does not establish that a request reached the provider or that
+local custody was removed. Installation enables no network operation or route.
+
 ### Native static OIDC callback for an existing linked member
 
 Before opting in, install the native callback account, capability, MFA,
