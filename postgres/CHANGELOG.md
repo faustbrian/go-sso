@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Attribute SP-initiated SAML POST callbacks to their authenticated original
+  provider, frontchannel flow, callback command and initial lifetime for
+  transport quotas. Read-only attribution does not process the response,
+  reserve grants or change custody; native completion repeats protected checks.
+
 - Complete the opt-in SP-initiated SAML callback for an existing linked member.
   Bind the trusted response verifier to the installed provider and original
   browser, and reserve the replay pair in the same native Work as the session.
