@@ -30,7 +30,7 @@ type ProviderEnableAuthorization interface {
 // Enablement owns a separate policy opt-in; the value is not a bearer grant.
 type ProviderEnableAuthorizationEvidence = ProviderUpdateAuthorizationEvidence
 
-// WithProviderEnableAuthorization selects disabled static OIDC enablement on
+// WithProviderEnableAuthorization selects native provider enablement on
 // an organization-bound service. Install ProviderEnableMigrationSource first.
 // The selected service does not start routes or change enforcement.
 func (s *ProviderService) WithProviderEnableAuthorization(owner ProviderEnableAuthorization) (*ProviderService, error) {
@@ -122,11 +122,22 @@ func (s *ProviderService) ObserveOAuth2ProviderCredentialCheckpoint(ctx context.
 	return s.observeProviderCredentialCheckpoint(ctx, provider, providerProtocolOAuth2, version)
 }
 
+// ObserveSAMLProviderCredentialCheckpoint checks the current installed SAML
+// SP signing key for a disabled provider under fresh enablement authorization.
+// It exposes no key material. Its original deadline cannot exceed the matched
+// certificate's validity; ProviderEnable independently rechecks both.
+func (s *ProviderService) ObserveSAMLProviderCredentialCheckpoint(ctx context.Context, provider string, version uint64) (sso.CredentialCheckpoint, error) {
+	return s.observeProviderCredentialCheckpoint(ctx, provider, providerProtocolSAML, version)
+}
+
 func (s *ProviderService) observeProviderCredentialCheckpoint(ctx context.Context, provider, protocol string, version uint64) (sso.CredentialCheckpoint, error) {
 	if s == nil || ctx == nil || !providerID(provider) || version == 0 || version == math.MaxUint64 {
 		return sso.CredentialCheckpoint{}, sso.ErrInvalidInput
 	}
 	if protocol == providerProtocolOAuth2 && !s.oauthRegistration {
+		return sso.CredentialCheckpoint{}, sso.ErrForbidden
+	}
+	if protocol == providerProtocolSAML && (s.samlOrigin == "" || s.samlSigningValidator == nil) {
 		return sso.CredentialCheckpoint{}, sso.ErrForbidden
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.config.MaximumDuration)
@@ -135,28 +146,36 @@ func (s *ProviderService) observeProviderCredentialCheckpoint(ctx context.Contex
 	if err != nil {
 		return sso.CredentialCheckpoint{}, err
 	}
-	current, err := s.observeEnablePredecessor(ctx, provider, protocol, version)
+	current, err := s.observeEnablePredecessor(ctx, provider, protocol, version, a.verified)
 	defer clear(current.configuration)
 	if err != nil {
 		return sso.CredentialCheckpoint{}, err
 	}
-	if !s.config.Clock.Now().Before(a.until) {
+	cutoff := a.until
+	if protocol == providerProtocolSAML && current.signerExpiresAt.Before(cutoff) {
+		cutoff = current.signerExpiresAt
+	}
+	if !s.config.Clock.Now().Before(cutoff) {
 		return sso.CredentialCheckpoint{}, sso.ErrForbidden
 	}
-	binding := sso.CredentialCheckpointBinding{TenantID: s.authentication.TenantID, OrganizationID: organization.ID(s.updateOrganization), ProviderID: provider, ProviderVersion: version, Generation: current.credentialGeneration, ObservedAt: a.verified, ExpiresAt: a.until.UTC().Truncate(time.Microsecond)}
-	if protocol == providerProtocolOAuth2 {
+	binding := sso.CredentialCheckpointBinding{TenantID: s.authentication.TenantID, OrganizationID: organization.ID(s.updateOrganization), ProviderID: provider, ProviderVersion: version, Generation: current.credentialGeneration, ObservedAt: a.verified, ExpiresAt: cutoff.UTC().Truncate(time.Microsecond)}
+	switch protocol {
+	case providerProtocolOAuth2:
 		return sso.NewOAuth2CredentialCheckpoint(binding)
+	case providerProtocolSAML:
+		return sso.NewSAMLCredentialCheckpoint(binding)
+	default:
+		return sso.NewCredentialCheckpoint(binding)
 	}
-	return sso.NewCredentialCheckpoint(binding)
 }
 
 // ProviderEnable atomically enables the exact disabled provider and advances
-// its version once. Static OIDC and explicitly selected OAuth 2.0 require a
-// single verified configured domain. OAuth 2.0 also requires the protocol
-// registry and a configured disable authorization owner. Operators must first
-// opt existing OIDC routers into WithProtocolRegistry. Preserve the original
-// key and checkpoints
-// on retry; replay recovers historical metadata, never current route authority.
+// its version once. Each selected protocol requires a single verified configured
+// domain and its own installed credential. OAuth 2.0 and SAML also require
+// protocol-aware registry consumers and a configured disable authorization
+// owner. SAML requires the original origin and a selected local signer
+// validator. Preserve the original key and checkpoints on retry; replay
+// recovers historical metadata, never current route authority.
 // This is the authenticated native bearer path; no cookie or HTTP route is
 // installed. Cookie callers require a separate transport with origin and CSRF.
 func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnableRequest) (sso.ProviderEnableResult, error) {
@@ -165,7 +184,7 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 		return out, sso.ErrInvalidInput
 	}
 	protocol := r.CredentialCheckpoint.Protocol()
-	var oauthProtocol string
+	var oauthProtocol, samlProtocol string
 	switch protocol {
 	case providerProtocolOIDC:
 	case providerProtocolOAuth2:
@@ -173,6 +192,11 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 			return out, sso.ErrForbidden
 		}
 		oauthProtocol = protocol
+	case providerProtocolSAML:
+		if s.samlOrigin == "" || s.samlSigningValidator == nil || s.disableAuthorization == nil {
+			return out, sso.ErrForbidden
+		}
+		samlProtocol = protocol
 	default:
 		return out, sso.ErrInvalidInput
 	}
@@ -193,7 +217,8 @@ func (s *ProviderService) ProviderEnable(ctx context.Context, r sso.ProviderEnab
 		Proof      organization.DomainProof
 		// OIDC commitments predate the protocol field and keep their bytes.
 		OAuthProtocol string `json:",omitempty"`
-	}{checkpoint, proof, oauthProtocol})
+		SAMLProtocol  string `json:",omitempty"`
+	}{checkpoint, proof, oauthProtocol, samlProtocol})
 	if err != nil {
 		return out, sso.ErrInvalidInput
 	}

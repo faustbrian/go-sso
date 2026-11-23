@@ -31,16 +31,24 @@ func (s *ProviderService) ForOrganization(organizationID string) (*ProviderServi
 
 func (p *ProviderContributor) operation() identity.FeatureOperation {
 	if p.disable != nil {
-		if p.request.providerProtocol() == providerProtocolOAuth2 {
+		switch p.request.providerProtocol() {
+		case providerProtocolOAuth2:
 			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.disable", SchemaID: "sso-static-oauth2-disable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
+		case providerProtocolSAML:
+			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.disable", SchemaID: "sso-static-saml-disable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
+		default:
+			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.disable", SchemaID: "sso-static-oidc-disable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 		}
-		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.disable", SchemaID: "sso-static-oidc-disable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 	}
 	if p.enable != nil {
-		if p.request.providerProtocol() == providerProtocolOAuth2 {
+		switch p.request.providerProtocol() {
+		case providerProtocolOAuth2:
 			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.enable", SchemaID: "sso-static-oauth2-enable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
+		case providerProtocolSAML:
+			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.enable", SchemaID: "sso-static-saml-enable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
+		default:
+			return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.enable", SchemaID: "sso-static-oidc-enable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 		}
-		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.enable", SchemaID: "sso-static-oidc-enable-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 	}
 	if p.update != nil {
 		return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.update", SchemaID: "sso-disabled-static-oidc-update-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}

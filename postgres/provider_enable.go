@@ -30,6 +30,7 @@ type providerEnablePredecessor struct {
 	domain                                         string
 	mappingVersion, credentialGeneration           uint64
 	credentialVersion                              uint64
+	signerExpiresAt                                time.Time
 	configurationHash, credentialHash, contextHash [32]byte
 }
 
@@ -50,7 +51,7 @@ func (r *providerEnableStored) scan(row interface{ Scan(...any) error }) error {
 	return row.Scan(&r.version, &r.mapping, &r.configuration, &r.pending, &r.enabled, &r.generation, &r.credentialVersion, &r.credential, &r.credentialContext)
 }
 
-func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider, protocol string, version uint64) (providerEnablePredecessor, error) {
+func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider, protocol string, version uint64, observed time.Time) (providerEnablePredecessor, error) {
 	result := providerEnablePredecessor{}
 	var row providerEnableStored
 	if err := row.scan(s.pool.Raw().QueryRow(ctx, providerEnablePredecessorSQL, string(s.authentication.TenantID), s.updateOrganization, provider)); err != nil {
@@ -74,10 +75,16 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 	if err != nil || installed < 2 || installed > version {
 		return result, sso.ErrUnavailable
 	}
-	if err := authenticateProtocolProviderCredential(ctx, s.config.Envelope, protocol, string(s.authentication.TenantID), s.updateOrganization, provider, row.credential, row.credentialContext, generation, installed); err != nil {
+	codec := ProviderContributor{service: s}
+	var signerExpiresAt time.Time
+	if protocol == providerProtocolSAML {
+		signerExpiresAt, err = s.validateSAMLSigningExpiry(ctx, string(s.authentication.TenantID), s.updateOrganization, provider, row.credential, row.credentialContext, generation, installed, observed)
+	} else {
+		err = authenticateProtocolProviderCredential(ctx, s.config.Envelope, protocol, string(s.authentication.TenantID), s.updateOrganization, provider, row.credential, row.credentialContext, generation, installed)
+	}
+	if err != nil {
 		return result, err
 	}
-	codec := ProviderContributor{service: s}
 	aad, err := envelope.NewContext(map[string]string{"owner": "sso/provider", "tenant": string(s.authentication.TenantID), "organization": s.updateOrganization, "provider": provider, "protocol": protocol, "purpose": "static-configuration", "version": row.version})
 	if err != nil {
 		return result, sso.ErrUnavailable
@@ -86,7 +93,14 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 	if err != nil {
 		return result, err
 	}
-	domains, err := readProviderConfigurationDomains(protocol, plain, mapping, 1)
+	var domains []string
+	if protocol == providerProtocolSAML {
+		var configuration providerSAMLConfiguration
+		configuration, err = s.readProviderSAMLConfiguration(plain, mapping, 1)
+		domains = configuration.Domains
+	} else {
+		domains, err = readProviderConfigurationDomains(protocol, plain, mapping, 1)
+	}
 	if err != nil {
 		clear(plain)
 		return result, err
@@ -96,7 +110,7 @@ func (s *ProviderService) observeEnablePredecessor(ctx context.Context, provider
 		clear(plain)
 		return result, sso.ErrUnavailable
 	}
-	return providerEnablePredecessor{configuration: plain, domain: canonical, mappingVersion: mapping, credentialGeneration: generation, credentialVersion: installed, configurationHash: sha256.Sum256(row.configuration), credentialHash: sha256.Sum256(row.credential), contextHash: sha256.Sum256(row.credentialContext)}, nil
+	return providerEnablePredecessor{configuration: plain, domain: canonical, mappingVersion: mapping, credentialGeneration: generation, credentialVersion: installed, signerExpiresAt: signerExpiresAt, configurationHash: sha256.Sum256(row.configuration), credentialHash: sha256.Sum256(row.credential), contextHash: sha256.Sum256(row.credentialContext)}, nil
 }
 
 func authenticateProtocolProviderCredential(ctx context.Context, crypto *envelope.Service, protocol, tenant, organization, provider string, wire, contextWire []byte, generation, installed uint64) error {
@@ -172,12 +186,22 @@ func (p *ProviderContributor) prepareEnable(ctx context.Context) error {
 	if proof != e.proof {
 		return sso.ErrForbidden
 	}
-	e.predecessor, err = s.observeEnablePredecessor(ctx, e.request.ProviderID, p.request.providerProtocol(), e.request.ExpectedVersion)
+	e.predecessor, err = s.observeEnablePredecessor(ctx, e.request.ProviderID, p.request.providerProtocol(), e.request.ExpectedVersion, p.admission.verified)
 	if err != nil {
 		return err
 	}
 	if e.predecessor.domain != proof.Domain || e.predecessor.credentialGeneration != e.credential.Generation {
 		return sso.ErrForbidden
+	}
+	if p.request.providerProtocol() == providerProtocolSAML {
+		// Keep the authenticated certificate's original cutoff in the same
+		// protected Work even if an input checkpoint claims a later expiry.
+		if e.predecessor.signerExpiresAt.Before(p.admission.until) {
+			p.admission.until = e.predecessor.signerExpiresAt
+		}
+		if !s.config.Clock.Now().Before(p.admission.until) {
+			return sso.ErrForbidden
+		}
 	}
 	p.configuration = e.predecessor.configuration
 	return nil

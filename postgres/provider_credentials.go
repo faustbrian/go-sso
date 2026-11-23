@@ -355,6 +355,12 @@ func readProviderConfigurationDomains(protocol string, plain []byte, version uin
 			return nil, sso.ErrUnavailable
 		}
 		domains, decoded = current.Domains, current
+	case providerProtocolSAML:
+		var current providerSAMLConfiguration
+		if json.Unmarshal(plain, &current) != nil || current.Mapping.Version != version || len(current.Domains) != pending {
+			return nil, sso.ErrUnavailable
+		}
+		domains, decoded = current.Domains, current
 	default:
 		return nil, sso.ErrUnavailable
 	}

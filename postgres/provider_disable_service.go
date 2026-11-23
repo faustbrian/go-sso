@@ -83,6 +83,13 @@ func (s *ProviderService) ProviderDisableOAuth2(ctx context.Context, r sso.Provi
 	return s.providerDisable(ctx, r, "", providerProtocolOAuth2)
 }
 
+// ProviderDisableSAML disables one exact SAML provider version and records
+// the original drain/revoke choice. Current org:sso-write authorization is
+// mandatory, but disabling does not require a usable signer or IdP.
+func (s *ProviderService) ProviderDisableSAML(ctx context.Context, r sso.ProviderDisableRequest) (sso.ProviderDisableResult, error) {
+	return s.providerDisable(ctx, r, "", providerProtocolSAML)
+}
+
 // RetryProviderDisable starts or recovers a fresh exact attempt after a
 // confirmed NotCommitted result for the same request and actor. The failed
 // command ID comes from that result; it is not an idempotency key or proof.
@@ -105,6 +112,16 @@ func (s *ProviderService) RetryProviderDisableOAuth2(ctx context.Context, r sso.
 	return s.providerDisable(ctx, r, failed, providerProtocolOAuth2)
 }
 
+// RetryProviderDisableSAML starts or recovers the same SAML disable intent
+// after an authoritative NotCommitted result. Reconcile unknown outcomes
+// through ProviderDisableSAML before requesting any new attempt.
+func (s *ProviderService) RetryProviderDisableSAML(ctx context.Context, r sso.ProviderDisableRequest, failed identity.CommandID) (sso.ProviderDisableResult, error) {
+	if _, err := identity.ParseCommandID(string(failed)); err != nil {
+		return sso.ProviderDisableResult{}, sso.ErrInvalidInput
+	}
+	return s.providerDisable(ctx, r, failed, providerProtocolSAML)
+}
+
 func (s *ProviderService) providerDisable(ctx context.Context, r sso.ProviderDisableRequest, failed identity.CommandID, protocol string) (sso.ProviderDisableResult, error) {
 	var out sso.ProviderDisableResult
 	if s == nil || s.pool == nil || ctx == nil || !providerID(s.updateOrganization) || r.Validate() != nil {
@@ -122,7 +139,7 @@ func (s *ProviderService) providerDisable(ctx context.Context, r sso.ProviderDis
 	selection, _ := r.ActiveTransactionDisposition.Bindings()
 	version := strconv.FormatUint(selection.ProviderVersion, 10)
 	selectorFields := []string{s.updateOrganization, r.ProviderID, version, string(failed)}
-	if protocol == providerProtocolOAuth2 {
+	if protocol != providerProtocolOIDC {
 		// Keep historical OIDC selectors byte-identical and prevent either
 		// protocol from recovering a canonical request owned by the other.
 		selectorFields = append(selectorFields, protocol)

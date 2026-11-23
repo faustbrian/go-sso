@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Enable an explicitly selected SAML provider only with current domain proof,
+  trusted origin, and the original installed signer lifetime. Add exact SAML
+  disable, including durable disposition and keyed recovery. No browser route
+  is installed by these administrative operations.
+
 - Select SAML SP signing credential installation and disabled-provider
   replacement through the existing encrypted rotation transaction. Require
   the current trusted origin and a local signer validator; retain the

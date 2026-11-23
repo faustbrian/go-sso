@@ -52,6 +52,23 @@ is disabled. The fresh credentials authority and the original certificate
 expiry bound the write. Original retries recover only the historical result;
 successful installation does not enable the provider or publish SP metadata.
 
+For native SAML activation, also install `ProviderEnableMigrationSource` and
+the login-transaction disposition history described below. Select both
+enablement and disablement authorization on the organization-bound service.
+Obtain the original current `organization.DomainProof` for the provider's
+single configured domain and call `ObserveSAMLProviderCredentialCheckpoint`.
+Pass both exact checkpoints and the original idempotency key to
+`ProviderEnable`. Activation rechecks the stored origin and signer outside
+Work, and fences the original certificate deadline alongside the provider
+version, generation, and proof in the protected write. It does not add SAML
+routing, an ACS, or a browser session.
+
+To close native admission, call `ProviderDisableSAML` with the exact enabled
+version and selected drain or revoke disposition. Disabling keeps the
+installed key and does not depend on a still-valid signer or a reachable IdP.
+Treat any original enable/disable receipt as historical, never current routing
+authority.
+
 Install `SAMLReplayMigrationSource` after the native identity command and
 SSO provider migrations. Choose the next unused version in that migration
 history. Installation creates an empty table, bounds the foreign-key lock
