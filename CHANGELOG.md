@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add bounded, SSO-owned explicit SAML registration intent and detach the
+  pinned certificate input. The native owner still validates certificates,
+  authorizes the command and persists the disabled provider. The request
+  does not accept an SP callback URL or enable login.
+
 - Preserve exact configured SAML IdP entity IDs as assertion claim provenance.
   Existing OIDC and OAuth issuer checks and explicit trust flags are unchanged.
 
