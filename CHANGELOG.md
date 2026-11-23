@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Define a SAML SP-signing purpose for the encrypted credential-rotation
+  reference, distinct from client secrets, and a local signer-validation port.
+
 - Define a local SAML registration validation port. Composition can select the
   optional wire implementation without introducing it into persistence modules.
 

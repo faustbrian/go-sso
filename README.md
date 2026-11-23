@@ -52,11 +52,13 @@ with an original command, provider ID, optimistic version, an authenticated
 `EncryptedCredentialReference` and an explicit `NewNoCredentialOverlapPolicy()`.
 It has no external idempotency key and is not a generic metadata update.
 
-Trusted ingress encrypts the client secret with the configured envelope owner
+Trusted ingress encrypts credential material with the configured envelope owner
 and the exact `CredentialReferenceContext.EncryptionContext()`: tenant,
-organization, provider, OIDC protocol, client-secret purpose, credential
-generation, current provider version, operation audience, configured key identity
-and the original UTC-microsecond lifetime. `NewEncryptedCredentialReference`
+organization, provider, protocol and matching purpose, credential generation,
+current provider version, operation audience, configured key identity and the
+original UTC-microsecond lifetime. OIDC and OAuth 2.0 use `client-secret`.
+SAML uses `sp-signing-key` for the optional wire module's matching key and
+certificate bundle. `NewEncryptedCredentialReference`
 authenticates bounded envelope bytes and immediately clears temporary plaintext;
 it accepts and returns no raw secret. The reference is immutable and redacted.
 
@@ -70,8 +72,8 @@ authorize a write. Native composition uses the separately configured
 in. Initial/replacement commands advance the shared provider version without
 changing metadata or mapping; only one current encrypted generation is retained.
 Original command retries return their exact historical result, never credential
-bytes or a renewed lifetime. Active-use overlap, drain, SAML keys/certificates
-and provider-network calls remain unsupported.
+bytes or a renewed lifetime. This boundary does not enable a provider, authorize
+active-use overlap or drain, or make provider-network calls.
 
 ### Enablement-checkpoint boundary
 

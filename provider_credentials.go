@@ -10,8 +10,19 @@ import (
 	envelope "github.com/faustbrian/go-secret-envelope/v2"
 )
 
-// CredentialReferenceContext is the complete immutable AAD for a static OIDC or OAuth 2.0
-// client-secret ingress envelope. It selects neither current ownership nor
+// SAMLSigningCredentialPurpose is the exact ingress purpose for SP signing
+// credentials. A signing envelope is not an OIDC or OAuth 2.0 client secret.
+const SAMLSigningCredentialPurpose = "sp-signing-key"
+
+// SAMLSigningCredentialValidator validates locally borrowed signing material at
+// the selected instant and returns its original exclusive validity cutoff.
+// It is configured by trusted composition, not a request. It must honor
+// cancellation, do no I/O, retain no bytes and never log the supplied bundle.
+// This is wire validation only, not current provider or organization authority.
+type SAMLSigningCredentialValidator func(ctx context.Context, bundle []byte, at time.Time) (validUntil time.Time, err error)
+
+// CredentialReferenceContext is the complete immutable AAD for a client-secret
+// or SP-signing credential ingress envelope. It selects neither current ownership nor
 // permission. IDs and key identity are canonical 1..128 printable ASCII bytes.
 // Times must be UTC microsecond values with a positive lifetime. Generation is
 // the credential successor, while ProviderVersion is the current optimistic
@@ -25,8 +36,8 @@ type CredentialReferenceContext struct {
 }
 
 // EncryptionContext returns the exact non-secret authenticated binding for
-// trusted secret ingress. Only static OIDC or OAuth 2.0 client secrets for the separate
-// credentials-rotate operation are selected. No implicit canonicalization,
+// trusted secret ingress. The separate credentials-rotate operation accepts
+// only OIDC/OAuth 2.0 client secrets and SAML SP-signing keys. No implicit canonicalization,
 // issuer lookup, key lookup or lifetime renewal is performed.
 func (c CredentialReferenceContext) EncryptionContext() (envelope.Context, error) {
 	for _, value := range []string{c.TenantID, c.OrganizationID, c.ProviderID, c.EnvelopeKeyID} {
@@ -34,10 +45,19 @@ func (c CredentialReferenceContext) EncryptionContext() (envelope.Context, error
 			return envelope.Context{}, ErrInvalidInput
 		}
 	}
-	if c.Protocol != "oidc" && c.Protocol != "oauth2" {
+	switch c.Protocol {
+	case "oidc", "oauth2":
+		if c.Purpose != "client-secret" {
+			return envelope.Context{}, ErrInvalidInput
+		}
+	case "saml":
+		if c.Purpose != SAMLSigningCredentialPurpose {
+			return envelope.Context{}, ErrInvalidInput
+		}
+	default:
 		return envelope.Context{}, ErrInvalidInput
 	}
-	if c.Purpose != "client-secret" || c.Audience != "identity.sso.provider.credentials-rotate" || c.Generation == 0 || c.ProviderVersion == 0 || !credentialReferenceTime(c.IssuedAt) || !credentialReferenceTime(c.ExpiresAt) || !c.ExpiresAt.After(c.IssuedAt) {
+	if c.Audience != "identity.sso.provider.credentials-rotate" || c.Generation == 0 || c.ProviderVersion == 0 || !credentialReferenceTime(c.IssuedAt) || !credentialReferenceTime(c.ExpiresAt) || !c.ExpiresAt.After(c.IssuedAt) {
 		return envelope.Context{}, ErrInvalidInput
 	}
 	return envelope.NewContext(map[string]string{
@@ -158,7 +178,8 @@ func (CredentialOverlapPolicy) MarshalJSON() ([]byte, error) { return nil, ErrSe
 func (CredentialOverlapPolicy) MarshalText() ([]byte, error) { return nil, ErrSensitiveSerialization }
 
 // ProviderCredentialsRotateRequest initializes or replaces one disabled static
-// OIDC or OAuth 2.0 provider's encrypted client-secret generation. Fresh org:sso-credentials
+// provider's encrypted credential generation, for an OIDC/OAuth 2.0 client
+// secret or a SAML SP signing key. Fresh org:sso-credentials
 // authorization and current provider ownership/version are mandatory at the
 // native transition. Preserve the complete original command across retries;
 // there is deliberately no external idempotency key or implicit overlap policy.

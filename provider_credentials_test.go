@@ -192,6 +192,36 @@ func TestCredentialReferenceAuthenticatesOAuth2WithoutOIDCSubstitution(t *testin
 	}
 }
 
+func TestCredentialReferenceAuthenticatesSAMLSigningPurposeOnly(t *testing.T) {
+	ctx := t.Context()
+	service := newCredentialEnvelopeService(t)
+	binding := credentialReferenceContext()
+	binding.Protocol, binding.Purpose = "saml", "sp-signing-key"
+	wire := credentialEnvelope(t, service, binding)
+	ref, err := sso.NewEncryptedCredentialReference(ctx, service, wire, binding)
+	if err != nil || ref.Context() != binding || ref.ValidateAt(binding.IssuedAt) != nil {
+		t.Fatal("SAML signing envelope lost its original binding", err)
+	}
+	for _, protocol := range []string{"oidc", "oauth2"} {
+		client := binding
+		client.Protocol, client.Purpose = protocol, "client-secret"
+		if _, err := sso.NewEncryptedCredentialReference(ctx, service, wire, client); !errors.Is(err, sso.ErrForbidden) {
+			t.Fatal("signing ciphertext authenticated as a client secret", err)
+		}
+		client.Purpose = binding.Purpose
+		if _, err := client.EncryptionContext(); !errors.Is(err, sso.ErrInvalidInput) {
+			t.Fatal("client protocol acquired SAML signing purpose", err)
+		}
+	}
+	for _, purpose := range []string{"client-secret", "signing-key", "sp-signing-key "} {
+		other := binding
+		other.Purpose = purpose
+		if _, err := other.EncryptionContext(); !errors.Is(err, sso.ErrInvalidInput) {
+			t.Fatal("SAML accepted an unrelated ingress purpose", err)
+		}
+	}
+}
+
 func TestCredentialReferenceRejectsZeroUnsupportedAndOversizedInput(t *testing.T) {
 	service := newCredentialEnvelopeService(t)
 	binding := credentialReferenceContext()
