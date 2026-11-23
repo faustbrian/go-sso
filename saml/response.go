@@ -119,8 +119,8 @@ type POSTResponseInput struct {
 // in emailAddress format is still only a provider subject, not a verified
 // email claim. Attribute and role mapping are not inferred by this profile.
 // AssertionExpiresAt is the raw assertion cutoff for retained replay evidence;
-// ValidUntil is the earliest allowed original callback, conditions, subject
-// confirmation, remote session and matched signing certificate cutoff.
+// ValidUntil is the earliest allowed local acceptance window, conditions,
+// subject confirmation, remote session and matched signing certificate cutoff.
 type POSTResponseEvidence struct {
 	ResponseID, AssertionID        string
 	ProviderSubject, SubjectFormat string
@@ -150,44 +150,64 @@ func (p POSTResponseProfile) Validate(ctx context.Context, input POSTResponseInp
 		!validSAMLTime(input.Now) || !validSAMLTime(input.ExpiresAt) || input.Now.Before(input.IssuedAt) || !input.Now.Before(input.ExpiresAt) {
 		return VerifiedPOSTResponse{}, ErrInvalidInput
 	}
+	evidence, err := p.validatePOSTResponse(ctx, input.SAMLResponse, postResponseBinding{
+		requestID: input.RequestID, issuedAt: input.IssuedAt, expiresAt: input.ExpiresAt, now: input.Now,
+	})
+	return VerifiedPOSTResponse{verified: evidence}, err
+}
+
+// postResponseBinding keeps protocol timing and request-mode selection private.
+// The unsolicited entry point supplies its nonzero age, never a request ID.
+type postResponseBinding struct {
+	requestID                string
+	issuedAt, expiresAt, now time.Time
+	maximumUnsolicitedAge    time.Duration
+}
+
+func (p POSTResponseProfile) validatePOSTResponse(ctx context.Context, encoded string, binding postResponseBinding) (POSTResponseEvidence, error) {
 	if err := ctx.Err(); err != nil {
-		return VerifiedPOSTResponse{}, err
+		return POSTResponseEvidence{}, err
 	}
-	document, err := decodePOSTResponse(input.SAMLResponse)
+	document, err := decodePOSTResponse(encoded)
 	if err != nil {
-		return VerifiedPOSTResponse{}, err
+		return POSTResponseEvidence{}, err
 	}
 	response, err := parseSAMLDocument(ctx, document)
 	if err != nil {
-		return VerifiedPOSTResponse{}, err
+		return POSTResponseEvidence{}, err
 	}
 	if !samlElement(response, samlProtocolNS, "Response") || !uniqueSAMLDocumentIDs(response) || !p.matchIssuer(response) {
-		return VerifiedPOSTResponse{}, ErrInvalidInput
+		return POSTResponseEvidence{}, ErrInvalidInput
 	}
-	keys, expiries := p.activeSigningKeys(input.Now)
+	keys, expiries := p.activeSigningKeys(binding.now)
 	responseSigner, err := verifySAMLSignature(ctx, response, keys)
 	if err != nil {
-		return VerifiedPOSTResponse{}, err
+		return POSTResponseEvidence{}, err
 	}
-	assertion := p.responseAssertion(response, input)
+	assertion := p.responseAssertion(response, binding)
 	if assertion == nil || !p.matchIssuer(assertion) {
-		return VerifiedPOSTResponse{}, ErrInvalidInput
+		return POSTResponseEvidence{}, ErrInvalidInput
 	}
+	responseCutoff, ok := p.issueCutoff(response, binding)
+	if !ok {
+		return POSTResponseEvidence{}, ErrInvalidInput
+	}
+	binding.expiresAt = responseCutoff
 	assertionSigner, err := verifySAMLSignature(ctx, assertion, keys)
 	if err != nil {
-		return VerifiedPOSTResponse{}, err
+		return POSTResponseEvidence{}, err
 	}
-	evidence, ok := p.bindAssertion(assertion, input)
+	evidence, ok := p.bindAssertion(assertion, binding)
 	if !ok {
-		return VerifiedPOSTResponse{}, ErrInvalidInput
+		return POSTResponseEvidence{}, ErrInvalidInput
 	}
 	if err := ctx.Err(); err != nil {
-		return VerifiedPOSTResponse{}, err
+		return POSTResponseEvidence{}, err
 	}
 	evidence.ResponseID = samlAttr(response, "ID")
 	evidence.ValidUntil = earlierSAMLTime(evidence.ValidUntil, expiries[responseSigner])
 	evidence.ValidUntil = earlierSAMLTime(evidence.ValidUntil, expiries[assertionSigner])
-	return VerifiedPOSTResponse{verified: evidence}, nil
+	return evidence, nil
 }
 
 func (p POSTResponseProfile) activeSigningKeys(now time.Time) ([]crypto.PublicKey, []time.Time) {

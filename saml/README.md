@@ -77,13 +77,26 @@ without comments. It accepts a single confirmed bearer subject in persistent
 or email-address NameID format. It does not infer verified email or map roles
 from incidental attributes. Solicited HTTPS POST, an exact audience and ACS,
 and the original request and validity cutoffs are required. Unsolicited
-responses, encrypted assertions and single logout are not supported here.
+responses, encrypted assertions and single logout are not accepted by this
+SP-initiated profile.
 
 `Evidence` explicitly returns the selected subject, exact Response/Assertion
 ID pair, and earliest verified cutoff. The native coordinator must reserve
 both IDs and consume the original browser correlation before issuing a
 session. An unsuccessful validation never returns evidence. Neither a good
 signature nor the returned IDs are an authentication grant on their own.
+
+For an explicitly selected IdP-initiated protocol integration, construct
+`NewIDPInitiatedPOSTResponseProfile` with the approved issuer, audience,
+external HTTPS origin, canonical provider ID, signing pins and maximum
+message age. It derives the separate `/saml2/{provider_id}/idp-init`
+destination. Both `InResponseTo` attributes must be absent, as profiled from
+[OASIS SAML Profiles §4.1.5](https://docs.oasis-open.org/security/saml/v2.0/saml-profiles-2.0-os.pdf#page=20).
+Call `Validate` with the encoded response and a trusted current time. The
+earliest signed issue time caps evidence freshness independently of clock
+skew. This returns protocol evidence only. Do not advertise the endpoint or
+issue a session without explicit enablement, current provider/domain
+authority, independent browser confirmation and native replay settlement.
 
 XML parsing and exclusive canonicalization use `github.com/knroy/go-xml/v2`
 at v2.3.1, the exact reviewed source below. The signed nodes are retained in

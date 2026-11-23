@@ -9,13 +9,11 @@ import (
 	"github.com/knroy/go-xml/v2/xdm"
 )
 
-func (p POSTResponseProfile) responseAssertion(response *xdm.Node, input POSTResponseInput) *xdm.Node {
-	// OASIS Core §3.2.2: the successful, selected SP response is bound to the
-	// original request and exact configured consumer. Extensions or additional
-	// assertions do not enter this profile.
-	if response.NumAttrs() != 5 || samlAttr(response, "Version") != "2.0" ||
-		samlAttr(response, "Destination") != p.acs || samlAttr(response, "InResponseTo") != input.RequestID ||
-		!p.validIssueInstant(response, input) {
+func (p POSTResponseProfile) responseAssertion(response *xdm.Node, binding postResponseBinding) *xdm.Node {
+	// OASIS Core §3.2.2: bind the successful response to the exact configured
+	// consumer and the selected request mode. Neither profile permits extensions
+	// or additional assertions here.
+	if !binding.matchesRequest(response, 4) || samlAttr(response, "Version") != "2.0" || samlAttr(response, "Destination") != p.acs {
 		return nil
 	}
 	children, ok := samlElementChildren(response, 4)
@@ -38,8 +36,9 @@ func successfulSAMLStatus(status *xdm.Node) bool {
 	return empty && code.NumAttrs() == 1 && samlAttr(code, "Value") == samlStatusSuccess
 }
 
-func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, input POSTResponseInput) (POSTResponseEvidence, bool) {
-	if assertion.NumAttrs() != 3 || samlAttr(assertion, "Version") != "2.0" || !p.validIssueInstant(assertion, input) {
+func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResponseBinding) (POSTResponseEvidence, bool) {
+	localCutoff, ok := p.issueCutoff(assertion, binding)
+	if assertion.NumAttrs() != 3 || samlAttr(assertion, "Version") != "2.0" || !ok {
 		return POSTResponseEvidence{}, false
 	}
 	parts, ok := samlElementChildren(assertion, maximumSAMLXMLNodes)
@@ -55,24 +54,24 @@ func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, input POSTRespon
 			return POSTResponseEvidence{}, false
 		}
 	}
-	assertionExpiry, ok := p.bindConditions(parts[3], input.Now)
+	assertionExpiry, ok := p.bindConditions(parts[3], binding.now)
 	if !ok {
 		return POSTResponseEvidence{}, false
 	}
-	subject, format, confirmationExpiry, ok := p.bindSubject(parts[2], input)
+	subject, format, confirmationExpiry, ok := p.bindSubject(parts[2], binding)
 	if !ok {
 		return POSTResponseEvidence{}, false
 	}
-	remoteSessionIndex, remoteExpiry, ok := p.bindAuthnStatement(parts[4], input.Now)
+	remoteSessionIndex, remoteExpiry, ok := p.bindAuthnStatement(parts[4], binding.now)
 	if !ok {
 		return POSTResponseEvidence{}, false
 	}
-	validUntil := earlierSAMLTime(input.ExpiresAt, assertionExpiry.Add(p.skew))
+	validUntil := earlierSAMLTime(localCutoff, assertionExpiry.Add(p.skew))
 	validUntil = earlierSAMLTime(validUntil, confirmationExpiry.Add(p.skew))
 	if !remoteExpiry.IsZero() {
 		validUntil = earlierSAMLTime(validUntil, remoteExpiry.Add(p.skew))
 	}
-	if !input.Now.Before(validUntil) {
+	if !binding.now.Before(validUntil) {
 		return POSTResponseEvidence{}, false
 	}
 	return POSTResponseEvidence{
@@ -101,7 +100,7 @@ func (p POSTResponseProfile) bindConditions(n *xdm.Node, now time.Time) (time.Ti
 	return expires, ok && value == p.sp
 }
 
-func (p POSTResponseProfile) bindSubject(n *xdm.Node, input POSTResponseInput) (string, string, time.Time, bool) {
+func (p POSTResponseProfile) bindSubject(n *xdm.Node, binding postResponseBinding) (string, string, time.Time, bool) {
 	children, ok := samlElementChildren(n, 2)
 	if !ok || len(children) != 2 || n.NumAttrs() != 0 || !samlElement(children[0], samlAssertionNS, "NameID") ||
 		!samlElement(children[1], samlAssertionNS, "SubjectConfirmation") {
@@ -144,14 +143,14 @@ func (p POSTResponseProfile) bindSubject(n *xdm.Node, input POSTResponseInput) (
 	if !ok || len(data) != 1 || !samlElement(data[0], samlAssertionNS, "SubjectConfirmationData") {
 		return "", "", time.Time{}, false
 	}
-	// OASIS Profiles §4.1.4.2: bearer confirmation is recipient-, expiry- and
-	// request-bound. Unselected NotBefore/Address must not be silently ignored.
-	if data[0].NumAttrs() != 3 || samlAttr(data[0], "Recipient") != p.acs || samlAttr(data[0], "InResponseTo") != input.RequestID {
+	// OASIS Profiles §§4.1.4.2, 4.1.5: bind the bearer confirmation to the
+	// recipient, expiry and selected request mode. Do not ignore extra fields.
+	if !binding.matchesRequest(data[0], 2) || samlAttr(data[0], "Recipient") != p.acs {
 		return "", "", time.Time{}, false
 	}
 	_, empty := samlElementChildren(data[0], 0)
 	expiry, ok := parseSAMLTime(samlAttr(data[0], "NotOnOrAfter"))
-	return subject, format, expiry, empty && ok && input.Now.Before(expiry.Add(p.skew))
+	return subject, format, expiry, empty && ok && binding.now.Before(expiry.Add(p.skew))
 }
 
 func (p POSTResponseProfile) bindAuthnStatement(n *xdm.Node, now time.Time) (string, time.Time, bool) {
@@ -197,9 +196,29 @@ func (p POSTResponseProfile) bindAuthnStatement(n *xdm.Node, now time.Time) (str
 	return sessionIndex, expiry, ok
 }
 
-func (p POSTResponseProfile) validIssueInstant(n *xdm.Node, input POSTResponseInput) bool {
+func (b postResponseBinding) matchesRequest(n *xdm.Node, otherAttrs int) bool {
+	request := n.Attr("", "InResponseTo")
+	if b.maximumUnsolicitedAge != 0 {
+		// Profiles §4.1.5: an empty attribute is not absence. The exact
+		// attribute count additionally excludes namespace-qualified aliases.
+		return request == nil && n.NumAttrs() == otherAttrs
+	}
+	return request != nil && request.Value() == b.requestID && n.NumAttrs() == otherAttrs+1
+}
+
+func (p POSTResponseProfile) issueCutoff(n *xdm.Node, binding postResponseBinding) (time.Time, bool) {
 	instant, ok := parseSAMLTime(samlAttr(n, "IssueInstant"))
-	return ok && !instant.Before(input.IssuedAt.Add(-p.skew)) && !instant.After(input.Now.Add(p.skew))
+	if !ok || instant.After(binding.now.Add(p.skew)) {
+		return time.Time{}, false
+	}
+	if binding.maximumUnsolicitedAge == 0 {
+		return binding.expiresAt, !instant.Before(binding.issuedAt.Add(-p.skew))
+	}
+	cutoff := instant.Add(binding.maximumUnsolicitedAge)
+	if !binding.expiresAt.IsZero() {
+		cutoff = earlierSAMLTime(cutoff, binding.expiresAt)
+	}
+	return cutoff, binding.now.Before(cutoff)
 }
 
 func parseSAMLTime(source string) (time.Time, bool) {

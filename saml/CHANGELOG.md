@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a distinct signed IdP-initiated POST verifier that requires an exact
+  derived destination, no request correlation fields, and a short signed
+  issue-time window. It returns detached evidence and does not enable login.
+
 - Fetch approved IdP metadata over bounded, direct HTTPS before importing the
   exact digest-pinned document. No automatic redirect, trust update or activation.
 

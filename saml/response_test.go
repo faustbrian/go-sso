@@ -6,12 +6,25 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestIDPInitiatedPOSTResponseInputIsRedacted(t *testing.T) {
+	const payload = "private-response-fixture"
+	input := IDPInitiatedPOSTResponseInput{SAMLResponse: payload}
+	if strings.Contains(fmt.Sprintf("%#v", input), payload) || strings.Contains(input.LogValue().String(), payload) {
+		t.Fatal("unsolicited response escaped structured redaction")
+	}
+	if _, err := json.Marshal(input); !errors.Is(err, ErrSensitiveSerialization) {
+		t.Fatalf("unsolicited response allowed implicit serialization: %v", err)
+	}
+}
 
 const (
 	fixtureSP  = "https://login.example/saml2/metadata"
@@ -19,6 +32,45 @@ const (
 	fixtureACS = "https://login.example/saml2/test/acs"
 	fixtureID  = "_approved_request"
 )
+
+func TestIDPInitiatedPOSTResponseProfileRequiresCanonicalExternalDestination(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 23, 4, 0, 0, 0, time.UTC)
+	template := &x509.Certificate{SerialNumber: big.NewInt(5), NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := IDPInitiatedPOSTResponseConfig{SPEntityID: fixtureSP, IdentityProviderEntityID: fixtureIdP, ExternalOrigin: "https://login.example:9443", ProviderID: "Tenant_0123", SigningCertificates: [][]byte{der}, MaximumAge: time.Minute}
+	if _, err := NewIDPInitiatedPOSTResponseProfile(config); err != nil {
+		t.Fatal("selected exact origin and canonical segment were rejected", err)
+	}
+	for _, origin := range []string{"http://login.example", "https://login.example/", "https://login.example/acs", "https://login.example?", "https://login.example:0", "https://login.example:65536"} {
+		candidate := config
+		candidate.ExternalOrigin = origin
+		if _, err := NewIDPInitiatedPOSTResponseProfile(candidate); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("invalid external origin was accepted: %q, %v", origin, err)
+		}
+	}
+	for _, id := range []string{"", ".", "..", "one/two", "{provider}", "alternative%2froute"} {
+		candidate := config
+		candidate.ProviderID = id
+		if _, err := NewIDPInitiatedPOSTResponseProfile(candidate); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("noncanonical provider path segment was accepted: %q, %v", id, err)
+		}
+	}
+	for _, age := range []time.Duration{0, time.Second - time.Nanosecond, time.Second, 5 * time.Minute, 5*time.Minute + time.Nanosecond} {
+		candidate := config
+		candidate.MaximumAge = age
+		_, err := NewIDPInitiatedPOSTResponseProfile(candidate)
+		if eligible := age >= time.Second && age <= 5*time.Minute; eligible != (err == nil) {
+			t.Errorf("unexpected result for selected maximum age %s: %v", age, err)
+		}
+	}
+}
 
 // OASIS Core §§2.4.1.2, 2.5.1.2 and 3.2.2; Profiles §4.1.4.3. Both nodes
 // are separately signed using literal exclusive-canonical fixture bytes.
