@@ -64,6 +64,12 @@ type ProviderLoginConfig struct {
 	CurrentStateKey, CurrentPKCEKey     uint32
 	AuditRetentionPolicyVersion         uint64
 	StateLifetime                       time.Duration
+
+	// RestorableOAuth2Vault selects independently restorable new OAuth2 token
+	// deposits. Upgrade every callback worker to a v2-capable reader before
+	// enabling it. Turning it off does not make v2 preparations unreadable.
+	// Existing deposits and the OIDC token format remain unchanged.
+	RestorableOAuth2Vault bool
 }
 
 // ProviderLoginService owns native anonymous enterprise sign-in initiation. It

@@ -155,9 +155,29 @@ func TestProviderLoginTokenVaultPreservesPublishedOIDCAADBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	metadata := prepared
-	metadata.Ciphertext = nil
-	plain, err := json.Marshal(metadata)
+	// Freeze the published v1 JSON field order and shape independently of the
+	// current preparation type, which now also carries a version discriminator.
+	legacyMetadata := struct {
+		Input              providerLoginPayloadInput
+		Callback           identity.CommandBinding
+		CallbackGeneration uint64
+		BindingDigest      [32]byte
+		BindingWireDigest  [32]byte
+		StateKey           uint32
+		StateDigest        [32]byte
+		Account            identity.Account
+		SocialLinkVersion  uint64
+		RequestedScopes    []string
+		GrantedScopes      []string
+		ScopeReported      bool
+		ReceivedAt         time.Time
+		AccessExpiresAt    time.Time
+		Version            uint64
+		Ciphertext         []byte
+	}{prepared.Input, prepared.Callback, prepared.CallbackGeneration, prepared.BindingDigest, prepared.BindingWireDigest,
+		prepared.StateKey, prepared.StateDigest, prepared.Account, prepared.SocialLinkVersion, prepared.RequestedScopes,
+		prepared.GrantedScopes, prepared.ScopeReported, prepared.ReceivedAt, prepared.AccessExpiresAt, prepared.Version, nil}
+	plain, err := json.Marshal(legacyMetadata)
 	defer clear(plain)
 	if err != nil {
 		t.Fatal(err)

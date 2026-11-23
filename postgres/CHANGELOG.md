@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Allow an opt-in OAuth2 vault format that retains restorable encrypted grant
+  custody after callback preparation is erased. Keep OIDC and legacy OAuth2
+  writes unchanged by default; no provider-token lifecycle API is enabled.
+
 - Add native RP-initiated enterprise OIDC logout backed by one-use PostgreSQL
   state and the original session's revocation. The callback settles provider
   success, refusal or timeout without reactivating the local cookie. No HTTP

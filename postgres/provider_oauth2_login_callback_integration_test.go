@@ -80,6 +80,7 @@ func newNativeOAuth2JourneyFixture(t *testing.T, mode string, traces ...*provide
 func newNativeOAuth2JourneyFixtureWithAdapter(t *testing.T, mode string, factory ssopg.OAuth2ProtocolAdapterFactory, traces ...*providerTrace) nativeOAuth2JourneyFixture {
 	t.Helper()
 	x := newProviderOAuthLoginStartFixture(t)
+	x.config.RestorableOAuth2Vault = mode == "restorable-vault"
 	installNativeOAuth2JourneyMigrations(t, x.enable.f)
 	policy := kernel.CommandQueryPolicy{Authorization: nativeOAuth2JourneyPolicy{}, Clock: clock.System{}, PolicyVersion: 1}
 	x.config.Coordinator.AdmissionPolicy, x.config.Coordinator.QueryPolicy = &policy, &policy
@@ -326,6 +327,35 @@ func TestNativeOAuth2LoginCallbackCommitsLinkedSession(t *testing.T) {
 		t.Fatal("terminal OAuth2 replay repeated provider exchange or durable effects")
 	}
 	assertNativeOAuth2JourneyCookieAndLogout(t, x, got, bearer, csrf)
+}
+
+func TestNativeOAuth2LoginVaultRestoresAfterCallbackErasure(t *testing.T) {
+	x := newNativeOAuth2JourneyFixture(t, "restorable-vault")
+	f := x.start.enable.f
+	got, err := x.completion.SigninCallbackOAuth2(f.ctx, x.request)
+	if err != nil || got.Completion.Outcome != identity.CommitOutcomeCommitted || got.Issuance.CommitOutcome != identity.CommitOutcomeCommitted {
+		t.Fatal("commit OAuth2 callback and restorable grant", err)
+	}
+	row := f.pool.Raw().QueryRow(f.ctx, `SELECT v.organization_id,v.provider_id,v.start_command_id,v.callback_command_id,v.callback_generation::bigint,
+ v.tenant_id,v.user_id,v.account_id,v.account_provider,v.issuer,v.subject,v.account_version::bigint,v.social_link_version::bigint,
+ v.token_version::bigint,v.provider_version::bigint,v.credential_generation::bigint,v.mapping_version::bigint,
+ v.requested_scopes,v.granted_scopes,v.scope_reported,v.received_at_seconds,v.received_at_nanoseconds,
+ v.access_expires_at_seconds,v.access_expires_at_nanoseconds,v.token_ciphertext
+FROM sso_providers.provider_login_token_sets v
+JOIN identity.commands j ON j.tenant_id=v.tenant_id AND j.purpose=v.origin_operation AND j.command_id=v.origin_command_id
+JOIN sso_providers.login_transactions l ON l.start_command_id=v.start_command_id AND l.callback_command_id=v.callback_command_id
+WHERE v.tenant_id=$1 AND v.callback_command_id=$2 AND v.origin_operation='identity.sso.oauth-callback'
+ AND j.state='committed' AND j.preparation_ciphertext IS NULL AND j.preparation_ciphertext_generation IS NULL
+ AND l.completed_at IS NOT NULL AND l.verifier_envelope IS NULL`,
+		string(x.start.config.TenantID), string(got.Completion.Binding.CommandID))
+	digests, err := ssopg.RestoreOAuth2VaultFromRowForTest(f.ctx, x.start.config, row)
+	want := [2][32]byte{
+		sha256.Sum256([]byte(nativeCallbackJourneyAccessToken)),
+		sha256.Sum256([]byte(nativeCallbackJourneyRefreshToken)),
+	}
+	if err != nil || digests != want || x.posts.Load() != 1 || x.identities.Load() != 1 {
+		t.Fatal("restore original grant using only committed vault custody after erasure", err)
+	}
 }
 
 func assertNativeOAuth2JourneyNoDisclosure(t *testing.T, got ssopg.ProviderLoginCallbackResult) {

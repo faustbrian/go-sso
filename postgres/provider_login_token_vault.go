@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -24,8 +25,10 @@ import (
 // token has already supplied validated assertion evidence; retaining its raw
 // bytes would add a second recoverable protocol-evidence owner. OAuth has none.
 const providerLoginTokenHeader = "sso-tokens-v1\x00"
+const providerLoginStoredTokenHeader = "sso-tokens-v2\x00"
+const providerLoginStoredTokenVersion = 2
 const providerLoginTokenMaximumBytes = 16 << 10 // identity/oauth.OIDCConfig token bound.
-const providerLoginTokenMaximumFrame = len(providerLoginTokenHeader) + 8 + 2*providerLoginTokenMaximumBytes
+const providerLoginTokenMaximumFrame = len(providerLoginStoredTokenHeader) + sha256.Size + 8 + 2*providerLoginTokenMaximumBytes
 
 // Only the native owner's encrypted generation output may serialize this
 // internal value. Neither claims, hooks, audit nor a public result receives it.
@@ -47,6 +50,8 @@ type providerLoginPreparedTokens struct {
 	AccessExpiresAt    time.Time
 	Version            uint64
 	Ciphertext         []byte
+	// Zero preserves the published preparation and v1 associated data bytes.
+	EnvelopeVersion uint8 `json:",omitempty"`
 }
 
 func (providerLoginPreparedTokens) Format(s fmt.State, _ rune) {
@@ -98,6 +103,9 @@ func (s *ProviderLoginService) validateProviderLoginTokenMetadata(p providerLogi
 		p.Account.Issuer != p.Input.Issuer || p.SocialLinkVersion == 0 {
 		return identity.ForbiddenError{}
 	}
+	if p.EnvelopeVersion != 0 && (p.EnvelopeVersion != providerLoginStoredTokenVersion || p.Input.Protocol != providerProtocolOAuth2) {
+		return identity.ForbiddenError{}
+	}
 	if p.Input.Link != nil && (p.Account.UserID != p.Callback.UserID || p.Account.Version != 1 || p.SocialLinkVersion != 2) {
 		return identity.ForbiddenError{}
 	}
@@ -135,6 +143,12 @@ func (s *ProviderLoginService) validateProviderLoginTokenMetadata(p providerLogi
 }
 
 func providerLoginTokenAAD(p providerLoginPreparedTokens) (envelope.Context, error) {
+	if p.EnvelopeVersion != 0 {
+		if p.EnvelopeVersion != providerLoginStoredTokenVersion || p.Input.Protocol != providerProtocolOAuth2 {
+			return envelope.Context{}, identity.ForbiddenError{}
+		}
+		return p.storedTokenBinding().aad()
+	}
 	profile := "native-static-oidc-token-v1"
 	switch p.Input.Protocol {
 	case "":
@@ -143,14 +157,10 @@ func providerLoginTokenAAD(p providerLoginPreparedTokens) (envelope.Context, err
 	default:
 		return envelope.Context{}, identity.ForbiddenError{}
 	}
-	metadata := p
-	metadata.Ciphertext = nil
-	plain, err := json.Marshal(metadata)
-	defer clear(plain)
+	digest, err := providerLoginTokenOriginCommitment(p)
 	if err != nil {
-		return envelope.Context{}, identity.ForbiddenError{}
+		return envelope.Context{}, err
 	}
-	digest := sha256.Sum256(plain)
 	return envelope.NewContext(map[string]string{
 		"owner": "sso", "profile": profile, "purpose": "enterprise-provider-tokens",
 		"tenant": string(p.Input.Command.TenantID), "organization": p.Input.OrganizationID,
@@ -158,6 +168,17 @@ func providerLoginTokenAAD(p providerLoginPreparedTokens) (envelope.Context, err
 		"callback": string(p.Callback.CommandID), "callback_generation": strconv.FormatUint(p.CallbackGeneration, 10),
 		"metadata": base64.RawURLEncoding.EncodeToString(digest[:]),
 	})
+}
+
+func providerLoginTokenOriginCommitment(p providerLoginPreparedTokens) ([sha256.Size]byte, error) {
+	p.Ciphertext = nil
+	p.EnvelopeVersion = 0
+	plain, err := json.Marshal(p)
+	defer clear(plain)
+	if err != nil {
+		return [sha256.Size]byte{}, identity.ForbiddenError{}
+	}
+	return sha256.Sum256(plain), nil
 }
 
 func providerLoginTokenFailure(ctx context.Context) error {
@@ -216,6 +237,9 @@ func (s *ProviderLoginService) prepareProviderLoginAccountTokens(ctx context.Con
 		RequestedScopes: tokens.RequestedScopes(), GrantedScopes: tokens.GrantedScopes(), ScopeReported: tokens.ScopeReported(),
 		ReceivedAt: tokens.ReceivedAt().UTC(), AccessExpiresAt: tokens.ExpiresAt().UTC(), Version: 1,
 	}
+	if p.Input.Protocol == providerProtocolOAuth2 && s.config.RestorableOAuth2Vault {
+		p.EnvelopeVersion = providerLoginStoredTokenVersion
+	}
 	if err := s.validateProviderLoginTokenMetadata(p); err != nil {
 		return out, err
 	}
@@ -231,10 +255,21 @@ func (s *ProviderLoginService) prepareProviderLoginAccountTokens(ctx context.Con
 		if p.Input.Protocol == "" && len(borrowed.IDToken) == 0 || p.Input.Protocol == providerProtocolOAuth2 && len(borrowed.IDToken) != 0 {
 			return identity.ForbiddenError{}
 		}
+		header := providerLoginTokenHeader
+		var origin []byte
+		if p.EnvelopeVersion == providerLoginStoredTokenVersion {
+			header = providerLoginStoredTokenHeader
+			commitment, err := providerLoginTokenOriginCommitment(p)
+			if err != nil {
+				return err
+			}
+			origin = commitment[:]
+		}
 		// Exact capacity prevents append from abandoning a bearer-bearing array.
-		frame := make([]byte, 0, len(providerLoginTokenHeader)+8+len(borrowed.AccessToken)+len(borrowed.RefreshToken))
+		frame := make([]byte, 0, len(header)+len(origin)+8+len(borrowed.AccessToken)+len(borrowed.RefreshToken))
 		defer func() { clear(frame) }()
-		frame = append(frame, providerLoginTokenHeader...)
+		frame = append(frame, header...)
+		frame = append(frame, origin...)
 		for _, value := range [][]byte{borrowed.AccessToken, borrowed.RefreshToken} {
 			frame = binary.BigEndian.AppendUint32(frame, uint32(len(value)))
 			frame = append(frame, value...)
@@ -274,23 +309,14 @@ func (s *ProviderLoginService) validateProviderLoginTokens(ctx context.Context, 
 	}
 	plain, err := s.payload.open(ctx, aad, p.Ciphertext, 65536, providerLoginTokenMaximumFrame)
 	defer clear(plain)
-	if err != nil || len(plain) < len(providerLoginTokenHeader)+8 || string(plain[:len(providerLoginTokenHeader)]) != providerLoginTokenHeader {
+	if err != nil {
 		return providerLoginTokenFailure(ctx)
 	}
-	remaining := plain[len(providerLoginTokenHeader):]
-	for i := range 2 {
-		if len(remaining) < 4 {
-			return identity.ForbiddenError{}
-		}
-		n := binary.BigEndian.Uint32(remaining)
-		remaining = remaining[4:]
-		if n > providerLoginTokenMaximumBytes || uint64(n) > uint64(len(remaining)) || i == 0 && n == 0 {
-			return identity.ForbiddenError{}
-		}
-		remaining = remaining[int(n):]
-	}
-	if len(remaining) != 0 {
-		return identity.ForbiddenError{}
+	if _, _, err := providerLoginTokenFrame(plain, p.EnvelopeVersion, func(origin []byte) bool {
+		want, err := providerLoginTokenOriginCommitment(p)
+		return err == nil && hmac.Equal(origin, want[:])
+	}); err != nil {
+		return err
 	}
 	return ctx.Err()
 }

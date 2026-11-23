@@ -119,6 +119,14 @@ Only an acknowledged new commit returns the cookie credential and CSRF token.
 Definitive refusal terminalizes original custody; an ambiguous exchange retains
 the original lease and cannot resubmit the code. No provider token is returned.
 
+To make new OAuth2 grants restorable from the committed encrypted vault after
+callback cleanup, set `ProviderLoginConfig.RestorableOAuth2Vault`. Upgrade
+every worker that may resume a callback before enabling it; old binaries
+cannot read the new preparation format. Turning the setting off affects only
+new deposits. It does not change OIDC or convert earlier OAuth2 deposits,
+which cannot be opened independently after callback cleanup. This setting
+does not expose tokens or enable upstream refresh or revocation.
+
 ### Native static OIDC callback for an existing linked member
 
 Before opting in, install the native callback account, capability, MFA,
