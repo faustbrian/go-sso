@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Define a local SAML registration validation port. Composition can select the
+  optional wire implementation without introducing it into persistence modules.
+
 - Add bounded, SSO-owned explicit SAML registration intent and detach the
   pinned certificate input. The native owner still validates certificates,
   authorizes the command and persists the disabled provider. The request

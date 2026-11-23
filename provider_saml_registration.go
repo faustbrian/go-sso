@@ -2,6 +2,7 @@ package sso
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -34,6 +35,13 @@ type SAMLConfigurationSpec struct {
 	RedirectEndpoint    string
 	SigningCertificates [][]byte
 }
+
+// SAMLRegistrationValidator is the composition-selected, local validation port
+// for explicit IdP material. It checks the exact entity, Redirect endpoint and
+// pinned certificates without performing I/O or conferring provider authority.
+// The caller lends detached certificate bytes only until the synchronous call
+// returns. Implementations must respect cancellation and retain no inputs.
+type SAMLRegistrationValidator func(ctx context.Context, entityID, redirectEndpoint string, signingCertificates [][]byte) error
 
 // SAMLConfiguration owns an immutable detached snapshot of bounded explicit
 // IdP input. It performs no I/O and establishes no certificate, key, time,

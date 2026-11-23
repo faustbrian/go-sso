@@ -60,28 +60,38 @@ type POSTResponseProfile struct {
 // RSA-PSS/P-256 signing keys, never using an input document to enlarge trust.
 func NewPOSTResponseProfile(config POSTResponseConfig) (POSTResponseProfile, error) {
 	if !samlSPEntityID(config.SPEntityID) || !samlIdPEntityID(config.IdentityProviderEntityID) ||
-		!samlAssertionConsumerURL(config.AssertionConsumerURL) || config.ClockSkew < 0 || config.ClockSkew > maximumSAMLClockSkew ||
-		len(config.SigningCertificates) == 0 || len(config.SigningCertificates) > maximumPinnedSigningKeys {
+		!samlAssertionConsumerURL(config.AssertionConsumerURL) || config.ClockSkew < 0 || config.ClockSkew > maximumSAMLClockSkew {
 		return POSTResponseProfile{}, ErrInvalidInput
 	}
-	keys := make([]pinnedSAMLCertificate, 0, len(config.SigningCertificates))
-	seen := make(map[string]struct{}, len(config.SigningCertificates))
-	for _, der := range config.SigningCertificates {
+	keys, err := parsePinnedSigningCertificates(config.SigningCertificates)
+	if err != nil {
+		return POSTResponseProfile{}, err
+	}
+	return POSTResponseProfile{config.SPEntityID, config.IdentityProviderEntityID, config.AssertionConsumerURL, keys, config.ClockSkew}, nil
+}
+
+func parsePinnedSigningCertificates(certificates [][]byte) ([]pinnedSAMLCertificate, error) {
+	if len(certificates) == 0 || len(certificates) > maximumPinnedSigningKeys {
+		return nil, ErrInvalidInput
+	}
+	keys := make([]pinnedSAMLCertificate, 0, len(certificates))
+	seen := make(map[string]struct{}, len(certificates))
+	for _, der := range certificates {
 		if len(der) == 0 || len(der) > maximumCertificateBytes {
-			return POSTResponseProfile{}, ErrInvalidInput
+			return nil, ErrInvalidInput
 		}
 		identity := string(der)
 		if _, exists := seen[identity]; exists {
-			return POSTResponseProfile{}, ErrInvalidInput
+			return nil, ErrInvalidInput
 		}
 		seen[identity] = struct{}{}
 		certificate, err := x509.ParseCertificate(der)
 		if err != nil || !usableSAMLSigningCertificate(certificate) {
-			return POSTResponseProfile{}, ErrInvalidInput
+			return nil, ErrInvalidInput
 		}
 		keys = append(keys, pinnedSAMLCertificate{certificate.PublicKey, certificate.NotBefore, certificate.NotAfter})
 	}
-	return POSTResponseProfile{config.SPEntityID, config.IdentityProviderEntityID, config.AssertionConsumerURL, keys, config.ClockSkew}, nil
+	return keys, nil
 }
 
 func usableSAMLSigningCertificate(cert *x509.Certificate) bool {
