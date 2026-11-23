@@ -44,6 +44,9 @@ const providerLoginCallbackCipherLimit = 192 << 10
 const providerLoginCallbackPlainLimit = 128 << 10
 
 func (p *providerLoginCallbackPhase) outputContext(generation uint64) (envelope.Context, error) {
+	if p.saml != nil {
+		return p.samlOutputContext(generation)
+	}
 	if p.oauth2 != nil {
 		return p.callbackOutputContext(generation, "oauth2-callback-output-v1")
 	}
@@ -103,6 +106,9 @@ func (p *providerLoginCallbackPhase) generateAccepted(ctx context.Context, gener
 	aad, err := p.outputContext(generation)
 	if err != nil {
 		return nil, err
+	}
+	if p.saml != nil {
+		return p.generateSAMLAccepted(ctx, generation, admission, aad)
 	}
 	if p.oidc != nil {
 		return p.generateOIDCAdapterAccepted(ctx, generation, admission, aad, p.prepareSigninAccepted)
@@ -257,6 +263,8 @@ func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLo
 	method := "sso-oidc"
 	if p.oauth2 != nil {
 		method = "sso-oauth2"
+	} else if p.saml != nil {
+		method = "sso-saml"
 	}
 	proof := authentication.Proof{ID: authentication.ProofID(original.Binding.CommandID), Tenant: string(account.Account.TenantID), Subject: string(account.Account.UserID),
 		Method: method, Assurance: authentication.AssuranceSingleFactor, Purpose: "session-issue", Audience: p.policy.Audience, IssuedAt: now, ExpiresAt: until}
@@ -270,6 +278,8 @@ func (p *providerLoginCallbackPhase) prepareCallbackSession(recipient providerLo
 	var prepared session.PreparedIssuance
 	if p.oauth2 != nil {
 		prepared, err = p.issuer.PrepareSSOOAuth2(original.Binding, session.SSOOAuth2IssuanceSpec(issuance))
+	} else if p.saml != nil {
+		prepared, err = p.issuer.PrepareSSOSAML(original.Binding, session.SSOSAMLIssuanceSpec(issuance))
 	} else {
 		prepared, err = p.issuer.PrepareSSOOIDC(original.Binding, issuance)
 	}
@@ -297,6 +307,8 @@ func (p *providerLoginCallbackPhase) callbackAccountSessionFields(record session
 	sessionFields, accountFields := sessionpg.SSOOIDCSigninSessionFields, kernel.SSOOIDCSigninAccountFields
 	if p.oauth2 != nil {
 		sessionFields, accountFields = sessionpg.SSOOAuth2SigninSessionFields, kernel.SSOOAuth2SigninAccountFields
+	} else if p.saml != nil {
+		sessionFields, accountFields = sessionpg.SSOSAMLSigninSessionFields, kernel.SSOSAMLSigninAccountFields
 	}
 	fields, err := sessionFields(record)
 	if err != nil {
@@ -355,6 +367,9 @@ func (p *providerLoginCallbackPhase) callbackSessionAuthority(account kernel.Pro
 }
 
 func (p *providerLoginCallbackPhase) restoreAccepted(ctx context.Context, generation uint64, wire []byte) error {
+	if p.saml != nil {
+		return p.restoreSAMLAccepted(ctx, generation, wire)
+	}
 	digest := sha256.Sum256(wire)
 	if p.execution != nil {
 		if p.execution.generation == generation && p.execution.digest == digest {

@@ -36,6 +36,9 @@ func (p *providerLoginCallbackInvocation) operation() identity.FeatureOperation 
 	if p.found.Row.Protocol == providerProtocolOAuth2 {
 		return kernel.SSOOAuth2SigninOperation()
 	}
+	if p.found.Row.Protocol == providerProtocolSAML {
+		return kernel.SSOSAMLSigninOperation()
+	}
 	if p.member != nil {
 		return kernel.SSOOIDCExplicitLinkCallbackOperation()
 	}
@@ -78,7 +81,11 @@ func (p *providerLoginCallbackInvocation) checkOriginal(now time.Time) error {
 		return identity.ForbiddenError{}
 	}
 	_, action := providerLoginCryptoProtocol(p.found.Row.Protocol)
-	return p.service.requireProviderLoginBrowserForAction(p.flow, now, p.browser, p.original.SuccessCallback, remember, action)
+	callback := p.original.SuccessCallback
+	if p.found.Row.Protocol == providerProtocolSAML {
+		callback = p.found.Binding.Metadata.Input.RedirectURI
+	}
+	return p.service.requireProviderLoginBrowserForAction(p.flow, now, p.browser, callback, remember, action)
 }
 
 // admitPrimary is used only in pre-generation Work. In final Apply the

@@ -63,7 +63,7 @@ func (c providerLoginPayloadConfig) sealProviderLoginProtocolCallbackTerminal(ct
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return nil, err
 	}
-	if !c.ready() || found.CompletedAt != nil || found.ObservedAt.IsZero() || found.ObservedAt.Before(found.Row.IssuedAt) || !found.ObservedAt.Before(found.Row.ExpiresAt) || !c.validProviderLoginPendingBinding(found.Row, found.Binding) {
+	if !c.readyFor(discriminator) || found.CompletedAt != nil || found.ObservedAt.IsZero() || found.ObservedAt.Before(found.Row.IssuedAt) || !found.ObservedAt.Before(found.Row.ExpiresAt) || !c.validProviderLoginPendingBinding(found.Row, found.Binding) {
 		return nil, identity.ForbiddenError{}
 	}
 	aad, err := providerLoginProtocolCallbackTerminalAAD(found.Row, discriminator)
@@ -90,7 +90,7 @@ func (c providerLoginPayloadConfig) openProviderLoginProtocolCallbackTerminal(ct
 	if err := providerLoginPayloadContext(ctx); err != nil {
 		return providerLoginStoredBinding{}, err
 	}
-	if !c.ready() {
+	if !c.readyFor(discriminator) {
 		return providerLoginStoredBinding{}, identity.ForbiddenError{}
 	}
 	aad, err := providerLoginProtocolCallbackTerminalAAD(row, discriminator)
@@ -213,8 +213,38 @@ const completeProviderOAuth2LoginCallbackSQL = `WITH exact_login AS MATERIALIZED
  AND cutoff.at>=$13::timestamptz AND cutoff.at<LEAST($14::timestamptz,$15::timestamptz)
  AND octet_length($16::bytea) BETWEEN 1 AND 65536`
 
+// SAML has no PKCE verifier. Lock its exact state primary key, then compare
+// the original pending custody and profile before replacing that ciphertext
+// with the authenticated terminal envelope in the callback's sole Work.
+const completeProviderSAMLLoginCallbackSQL = `WITH exact_login AS MATERIALIZED (
+ SELECT tenant_id,state_key_version,state_digest,organization_id,provider_id,provider_version,credential_generation,mapping_version,
+ start_command_id,callback_command_id,protocol,pkce_key_version,pkce_commitment,issued_at,expires_at,completed_at,
+ verifier_envelope IS NOT NULL AS has_verifier,binding_envelope
+ FROM sso_providers.login_transactions
+ WHERE tenant_id=$1 AND state_key_version=$9 AND state_digest=$10 FOR UPDATE
+ ), cutoff AS MATERIALIZED (
+ SELECT tenant_id,state_key_version,state_digest,clock_timestamp() AS at FROM exact_login
+ WHERE organization_id=$2 AND provider_id=$3 AND protocol='saml'
+ AND provider_version=$4::numeric AND credential_generation=$5::numeric AND mapping_version=$6::numeric
+ AND start_command_id=$7 AND callback_command_id=$8
+ AND pkce_key_version IS NULL AND pkce_commitment IS NULL AND NOT has_verifier
+ AND issued_at=$11::timestamptz AND expires_at=$12::timestamptz AND completed_at IS NULL
+ AND octet_length(binding_envelope) BETWEEN 1 AND 65536 AND sha256(binding_envelope)=$15::bytea
+ )
+ UPDATE sso_providers.login_transactions l
+ SET completed_at=cutoff.at,binding_envelope=$14
+ FROM cutoff WHERE l.tenant_id=cutoff.tenant_id AND l.state_key_version=cutoff.state_key_version AND l.state_digest=cutoff.state_digest
+ AND cutoff.at>=$11::timestamptz AND cutoff.at<LEAST($12::timestamptz,$13::timestamptz)
+ AND octet_length($14::bytea) BETWEEN 1 AND 65536`
+
 func providerLoginCallbackTerminalArgs(found providerLoginCallbackLookup, deadline time.Time, wire []byte) []any {
 	row, metadata := found.Row, found.Binding.Metadata
+	if row.Protocol == providerProtocolSAML {
+		return []any{string(row.TenantID), row.OrganizationID, row.ProviderID,
+			strconv.FormatUint(row.ProviderVersion, 10), strconv.FormatUint(row.CredentialGeneration, 10), strconv.FormatUint(row.MappingVersion, 10),
+			string(row.StartCommandID), string(metadata.CallbackCommand), int64(metadata.StateKey), metadata.StateDigest[:],
+			row.IssuedAt, row.ExpiresAt, deadline, wire, found.BindingWireDigest[:]}
+	}
 	return []any{string(row.TenantID), row.OrganizationID, row.ProviderID,
 		strconv.FormatUint(row.ProviderVersion, 10), strconv.FormatUint(row.CredentialGeneration, 10), strconv.FormatUint(row.MappingVersion, 10),
 		string(row.StartCommandID), string(metadata.CallbackCommand), int64(metadata.StateKey), metadata.StateDigest[:],
@@ -253,6 +283,11 @@ func eraseProviderLoginCallbackCustody(ctx context.Context, w kernel.Work, found
 	case "":
 	case providerProtocolOAuth2:
 		statement = completeProviderOAuth2LoginCallbackSQL
+	case providerProtocolSAML:
+		if found.BindingWireDigest == ([32]byte{}) {
+			return identity.ForbiddenError{}
+		}
+		statement = completeProviderSAMLLoginCallbackSQL
 	default:
 		return identity.ForbiddenError{}
 	}

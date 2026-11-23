@@ -89,10 +89,14 @@ func (s *ProviderLoginService) resolveProviderLoginCallbackRecipient(ctx context
 	}
 	protocolID, protocolErr := ssoOIDCTransportProviderID(original.Proof.OrganizationID, original.ProviderID)
 	validEvidence := !verified.IDTokenIssuedAt().IsZero() && !verified.IDTokenExpiresAt().IsZero()
-	if original.Protocol == providerProtocolOAuth2 {
+	switch original.Protocol {
+	case "":
+	case providerProtocolOAuth2:
 		protocolID, protocolErr = ssoOAuth2TransportProviderID(original.Proof.OrganizationID, original.ProviderID)
 		_, hasAuthenticationTime := verified.AuthenticationTime()
 		validEvidence = verified.IDTokenIssuedAt().IsZero() && verified.IDTokenExpiresAt().IsZero() && !hasAuthenticationTime
+	default:
+		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
 	if protocolErr != nil || verified.ProviderID() != protocolID || verified.Issuer() != original.Issuer || !validEvidence {
 		return providerLoginCallbackRecipient{}, sso.ErrForbidden
@@ -112,10 +116,20 @@ func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, 
 	accountNamespace := SSOOIDCAccountProviderNamespace
 	accountFields := kernel.SSOOIDCSigninAccountFields
 	readFactors := mfapg.ReadSSOOIDCSigninFactors
-	if original.Protocol == providerProtocolOAuth2 {
+	readAccount := s.directory.GetSSOOIDCSigninAccount
+	switch original.Protocol {
+	case "":
+	case providerProtocolOAuth2:
 		accountNamespace = SSOOAuth2AccountProviderNamespace
 		accountFields = kernel.SSOOAuth2SigninAccountFields
 		readFactors = mfapg.ReadSSOOAuth2SigninFactors
+	case providerProtocolSAML:
+		accountNamespace = SSOSAMLAccountProviderNamespace
+		accountFields = kernel.SSOSAMLSigninAccountFields
+		readFactors = mfapg.ReadSSOSAMLSigninFactors
+		readAccount = s.directory.GetSSOSAMLSigninAccount
+	default:
+		return providerLoginCallbackRecipient{}, sso.ErrForbidden
 	}
 	if original.Command.TenantID != s.config.TenantID || original.Proof.TenantID != s.config.TenantID ||
 		original.Organization.TenantID != s.config.TenantID || original.Organization.OrganizationID != original.Proof.OrganizationID ||
@@ -141,10 +155,13 @@ func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, 
 	ctx, cancel := context.WithTimeout(ctx, min(maximumDuration, deadline.Sub(now)))
 	defer cancel()
 
-	account, err := s.directory.GetSSOOIDCSigninAccount(ctx, query)
+	account, err := readAccount(ctx, query)
 	if err != nil {
 		var forbidden identity.ForbiddenError
 		if ctx.Err() == nil && errors.As(err, &forbidden) {
+			if original.Protocol == providerProtocolSAML {
+				return providerLoginCallbackRecipient{}, sso.ErrForbidden
+			}
 			// This can mean an existing unusable or retired account. The JIT
 			// branch must independently prove exact subject absence.
 			return providerLoginCallbackRecipient{}, errProviderLoginRecipientLinkUnavailable
@@ -159,6 +176,9 @@ func (s *ProviderLoginService) readLinkedProviderRecipient(ctx context.Context, 
 	member, err := s.router.organizations.ObserveCredentialAuthority(ctx, memberQuery)
 	if err != nil {
 		if ctx.Err() == nil && errors.Is(err, organization.ErrForbidden) {
+			if original.Protocol == providerProtocolSAML {
+				return providerLoginCallbackRecipient{}, sso.ErrForbidden
+			}
 			return providerLoginCallbackRecipient{}, errProviderLoginRecipientIneligible
 		}
 		return providerLoginCallbackRecipient{}, providerError(ctx, err)

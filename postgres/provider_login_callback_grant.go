@@ -26,7 +26,8 @@ func (s *ProviderLoginService) prepareProviderLoginCallbackGrant(ctx context.Con
 	metadata := stored.Metadata
 	_, purposeText := providerLoginCryptoProtocol(found.Row.Protocol)
 	if purposeText == "" || metadata.Input.Protocol != found.Row.Protocol ||
-		(found.Row.Protocol == providerProtocolOAuth2 && metadata.Input.Link != nil) {
+		metadata.Input.validate() != nil || found.Row != metadata.Input.rowIdentity() ||
+		(found.Row.Protocol != "" && metadata.Input.Link != nil) {
 		return kernel.CapabilityPlan{}, sso.ErrForbidden
 	}
 	purpose := capability.Purpose(purposeText)
@@ -57,11 +58,18 @@ func (s *ProviderLoginService) prepareProviderLoginCallbackGrant(ctx context.Con
 	payload := grant.Payload()
 	subject := original.AnonymousFlowID
 	prepare := s.payload.Issuer.PrepareSSOOIDCSigninConsumption
-	if found.Row.Protocol == providerProtocolOAuth2 {
+	switch found.Row.Protocol {
+	case providerProtocolOAuth2:
 		prepare = s.payload.Issuer.PrepareSSOOAuth2SigninConsumption
-	} else if metadata.Input.Link != nil {
-		subject = string(original.UserID)
-		prepare = s.payload.Issuer.PrepareSSOOIDCExplicitLinkConsumption
+	case providerProtocolSAML:
+		prepare = s.payload.Issuer.PrepareSSOSAMLSigninConsumption
+	case "":
+		if metadata.Input.Link != nil {
+			subject = string(original.UserID)
+			prepare = s.payload.Issuer.PrepareSSOOIDCExplicitLinkConsumption
+		}
+	default:
+		return kernel.CapabilityPlan{}, sso.ErrForbidden
 	}
 	use := capability.Use{
 		Issuer: s.payload.CapabilityIssuer, Audience: s.payload.Audience,

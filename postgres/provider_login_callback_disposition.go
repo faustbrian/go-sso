@@ -38,6 +38,18 @@ const providerOAuth2LoginCallbackDispositionFenceSQL = `WITH eligible_provider A
 )
 SELECT enabled FROM eligible_provider WHERE clock_timestamp() < $7::timestamptz`
 
+// SAML never drains a disabled installation or borrows another protocol's
+// current provider, even when its other version bindings happen to match.
+const providerSAMLLoginCallbackDispositionFenceSQL = `WITH eligible_provider AS MATERIALIZED (
+ SELECT p.enabled FROM sso_providers.providers p
+ JOIN sso_providers.credentials c USING(tenant_id,organization_id,provider_id)
+ WHERE p.tenant_id=$1 AND p.organization_id=$2 AND p.provider_id=$3 AND p.protocol='saml'
+ AND c.generation=$5::numeric AND COALESCE(p.metadata_mapping_version,p.mapping_version)=$6::numeric
+ AND p.enabled AND p.metadata_version=$4::numeric AND p.enablement_credential_generation=$5::numeric
+ FOR SHARE OF p
+)
+SELECT enabled FROM eligible_provider WHERE clock_timestamp() < $7::timestamptz`
+
 const providerLoginCallbackDrainSQL = `SELECT e.command_id,e.binding
  FROM sso_providers.provider_login_dispositions d
  JOIN sso_providers.command_effects e
@@ -69,6 +81,8 @@ func requireProviderLoginCallbackDispositionAt(ctx context.Context, work kernel.
 	fence := providerLoginCallbackDispositionFenceSQL
 	if found.Row.Protocol == providerProtocolOAuth2 {
 		fence, allowDrain = providerOAuth2LoginCallbackDispositionFenceSQL, false
+	} else if found.Row.Protocol == providerProtocolSAML {
+		fence, allowDrain = providerSAMLLoginCallbackDispositionFenceSQL, false
 	}
 	rows, err := work.Query(ctx, fence, args...)
 	if err != nil {
@@ -153,6 +167,10 @@ func validProviderLoginCallbackDispositionScope(binding identity.CommandBinding,
 		want.CommandID = found.Binding.Metadata.CallbackCommand
 		want.CorrelationID, want.RecordID = string(want.CommandID), string(original.CommandID)
 		want.OperationID, want.SchemaID, want.SchemaVersion = operation.OperationID, operation.SchemaID, operation.SchemaVersion
+		return binding == want && want.CommandID != original.CommandID && binding.ValidateFor(operation) == nil
+	}
+	if input.Protocol == providerProtocolSAML {
+		want := providerLoginTokenCallback(input, found.Binding.Metadata.CallbackCommand)
 		return binding == want && want.CommandID != original.CommandID && binding.ValidateFor(operation) == nil
 	}
 	return binding.ValidateFor(operation) == nil && binding.TenantID == original.TenantID &&

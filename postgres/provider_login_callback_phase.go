@@ -35,6 +35,7 @@ type providerLoginCallbackPhase struct {
 	issuer            *session.SessionIssuer
 	effect            *sessionpg.SSOOIDCSigninEffect
 	oauthEffect       *sessionpg.SSOOAuth2SigninEffect
+	saml              *samlLoginCallbackPhase
 	policy            sessionpg.IdentifierAdmissionConfig
 	prepared          session.PreparedIssuance
 	execution         *providerLoginCallbackExecution
@@ -66,6 +67,10 @@ func providerOAuth2LoginCallbackDescriptor() kernel.ContributorDescriptor {
 	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.oauth2-login-callback", Version: 1}
 }
 
+func providerSAMLLoginCallbackDescriptor() kernel.ContributorDescriptor {
+	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.saml-login-callback", Version: 1}
+}
+
 func providerLoginCallbackLifecycle() kernel.LifecyclePlan {
 	return kernel.LifecyclePlan{EventType: "session.created.v1", BeforeVersion: 1, AfterVersion: 2}
 }
@@ -81,6 +86,10 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 	purpose := providerOIDCCallback
 	if op := kernel.SSOOAuth2SigninOperation(); binding.SchemaID == op.SchemaID {
 		registration = kernel.FeatureRegistration{Contributor: providerOAuth2LoginCallbackDescriptor(), Operation: op}
+		purpose = op.OperationID
+	}
+	if op := kernel.SSOSAMLSigninOperation(); binding.SchemaID == op.SchemaID {
+		registration = kernel.FeatureRegistration{Contributor: providerSAMLLoginCallbackDescriptor(), Operation: op}
 		purpose = op.OperationID
 	}
 	if op := kernel.SSOOIDCExplicitLinkCallbackOperation(); binding.SchemaID == op.SchemaID {
@@ -121,6 +130,9 @@ func providerLoginCallbackPlan(binding identity.CommandBinding, occurred time.Ti
 }
 
 func (p *providerLoginCallbackPhase) Descriptor() kernel.ContributorDescriptor {
+	if p != nil && p.saml != nil {
+		return providerSAMLLoginCallbackDescriptor()
+	}
 	if p != nil && p.oauth2 != nil {
 		return providerOAuth2LoginCallbackDescriptor()
 	}
@@ -143,10 +155,17 @@ func (p *providerLoginCallbackPhase) plan() (kernel.CommandPlan, error) {
 }
 
 func (p *providerLoginCallbackPhase) ValidateSSOOIDCSigninConsumption(command identity.Command, grant kernel.CapabilityPlan) error {
-	if p == nil || p.oauth2 != nil {
+	if p == nil || p.oauth2 != nil || p.saml != nil {
 		return identity.ForbiddenError{}
 	}
 	return p.validateSigninConsumption(command, grant, sessionpg.SSOOIDCSigninSession, sessionpg.SSOOIDCSigninSessionFields)
+}
+
+func (p *providerLoginCallbackPhase) ValidateSSOSAMLSigninConsumption(command identity.Command, grant kernel.CapabilityPlan) error {
+	if p == nil || p.saml == nil || p.found.Row.Protocol != providerProtocolSAML {
+		return identity.ForbiddenError{}
+	}
+	return p.validateSigninConsumption(command, grant, sessionpg.SSOSAMLSigninSession, sessionpg.SSOSAMLSigninSessionFields)
 }
 
 func (p *providerLoginCallbackPhase) ValidateSSOOAuth2SigninConsumption(command identity.Command, grant kernel.CapabilityPlan) error {
@@ -206,6 +225,9 @@ func (p *providerLoginCallbackPhase) ValidateFeatureCommand(command identity.Com
 	}
 	if p.oauth2 != nil {
 		return p.ValidateSSOOAuth2SigninConsumption(command, *plan.Capability)
+	}
+	if p.saml != nil {
+		return p.ValidateSSOSAMLSigninConsumption(command, *plan.Capability)
 	}
 	return p.ValidateSSOOIDCSigninConsumption(command, *plan.Capability)
 }
@@ -289,7 +311,7 @@ func (p *providerLoginCallbackPhase) RestoreFeaturePreparation(ctx context.Conte
 }
 
 func (p *providerLoginCallbackPhase) checkExecutionAt(ctx context.Context, work kernel.Work, command identity.Command) error {
-	if p == nil || p.execution == nil || p.member == nil && p.effect == nil && p.oauthEffect == nil || command != p.execution.command {
+	if p == nil || p.execution == nil || p.member == nil && p.effect == nil && p.oauthEffect == nil && p.saml == nil || command != p.execution.command {
 		return identity.ForbiddenError{}
 	}
 	now, err := work.DatabaseTime(ctx)
@@ -338,6 +360,9 @@ func (p *providerLoginCallbackPhase) ApplyFeature(ctx context.Context, work kern
 	}
 	if p.member != nil {
 		return p.applyMemberCallback(ctx, work, command)
+	}
+	if p.saml != nil {
+		return p.applySAMLCallback(ctx, work, command)
 	}
 	if p.execution.jit != nil {
 		if err := p.applyProviderLoginJIT(ctx, work, command); err != nil {
@@ -396,6 +421,8 @@ func (p *providerLoginCallbackPhase) CheckFeatureCommit(ctx context.Context, wor
 	var err error
 	if p.oauth2 != nil {
 		err = p.oauthEffect.CheckCurrent(ctx, work, p, command)
+	} else if p.saml != nil {
+		err = p.saml.effect.CheckCurrent(ctx, work, p, command)
 	} else {
 		err = p.effect.CheckCurrent(ctx, work, p, command)
 	}
@@ -409,6 +436,9 @@ func (p *providerLoginCallbackPhase) CheckFeatureCommit(ctx context.Context, wor
 }
 
 func (p *providerLoginCallbackPhase) RecoverParticipant(ctx context.Context, work kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
+	if p != nil && p.saml != nil {
+		return p.recoverSAMLCallback(ctx, work)
+	}
 	if p != nil && p.oauth2 != nil && p.oauthEffect != nil {
 		return p.oauthEffect.Recover(ctx, work, p)
 	}
@@ -426,6 +456,8 @@ func (p *providerLoginCallbackPhase) ExecuteIssue(ctx context.Context, request s
 	fields := sessionpg.SSOOIDCSigninSessionFields
 	if p.oauth2 != nil {
 		selectCommand, fields = request.SSOOAuth2Command, sessionpg.SSOOAuth2SigninSessionFields
+	} else if p.saml != nil {
+		selectCommand, fields = request.SSOSAMLCommand, sessionpg.SSOSAMLSigninSessionFields
 	}
 	command, record, selected := selectCommand()
 	if !selected || command != p.execution.command || !equalProviderLoginSessionWithFields(record, p.execution.record, fields) ||

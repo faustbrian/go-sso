@@ -31,6 +31,29 @@ func LookupProviderOAuth2LoginCallbackForTest(ctx context.Context, service *Prov
 	return projectProviderLoginCallbackLookupForTest(service.lookupProviderOAuth2LoginCallback(ctx, state))
 }
 
+func LookupProviderSAMLLoginCallbackForTest(ctx context.Context, service *ProviderLoginService, state string) (ProviderLoginCallbackLookupForTest, error) {
+	return projectProviderLoginCallbackLookupForTest(service.lookupProviderSAMLLoginCallback(ctx, state))
+}
+
+// RecordProviderSAMLCallbackTerminalForTest installs a terminal envelope to
+// exercise historical lookup; no callback verification or settlement is implied.
+func RecordProviderSAMLCallbackTerminalForTest(ctx context.Context, service *ProviderLoginService, state string) error {
+	found, err := service.lookupProviderSAMLLoginCallback(ctx, state)
+	if err != nil {
+		return err
+	}
+	defer clear(found.Binding.Proof)
+	wire, err := service.payload.sealProviderLoginProtocolCallbackTerminal(ctx, found, providerProtocolSAML)
+	defer clear(wire)
+	if err != nil {
+		return err
+	}
+	_, err = service.router.pool.Raw().Exec(ctx, `UPDATE sso_providers.login_transactions
+ SET completed_at=$2, binding_envelope=$3 WHERE start_command_id=$1 AND protocol='saml'`,
+		string(found.Row.StartCommandID), found.ObservedAt, wire)
+	return err
+}
+
 func projectProviderLoginCallbackLookupForTest(found providerLoginCallbackLookup, err error) (ProviderLoginCallbackLookupForTest, error) {
 	if err != nil {
 		return ProviderLoginCallbackLookupForTest{}, err

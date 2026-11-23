@@ -113,6 +113,23 @@ as a pair under the installed tenant, organization, provider, and issuer.
 An ID is unique within that scope regardless of its role. Applying the
 migration does not enable a SAML callback, issue sessions, or delete records.
 
+For the opt-in existing-linked-member ACS, also install the kernel's
+`SSOSAMLCallbackPreparationErasureMigrationSource` and the session adapter's
+`SSOSAMLSigninMigrationSource` after their documented predecessors. Compose
+`NewProviderSAMLLoginCompletionService` over the same native SAML start and
+primary session schema. Bind its trusted verifier to the optional SAML
+`POSTResponseProfile` using only the installed entity IDs, ACS, signing
+certificates, and original request facts supplied by the native owner.
+
+Pass the exact configured ACS URL from trusted routing, the original
+frontchannel browser custody, and the two bounded form values to
+`SigninCallback`. The current linked SAML subject and membership are required;
+NameID does not assert a verified email or provision a member. Replay digests,
+the browser/capability consumption, and the session commit together. A fresh
+acknowledged commit returns the normal session and its CSRF synchronizer;
+terminal replay and an unknown commit return neither credential. This native
+selection alone installs no route and does not select unsolicited login or SLO.
+
 ### Static OIDC login custody schema
 
 `LoginTransactionMigrationSource` is an additive schema prerequisite. Install

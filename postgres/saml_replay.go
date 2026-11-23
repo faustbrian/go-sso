@@ -181,6 +181,35 @@ func observeSAMLReplayInRecovery(ctx context.Context, w kernel.RecoveryWork, par
 	}, claim)
 }
 
+// The native negative recovery vote cannot ignore a partial or contradictory
+// replay set. The existing command index bounds this lookup to two members.
+const samlReplayCommandExistsSQL = `SELECT EXISTS(SELECT 1 FROM sso_providers.saml_replay_members
+ WHERE tenant_id=$1 AND callback_command_id=$2)`
+
+func verifySAMLReplayAbsentInRecovery(ctx context.Context, w kernel.RecoveryWork, participant kernel.FeatureExecutionContributor) (kernel.RecoveryStatus, error) {
+	binding, feature, _, err := w.FeatureScope(participant)
+	if err != nil || feature.Operation != kernel.SSOSAMLSigninOperation() {
+		return kernel.RecoveryUnknown, identity.ForbiddenError{}
+	}
+	command, err := base64.RawURLEncoding.Strict().DecodeString(string(binding.CommandID))
+	if err != nil || len(command) != 16 {
+		return kernel.RecoveryUnknown, identity.ForbiddenError{}
+	}
+	rows, err := w.Query(ctx, samlReplayCommandExistsSQL, string(binding.TenantID), command)
+	if err != nil {
+		return kernel.RecoveryUnknown, err
+	}
+	defer rows.Close()
+	var exists bool
+	if !rows.Next() || rows.Scan(&exists) != nil || rows.Next() || rows.Err() != nil {
+		return kernel.RecoveryUnknown, identity.UnavailableError{}
+	}
+	if exists {
+		return kernel.RecoveryUnknown, nil
+	}
+	return kernel.RecoveryNotCommitted, nil
+}
+
 func observeSAMLReplayPair(ctx context.Context, lookup samlReplayLookup, claim samlReplayClaim) (bool, error) {
 	if ctx == nil || lookup == nil {
 		return false, identity.InvalidInputError{Field: "saml_replay"}

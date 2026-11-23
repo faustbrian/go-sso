@@ -70,6 +70,9 @@ func providerLoginCallbackPayloadOperation(input providerLoginPayloadInput) iden
 	if input.Protocol == providerProtocolOAuth2 {
 		return kernel.SSOOAuth2SigninOperation()
 	}
+	if input.Protocol == providerProtocolSAML {
+		return kernel.SSOSAMLSigninOperation()
+	}
 	if input.Link != nil {
 		return kernel.SSOOIDCExplicitLinkCallbackOperation()
 	}
@@ -93,7 +96,7 @@ func providerLoginTokenTime(value time.Time) bool {
 }
 
 func (s *ProviderLoginService) validateProviderLoginTokenMetadata(p providerLoginPreparedTokens) error {
-	if s == nil || p.Input.validate() != nil ||
+	if s == nil || p.Input.Protocol == providerProtocolSAML || p.Input.validate() != nil ||
 		p.Input.Command.TenantID != s.config.TenantID || p.Version != 1 || p.CallbackGeneration == 0 ||
 		p.BindingDigest == ([32]byte{}) || p.BindingWireDigest == ([32]byte{}) || p.StateKey == 0 || p.StateDigest == ([32]byte{}) ||
 		p.Callback.CommandID == p.Input.Command.CommandID ||

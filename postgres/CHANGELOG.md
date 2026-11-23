@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Complete the opt-in SP-initiated SAML callback for an existing linked member.
+  Bind the trusted response verifier to the installed provider and original
+  browser, and reserve the replay pair in the same native Work as the session.
+  Only a fresh acknowledged commit discloses session and CSRF custody.
+
 - Start an explicitly configured SP-initiated SAML sign-in using its original
   ACS browser flow and installed signer. Retain the exact signed redirect
   through restarts and optional key retries without PKCE or renewed expiry.

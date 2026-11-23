@@ -15,7 +15,7 @@ import (
 )
 
 // A pending result is only a candidate for browser and current-authority
-// checks, never permission to reserve state or release the PKCE verifier.
+// checks, never permission to reserve state or release protocol custody.
 // CompletedAt retains terminal correlation for exact callback recovery even
 // after expiry; terminal results deliberately carry no execution proof.
 type providerLoginCallbackLookup struct {
@@ -51,6 +51,13 @@ func (s *ProviderLoginService) lookupProviderOAuth2LoginCallback(ctx context.Con
 	return s.lookupProviderLoginCallbackForProtocol(ctx, state, providerProtocolOAuth2)
 }
 
+func (s *ProviderLoginService) lookupProviderSAMLLoginCallback(ctx context.Context, state string) (providerLoginCallbackLookup, error) {
+	if s == nil || s.saml == nil {
+		return providerLoginCallbackLookup{}, sso.ErrForbidden
+	}
+	return s.lookupProviderLoginCallbackForProtocol(ctx, state, providerProtocolSAML)
+}
+
 // Only the native callback owner chooses the original start discriminator.
 // Neither provider nor issuer supplied by a callback can select this domain.
 func (s *ProviderLoginService) lookupProviderLoginCallbackForProtocol(ctx context.Context, state, discriminator string) (providerLoginCallbackLookup, error) {
@@ -72,7 +79,7 @@ func (s *ProviderLoginService) lookupProviderLoginCallbackForProtocol(ctx contex
 	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != state {
 		return deny()
 	}
-	if s.router == nil || s.router.pool == nil || s.router.pool.Raw() == nil || !s.payload.ready() {
+	if s.router == nil || s.router.pool == nil || s.router.pool.Raw() == nil || !s.payload.readyFor(discriminator) {
 		return deny()
 	}
 	if err := ctx.Err(); err != nil {
@@ -112,7 +119,8 @@ func (s *ProviderLoginService) lookupProviderLoginCallbackForProtocol(ctx contex
 	}
 	var found providerLoginCallbackLookup
 	var providerVersion, generation, mapping, callback, protocol string
-	var stateKey, pkceKey int64
+	var stateKey int64
+	var pkceKey *int64
 	var stateDigest, pkceCommitment, wire []byte
 	defer func() {
 		clear(stateDigest)
@@ -150,9 +158,19 @@ func (s *ProviderLoginService) lookupProviderLoginCallbackForProtocol(ctx contex
 	row.IssuedAt, row.ExpiresAt = row.IssuedAt.UTC(), row.ExpiresAt.UTC()
 	found.ObservedAt = found.ObservedAt.UTC()
 	if row.TenantID != s.config.TenantID || protocol != expectedProtocol ||
-		stateKey < 1 || stateKey > 4294967295 || pkceKey < 1 || pkceKey > 4294967295 ||
-		len(stateDigest) != 32 || len(pkceCommitment) != 32 || found.ObservedAt.Before(row.IssuedAt) {
+		stateKey < 1 || stateKey > 4294967295 || len(stateDigest) != 32 || found.ObservedAt.Before(row.IssuedAt) {
 		return deny()
+	}
+	var verifierKey uint32
+	if discriminator == providerProtocolSAML {
+		if pkceKey != nil || pkceCommitment != nil {
+			return deny()
+		}
+	} else {
+		if pkceKey == nil || *pkceKey < 1 || *pkceKey > 4294967295 || len(pkceCommitment) != 32 {
+			return deny()
+		}
+		verifierKey = uint32(*pkceKey)
 	}
 	// SQL retains the explicit protocol; published OIDC envelope identities
 	// retain their original omitted discriminator, while OAuth is explicit.
@@ -171,18 +189,17 @@ func (s *ProviderLoginService) lookupProviderLoginCallbackForProtocol(ctx contex
 	var stored providerLoginStoredBinding
 	if found.CompletedAt == nil {
 		stored, err = s.payload.openCommittedBinding(ctx, *row, wire)
-	} else if discriminator == providerProtocolOAuth2 {
-		stored, err = s.payload.openProviderOAuth2LoginCallbackTerminal(ctx, *row, wire)
 	} else {
-		stored, err = s.payload.openProviderLoginCallbackTerminal(ctx, *row, wire)
+		stored, err = s.payload.openProviderLoginProtocolCallbackTerminal(ctx, *row, wire, discriminator)
 	}
 	if err != nil {
 		return providerLoginCallbackLookup{}, providerError(ctx, err)
 	}
 	metadata := stored.Metadata
-	if metadata.StateKey != uint32(stateKey) || metadata.PKCEKey != uint32(pkceKey) ||
+	if metadata.StateKey != uint32(stateKey) || metadata.PKCEKey != verifierKey ||
 		string(metadata.CallbackCommand) != callback || !hmac.Equal([]byte(metadata.Public.State), []byte(state)) ||
-		!hmac.Equal(metadata.StateDigest[:], stateDigest) || !hmac.Equal(metadata.PKCECommitment[:], pkceCommitment) {
+		!hmac.Equal(metadata.StateDigest[:], stateDigest) ||
+		discriminator != providerProtocolSAML && !hmac.Equal(metadata.PKCECommitment[:], pkceCommitment) {
 		clear(stored.Proof)
 		return deny()
 	}
