@@ -165,6 +165,50 @@ func TestNativeDirectorySyncRecoversOriginalChildAfterLostAcknowledgment(t *test
 	}
 }
 
+func TestNativeDirectorySyncAppliesBrowserGenerationWithoutOrdinal(t *testing.T) {
+	fixture := newDirectoryGroupApplyFixture(t)
+	ctx := fixture.provider.f.ctx
+	first := fixture.start(t)
+	stopped, err := fixture.sync.Cancel(ctx, ssopg.DirectorySyncCancelRequest{GenerationID: first.ID, ExpectedVersion: first.Version,
+		Key: directoryGenerationKey(t, "directory-group-stop-first")})
+	if err != nil || stopped.Generation.State != ssopg.DirectorySyncCanceled {
+		t.Fatal("stop the first real generation", err)
+	}
+	second, err := fixture.sync.Start(ctx, ssopg.DirectorySyncStartRequest{ProviderID: first.Provider, ProviderVersion: first.ProviderVersion,
+		MappingVersion: first.MappingVersion, Mode: ssopg.DirectorySyncApply, Key: directoryGenerationKey(t, "directory-group-second")})
+	if err != nil || second.Generation.Number != first.Number+1 {
+		t.Fatal("start a distinct observed ordinal", err)
+	}
+	config := fixture.workerConfig(t)
+	policy := config.ApplyAuthorization
+	var observations int
+	config.ApplyAuthorization = directoryGroupPolicy(func(ctx context.Context, d authorization.DecisionContext, epoch uint64) (ssopg.ProviderUpdateAuthorizationEvidence, error) {
+		observations++
+		return policy.ObserveDirectoryGroupAuthorization(ctx, d, epoch)
+	})
+	worker, err := fixture.sync.WithGroupEdges(config)
+	if err != nil {
+		t.Fatal("select native directory worker", err)
+	}
+	original := fixture.batch(t, second.Generation, sso.DirectoryMembershipAdd)
+	request := ssopg.DirectoryGroupApplyRequest{GenerationID: second.Generation.ID, ProviderID: second.Generation.Provider, MappingVersion: second.Generation.MappingVersion,
+		PredecessorCheckpoint: second.Generation.Checkpoint, Deltas: original.Deltas}
+	foreign := request
+	foreign.MappingVersion++
+	if out, err := worker.ApplyGeneration(ctx, foreign); !errors.Is(err, sso.ErrForbidden) || len(out.ChildOutcomes) != 0 || out.Checkpoint != ([32]byte{}) {
+		t.Fatal("mismatched mapping must not reuse the opaque generation", err)
+	}
+	observations = 0
+	applied, err := worker.ApplyGeneration(ctx, request)
+	if expected, nextErr := applied.NextCheckpoint(original); err != nil || nextErr != nil || expected == original.PredecessorCheckpoint || observations != 1 {
+		t.Fatal("opaque generation did not bind the real second ordinal", err, nextErr)
+	}
+	replay, err := worker.ApplyGeneration(ctx, request)
+	if err != nil || len(replay.ChildOutcomes) != 1 || replay.ChildOutcomes[0].Binding != applied.ChildOutcomes[0].Binding || replay.Checkpoint != applied.Checkpoint || observations != 2 {
+		t.Fatal("opaque generation did not recover the same original child", err)
+	}
+}
+
 func TestNativeDirectorySyncGroupEdgesCannotApplyDryRun(t *testing.T) {
 	fixture := newDirectoryGroupApplyFixture(t)
 	ctx := fixture.provider.f.ctx

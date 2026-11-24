@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Apply a mapped Group batch using the opaque generation ID returned by
+  Start. The executor resolves the stored sequence number on the same
+  primary while retaining the original provider, mapping and predecessor.
+
 - Select direct Group Apply independently of human administration. The
   configured SCIM service account, generation and original Work fences
   retain authority; the existing `WithGroupEdges` path remains supported.

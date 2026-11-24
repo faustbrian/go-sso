@@ -166,11 +166,73 @@ func (DirectoryGroupSyncService) MarshalJSON() ([]byte, error) {
 	return nil, sso.ErrSensitiveSerialization
 }
 
+// DirectoryGroupApplyRequest identifies the same original bounded batch using
+// its opaque generation ID rather than the stored sequence number. Keep the
+// provider, mapping version, predecessor and original child IDs for retries.
+// Do not mutate Deltas during ApplyGeneration.
+type DirectoryGroupApplyRequest struct {
+	GenerationID          identity.CommandID
+	ProviderID            sso.ProviderID
+	MappingVersion        uint64
+	PredecessorCheckpoint [32]byte
+	Deltas                []sso.DirectoryDelta
+}
+
+func (DirectoryGroupApplyRequest) Format(s fmt.State, _ rune) {
+	_, _ = fmt.Fprint(s, "sso.postgres.DirectoryGroupApplyRequest(redacted)")
+}
+
+func (DirectoryGroupApplyRequest) MarshalJSON() ([]byte, error) {
+	return nil, sso.ErrSensitiveSerialization
+}
+
+// ApplyGeneration binds the stored immutable sequence number for an opaque
+// generation ID. Lookup alone does not authorize Apply. The original executor
+// still checks current source, provider, generation, epoch and Work fences.
+// No generation number or private snapshot is returned on lookup failure.
+func (s *DirectoryGroupSyncService) ApplyGeneration(ctx context.Context, r DirectoryGroupApplyRequest) (out sso.DirectoryApplyResult, err error) {
+	defer func() {
+		if recover() != nil {
+			out, err = sso.DirectoryApplyResult{}, sso.ErrUnavailable
+		}
+	}()
+	if s == nil || s.pool == nil || ctx == nil || !providerID(string(r.ProviderID)) || r.MappingVersion == 0 ||
+		r.PredecessorCheckpoint == ([32]byte{}) || len(r.Deltas) == 0 {
+		return sso.DirectoryApplyResult{}, sso.ErrInvalidInput
+	}
+	if _, err := identity.ParseCommandID(string(r.GenerationID)); err != nil {
+		return sso.DirectoryApplyResult{}, sso.ErrInvalidInput
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.scope.MaximumDuration)
+	defer cancel()
+	batch := sso.DirectoryDeltaBatch{
+		TenantID: s.scope.TenantID, OrganizationID: s.scope.OrganizationID, ConnectionID: s.scope.ConnectionID,
+		ProviderID: r.ProviderID, MappingVersion: r.MappingVersion,
+		PredecessorCheckpoint: r.PredecessorCheckpoint, Deltas: r.Deltas,
+	}
+	// Source and service-account authorization must precede generation
+	// observation. Carry that same evidence into Work without renewing it.
+	resolved, err := s.resolveBatch(ctx, r.GenerationID, batch)
+	if err != nil {
+		return out, err
+	}
+	stored := resolved.stored.current
+	if stored.Provider != r.ProviderID || stored.MappingVersion != r.MappingVersion {
+		return sso.DirectoryApplyResult{}, sso.ErrForbidden
+	}
+	batch.Generation = stored.Number
+	return s.apply(ctx, r.GenerationID, batch, &resolved)
+}
+
 // Apply executes a bounded, explicitly mapped batch in its original order.
 // Retry unresolved work with the same generation, batch and command IDs.
 // An observed prefix is not a settled cursor. After cancellation, the exact
 // held batch may be reconciled but no further grant writes are admitted.
-func (s *DirectoryGroupSyncService) Apply(ctx context.Context, generation identity.CommandID, batch sso.DirectoryDeltaBatch) (out sso.DirectoryApplyResult, err error) {
+func (s *DirectoryGroupSyncService) Apply(ctx context.Context, generation identity.CommandID, batch sso.DirectoryDeltaBatch) (sso.DirectoryApplyResult, error) {
+	return s.apply(ctx, generation, batch, nil)
+}
+
+func (s *DirectoryGroupSyncService) apply(ctx context.Context, generation identity.CommandID, batch sso.DirectoryDeltaBatch, resolved *directoryGroupResolution) (out sso.DirectoryApplyResult, err error) {
 	defer func() {
 		if recover() != nil {
 			out, err = sso.DirectoryApplyResult{}, sso.ErrUnavailable
@@ -187,7 +249,7 @@ func (s *DirectoryGroupSyncService) Apply(ctx context.Context, generation identi
 	}
 	ctx, cancel := context.WithTimeout(ctx, s.scope.MaximumDuration)
 	defer cancel()
-	executor := &nativeDirectoryEdgeExecutor{service: s, generation: generation}
+	executor := &nativeDirectoryEdgeExecutor{service: s, generation: generation, resolved: resolved}
 	reconciler, err := scimorganization.NewDirectoryReconciler(s.config.Mapping, executor)
 	if err != nil {
 		return out, sso.ErrInvalidInput
@@ -238,6 +300,7 @@ func (p *directoryGroupChild) mayDisclose() bool {
 type nativeDirectoryEdgeExecutor struct {
 	service       *DirectoryGroupSyncService
 	generation    identity.CommandID
+	resolved      *directoryGroupResolution
 	child         *directoryGroupChild
 	stoppedPrefix bool
 }
@@ -246,7 +309,7 @@ func (e *nativeDirectoryEdgeExecutor) ExecuteMappedDirectoryMemberships(ctx cont
 	if len(mapped.Memberships) == 0 || len(mapped.Memberships) != len(mapped.Source.Deltas) {
 		return nil, sso.ErrInvalidInput
 	}
-	batch, err := e.service.prepareBatch(ctx, e.generation, mapped.Source)
+	batch, err := e.service.prepareBatch(ctx, e.generation, mapped.Source, e.resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -313,19 +376,35 @@ type directoryEdgeAdmission struct {
 	validUntil time.Time
 }
 
-func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch) (*directoryGroupChild, error) {
+type directoryGroupResolution struct {
+	stored    storedDirectoryGeneration
+	admission directoryEdgeAdmission
+}
+
+func (s *DirectoryGroupSyncService) resolveBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch) (directoryGroupResolution, error) {
 	admitted, err := s.observe(ctx, id, batch)
 	if err != nil {
-		return nil, err
+		return directoryGroupResolution{}, err
 	}
 	stored, err := readDirectoryGeneration(ctx, s.pool, id, s.scope.TenantID, string(s.scope.OrganizationID), s.scope.ConnectionID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, sso.ErrForbidden
+		return directoryGroupResolution{}, sso.ErrForbidden
 	}
 	if err != nil {
-		return nil, providerError(ctx, err)
+		return directoryGroupResolution{}, providerError(ctx, err)
 	}
-	current := stored.current
+	return directoryGroupResolution{stored: stored, admission: admitted}, nil
+}
+
+func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch, resolved *directoryGroupResolution) (*directoryGroupChild, error) {
+	if resolved == nil {
+		current, err := s.resolveBatch(ctx, id, batch)
+		if err != nil {
+			return nil, err
+		}
+		resolved = &current
+	}
+	current := resolved.stored.current
 	if current.Mode != DirectorySyncApply || current.Provider != batch.ProviderID || current.Number != batch.Generation ||
 		current.MappingVersion != batch.MappingVersion {
 		return nil, sso.ErrForbidden
@@ -345,7 +424,7 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 	if err != nil {
 		return nil, err
 	}
-	child := &directoryGroupChild{service: s, generation: current, batch: batch, commitment: commitment, admission: admitted}
+	child := &directoryGroupChild{service: s, generation: current, batch: batch, commitment: commitment, admission: resolved.admission}
 	if current.State == DirectorySyncReconciling || current.State == DirectorySyncCanceling {
 		var pending bool
 		err := s.pool.Raw().QueryRow(ctx, directoryPendingGroupBatchSQL, child.generationArgs()...).Scan(&pending)

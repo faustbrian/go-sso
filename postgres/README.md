@@ -62,8 +62,11 @@ and retained epoch. Supply the synchronization policy's earliest absolute
 expiry; it remains bounded by the original source observation, including
 at final commit and cursor settlement. Install the actual SCIM source/Group, organization
 team/source-grant, identity Work, audit and outbox schemas first.
-`Apply` takes the exact generation ID and bounded ordered batch with the
-original child IDs and predecessor. It verifies each Group/User projection
+`ApplyGeneration` accepts Start's opaque ID, provider and mapping version,
+the predecessor checkpoint and the original ordered children. The native
+owner resolves the stored sequence number; no external reader must guess it.
+`Apply` remains available for callers that already hold the complete batch
+with its sequence number. Both verify each Group/User projection
 and writes only the corresponding team source grant. It stops on an
 unresolved child and can return confirmed prefix receipts without a new
 checkpoint. Retry the same input to recover; do not allocate a new child ID.
