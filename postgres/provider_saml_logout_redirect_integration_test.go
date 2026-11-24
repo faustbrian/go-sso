@@ -39,15 +39,40 @@ import (
 // the exact session participant's request is signed before disclosure and
 // retained once for response correlation. Failure cannot undo local logout.
 func TestNativeSAMLLogoutPreservesOneSignedProviderRequest(t *testing.T) {
-	t.Run("normal", func(t *testing.T) { assertNativeSAMLLogoutProviderRequest(t, false) })
-	t.Run("first reservation unavailable", func(t *testing.T) { assertNativeSAMLLogoutProviderRequest(t, true) })
+	t.Run("normal", func(t *testing.T) { assertNativeSAMLLogoutProviderRequest(t, false, saml.LogoutPOSTStatus{}) })
+	t.Run("first reservation unavailable", func(t *testing.T) { assertNativeSAMLLogoutProviderRequest(t, true, saml.LogoutPOSTStatus{}) })
 }
 
-func assertNativeSAMLLogoutProviderRequest(t *testing.T, failReservation bool) {
+// Core §§3.2.2.2, 3.7.2; Profiles §4.4.4.2; Bindings §3.5.4: only the
+// signed original InResponseTo chooses custody; receipt processing cannot
+// select another local session or redo its already committed revocation.
+func TestNativeSAMLLogoutSettlesSignedProviderResponse(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		assertNativeSAMLLogoutProviderRequest(t, false, saml.LogoutPOSTStatus{Code: saml.LogoutStatusSuccess})
+	})
+	t.Run("signed provider failure", func(t *testing.T) {
+		assertNativeSAMLLogoutProviderRequest(t, false, saml.LogoutPOSTStatus{Code: saml.LogoutStatusResponder, Subcode: saml.LogoutStatusRequestDenied})
+	})
+	t.Run("signed partial logout", func(t *testing.T) {
+		assertNativeSAMLLogoutProviderRequest(t, false, saml.LogoutPOSTStatus{Code: saml.LogoutStatusSuccess, Subcode: saml.LogoutStatusPartialLogout})
+	})
+	t.Run("lost commit acknowledgement", func(t *testing.T) {
+		assertNativeSAMLLogoutProviderRequest(t, false, saml.LogoutPOSTStatus{Code: saml.LogoutStatusSuccess}, true)
+	})
+}
+
+func assertNativeSAMLLogoutProviderRequest(t *testing.T, failReservation bool, responseStatus saml.LogoutPOSTStatus, loseCommit ...bool) {
 	t.Helper()
 	key, bundle := nativeSAMLLogoutSigningBundle(t)
 	defer clear(bundle)
-	x := newNativeSAMLCallbackFixtureWithStart(t, newSAMLStartFixtureWithBundle(t, bundle))
+	var idpKey *rsa.PrivateKey
+	var idpCertificates [][]byte
+	if responseStatus.Code != "" {
+		var cert []byte
+		idpKey, cert = nativeSAMLLogoutTestCertificate(t)
+		idpCertificates = [][]byte{cert}
+	}
+	x := newNativeSAMLCallbackFixtureWithStart(t, newSAMLStartFixtureWithBundle(t, bundle, idpCertificates...))
 	f, loginConfig := x.start.start.enable.f, x.start.start.config
 	ctx := f.ctx
 	revocation, err := (sessionpg.RevokeOneMigrationSource{Base: sessionpg.RevocationMigrationSource{
@@ -61,6 +86,9 @@ func assertNativeSAMLLogoutProviderRequest(t *testing.T, failReservation bool) {
 		Version: 433, ValidationVersion: 434, PreviousConstraint: "session_revocations_purpose_check"})
 	installSAMLIDPStorage(t, f, ssopg.SAMLLogoutSubjectMigrationSource{Version: 435})
 	installSAMLIDPStorage(t, f, ssopg.SAMLLogoutRequestMigrationSource{Version: 436})
+	if idpKey != nil {
+		installSAMLIDPStorage(t, f, ssopg.SAMLLogoutResponseMigrationSource{Version: 437})
+	}
 	custody, err := ssopg.NewSAMLLogoutSubjectCustody(ssopg.SAMLLogoutSubjectCustodyConfig{
 		KeyReference: loginConfig.KeyReference, CurrentMatchKey: 1, MatchKeys: map[uint32][32]byte{1: {0xa2}},
 	})
@@ -129,16 +157,18 @@ func assertNativeSAMLLogoutProviderRequest(t *testing.T, failReservation bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	local, err := ssopg.NewProviderSAMLLogoutService(login, ssopg.ProviderSAMLLogoutConfig{Session: validation, Admission: selection,
-		CSRFKeys: []session.CSRFKey{x.csrf}, FinalRedirectAllowlist: []string{nativeLogoutFinalRedirect}})
+	logoutConfig := ssopg.ProviderSAMLLogoutConfig{Session: validation, Admission: selection,
+		CSRFKeys: []session.CSRFKey{x.csrf}, FinalRedirectAllowlist: []string{nativeLogoutFinalRedirect}}
+	local, err := ssopg.NewProviderSAMLLogoutService(login, logoutConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	const endpoint = "https://identity-provider.example.test/slo?x=retained"
 	profile := x.start.profiles[0]
-	service, err := local.WithProviderRedirect(custody, []ssopg.ProviderSAMLLogoutRedirectProfile{
+	profiles := []ssopg.ProviderSAMLLogoutRedirectProfile{
 		{Provider: profile, IdentityProviderEntityID: nativeSAMLCallbackIssuer, Endpoint: endpoint},
-	})
+	}
+	service, err := local.WithProviderRedirect(custody, profiles)
 	if err != nil {
 		t.Fatal("select installed provider's exact SLO endpoint", err)
 	}
@@ -193,6 +223,64 @@ func assertNativeSAMLLogoutProviderRequest(t *testing.T, failReservation bool) {
 	if err != nil || !ok || original.String() != redirect.String() || repeat.LocalRevocation != got.LocalRevocation {
 		t.Fatal("exact retry regenerated or lost the original wire and revocation", err)
 	}
+	if idpKey != nil {
+		alternative := func(f *orgFixture, at clock.Clock) *ssopg.ProviderSAMLLogoutRedirectService {
+			router, err := ssopg.NewProviderRouter(f.pool, ssopg.ProviderRouterConfig{Clock: at, Envelope: loginConfig.Envelope,
+				MaximumDuration: 3 * time.Second, Lifetime: 8 * time.Second, PolicyVersion: 1, MaximumProviders: 4})
+			if err != nil {
+				t.Fatal(err)
+			}
+			router, err = router.WithProtocolRegistry()
+			if err != nil {
+				t.Fatal(err)
+			}
+			router, err = router.WithSAMLRouteValidation(saml.ValidateSPSigningCredential)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alternativeLogin, err := ssopg.NewProviderLoginServiceWithSAML(router, loginConfig, x.start.profiles, x.start.sign)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alternativeLocal, err := ssopg.NewProviderSAMLLogoutService(alternativeLogin, logoutConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alternativeService, err := alternativeLocal.WithProviderRedirect(custody, profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return alternativeService
+		}
+		if len(loseCommit) > 0 && loseCommit[0] {
+			lostPool, fault := providerLossPool(t, f, "INSERT INTO sso_providers.saml_logout_responses")
+			lossy := *f
+			lossy.pool = lostPool
+			response := nativeSAMLLogoutResponseInput(t, profile, idpKey, responseStatus, "_saml-lost-receipt", wireID, time.Now())
+			unknown, err := alternative(&lossy, clock.System{}).SettleResponse(ctx, response)
+			if _, exposed := unknown.FinalRedirect(); !fault.seen.Load() || !fault.lost.Load() || exposed || !errors.Is(err, sso.ErrUnavailable) ||
+				unknown.Outcome != ssopg.SAMLLogoutResponseUnknown || unknown.LocalRevocation != got.LocalRevocation || unknown.Status != (saml.LogoutPOSTStatus{}) {
+				t.Fatal("losing the provider acknowledgement lost the local result or claimed provider success", err)
+			}
+			recovered, err := service.SettleResponse(ctx, response)
+			if _, exposed := recovered.FinalRedirect(); exposed || err != nil || recovered.Outcome != ssopg.SAMLLogoutResponseReplayed ||
+				recovered.LocalRevocation != got.LocalRevocation || recovered.Status != responseStatus {
+				t.Fatal("exact re-entry did not recover the durable result without exposing continuation", err)
+			}
+		} else {
+			expiry := nativeSAMLLogoutFixtureClock{now: time.Now().UTC().Add(6 * time.Minute)}
+			response := nativeSAMLLogoutResponseInput(t, profile, idpKey, responseStatus, "_saml-after-cutoff", wireID, expiry.Now())
+			expired, err := alternative(f, expiry).SettleResponse(ctx, response)
+			if _, exposed := expired.FinalRedirect(); exposed || err != nil || expired.Outcome != ssopg.SAMLLogoutResponseTimeout ||
+				expired.LocalRevocation != got.LocalRevocation || expired.Status != (saml.LogoutPOSTStatus{}) {
+				t.Fatal("expired original request disclosed or lost the wrong evidence", err)
+			}
+			assertNativeSAMLLogoutResponse(t, f, service, profile, idpKey, responseStatus, wireID, got.LocalRevocation)
+		}
+		if current, err := reader.Get(ctx, nativeProviderLogoutGetRequest(t, record.TenantID, bearer)); err != nil || current.Authenticated {
+			t.Fatal("provider settlement restored the revoked original cookie", err)
+		}
+	}
 	if _, err := f.pool.Raw().Exec(ctx, `UPDATE sso_providers.providers SET enabled=false,enablement_proof=NULL,enablement_credential_generation=NULL
  WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`, record.TenantID, profile.OrganizationID, profile.ProviderID); err != nil {
 		t.Fatal("disable selected installed provider", err)
@@ -204,17 +292,128 @@ func assertNativeSAMLLogoutProviderRequest(t *testing.T, failReservation bool) {
 	}
 }
 
+type nativeSAMLLogoutFixtureClock struct{ now time.Time }
+
+func (c nativeSAMLLogoutFixtureClock) Now() time.Time { return c.now }
+
+func nativeSAMLLogoutResponseInput(t *testing.T, profile ssopg.StaticSAMLLoginProfile, key *rsa.PrivateKey, status saml.LogoutPOSTStatus,
+	responseID, correlation string, now time.Time,
+) ssopg.ProviderSAMLLogoutResponseRequest {
+	t.Helper()
+	destination := profile.TrustedOrigin + "/saml2/" + string(profile.ProviderID) + "/slo"
+	return ssopg.ProviderSAMLLogoutResponseRequest{ProviderID: profile.ProviderID, SAMLResponse: []string{
+		nativeSAMLLogoutResponseWire(t, key, nativeSAMLCallbackIssuer, destination, responseID, correlation, now.UTC(), status),
+	}}
+}
+
+func assertNativeSAMLLogoutResponse(t *testing.T, f *orgFixture, service *ssopg.ProviderSAMLLogoutRedirectService,
+	profile ssopg.StaticSAMLLoginProfile, key *rsa.PrivateKey, status saml.LogoutPOSTStatus, requestID string, local saml.LocalRevocation,
+) {
+	t.Helper()
+	ctx := f.ctx
+	wire := func(responseID, correlation string, signer *rsa.PrivateKey) ssopg.ProviderSAMLLogoutResponseRequest {
+		return nativeSAMLLogoutResponseInput(t, profile, signer, status, responseID, correlation, time.Now())
+	}
+	response := wire("_signed-saml-logout-response", requestID, key)
+	badSigner, _ := nativeSAMLLogoutTestCertificate(t)
+	for name, input := range map[string]ssopg.ProviderSAMLLogoutResponseRequest{
+		"duplicate form members": {ProviderID: profile.ProviderID, SAMLResponse: []string{response.SAMLResponse[0], response.SAMLResponse[0]}},
+		"different signing key":  wire("_unauthenticated-saml-logout", requestID, badSigner),
+		"other correlation":      wire("_unmatched-saml-logout", "_"+string(commandID(t)), key),
+	} {
+		result, err := service.SettleResponse(ctx, input)
+		if !errors.Is(err, sso.ErrInvalidInput) || result.LocalRevocation != (saml.LocalRevocation{}) {
+			t.Fatalf("%s returned authority without an authenticated original request: %v", name, err)
+		}
+	}
+
+	if _, err := f.pool.Raw().Exec(ctx, `ALTER TABLE sso_providers.saml_logout_responses ADD CONSTRAINT fixture_reject_response CHECK (false) NOT VALID`); err != nil {
+		t.Fatal("inject isolated settlement failure", err)
+	}
+	failed, err := service.SettleResponse(ctx, response)
+	if !errors.Is(err, sso.ErrUnavailable) || failed.Outcome != ssopg.SAMLLogoutResponseUnavailable || failed.LocalRevocation != local {
+		t.Fatal("storage failure did not retain the already-committed original session outcome", err)
+	}
+	if _, ok := failed.FinalRedirect(); ok {
+		t.Fatal("uncommitted provider result disclosed final redirect")
+	}
+	if _, err := f.pool.Raw().Exec(ctx, `ALTER TABLE sso_providers.saml_logout_responses DROP CONSTRAINT fixture_reject_response`); err != nil {
+		t.Fatal("restore settlement writer", err)
+	}
+
+	type settlement struct {
+		out     ssopg.ProviderSAMLLogoutResponseResult
+		err     error
+		elapsed time.Duration
+	}
+	results := make(chan settlement, 2)
+	for range 2 {
+		go func() {
+			started := time.Now()
+			out, err := service.SettleResponse(ctx, response)
+			results <- settlement{out, err, time.Since(started)}
+		}()
+	}
+	var fresh, replay int
+	for range 2 {
+		result := <-results
+		if result.err != nil || result.out.LocalRevocation != local || result.out.Status != status {
+			t.Fatal("settlement lost authenticated provider status or original local outcome", result.err)
+		}
+		t.Logf("SettleResponse outcome=%s elapsed=%s; paired callers, one installed provider, real PostgreSQL; includes routing, XML verification, pool and transaction; excludes fixture setup and HTTP", result.out.Outcome, result.elapsed)
+		target, redirected := result.out.FinalRedirect()
+		switch result.out.Outcome {
+		case ssopg.SAMLLogoutResponseReplayed:
+			replay++
+			if redirected {
+				t.Fatal("replay redisclosed the continuation")
+			}
+		case ssopg.SAMLLogoutResponseSettled, ssopg.SAMLLogoutResponseProviderFailure:
+			fresh++
+			success := status.Code == saml.LogoutStatusSuccess && status.Subcode == ""
+			if (result.out.Outcome == ssopg.SAMLLogoutResponseSettled) != success || redirected != success ||
+				redirected && target.String() != nativeLogoutFinalRedirect {
+				t.Fatal("only one successful fresh receipt may produce the stored continuation")
+			}
+		default:
+			t.Fatalf("unexpected settlement outcome: %s", result.out.Outcome)
+		}
+	}
+	if fresh != 1 || replay != 1 {
+		t.Fatalf("concurrent signed response consumed %d times and replayed %d times", fresh, replay)
+	}
+	different, err := service.SettleResponse(ctx, wire("_another-signed-response", requestID, key))
+	if _, exposed := different.FinalRedirect(); exposed || !errors.Is(err, sso.ErrConflict) ||
+		different.Outcome != ssopg.SAMLLogoutResponseConflict || different.LocalRevocation != local || different.Status != (saml.LogoutPOSTStatus{}) {
+		t.Fatal("different signed message rewrote the settled request", err)
+	}
+	var rows int
+	if err := f.pool.Raw().QueryRow(ctx, `SELECT count(*) FROM sso_providers.saml_logout_responses WHERE request_id=$1`, requestID).Scan(&rows); err != nil || rows != 1 {
+		t.Fatal("one terminal row is required for an original request", err)
+	}
+}
+
 func nativeSAMLLogoutSigningBundle(t *testing.T) (*rsa.PublicKey, []byte) {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
+	key, cert := nativeSAMLLogoutTestCertificate(t)
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer clear(der)
+	bundle, err := saml.EncodeSPSigningCredential(t.Context(), der, cert, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &key.PublicKey, bundle
+}
+
+func nativeSAMLLogoutTestCertificate(t *testing.T) (*rsa.PrivateKey, []byte) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
 	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
 		KeyUsage: x509.KeyUsageDigitalSignature}
@@ -222,11 +421,7 @@ func nativeSAMLLogoutSigningBundle(t *testing.T) (*rsa.PublicKey, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := saml.EncodeSPSigningCredential(t.Context(), der, cert, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &key.PublicKey, bundle
+	return key, cert
 }
 
 func assertNativeSAMLLogoutWire(t *testing.T, got url.URL, key *rsa.PublicKey, id, endpoint, index string) {

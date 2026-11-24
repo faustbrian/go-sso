@@ -197,6 +197,33 @@ bytes and expiry. Sessions without an original signed SessionIndex stay
 local. This profile does not send RelayState or install an HTTP route; the
 stored request ID is the correlation key for later signed `InResponseTo`.
 
+### Native SAML logout response settlement
+
+Apply `SAMLLogoutResponseMigrationSource` after the outbound request migration,
+before calling `SettleResponse` on the selected `WithProviderRedirect` service.
+The migration creates an empty receipt table and two unique indexes, with a
+bounded lock on the request table. It does not rewrite or backfill any retained
+requests. Older outbound and local-only callers do not read the receipt table;
+removing response access leaves existing receipts readable on re-enablement.
+
+Pass the decoded response form values and the trusted route's provider ID in
+`ProviderSAMLLogoutResponseRequest`. Leave duplicate handling to the verifier
+by preserving all values. This is the response-only no-RelayState profile, not
+an HTTP handler or an inbound LogoutRequest implementation. Verification uses
+the selected installed certificates and exact `/saml2/{provider_id}/slo`.
+Signed response age is bounded to five minutes, future skew to thirty seconds,
+and both remain subordinate to the original request and trust cutoffs.
+
+Read `LocalRevocation` even on a provider or database error. Only an original
+authenticated `InResponseTo` returns that projection; it always describes the
+session already revoked by logout start. One new acknowledged complete-success
+response can disclose `FinalRedirect`. Partial and other signed provider
+failures settle without redirect. Exact re-entry within the original window
+can recover a lost provider acknowledgement as `Replayed`, without another
+write or another redirect. A different response cannot replace the receipt.
+Pass the response to the exact provider service only after transport admission;
+HTTP origin/form policy and callback rate admission are consumer-owned.
+
 ### Static OIDC login custody schema
 
 `LoginTransactionMigrationSource` is an additive schema prerequisite. Install

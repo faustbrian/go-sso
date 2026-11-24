@@ -70,12 +70,12 @@ func minSAMLLogoutTime(a, b time.Time) time.Time {
 const selectSAMLLogoutRequestSQL = `SELECT organization_id,provider_id,request_id,issued_at,expires_at,request_envelope
  FROM sso_providers.saml_logout_requests WHERE tenant_id=$1 AND start_command_id=$2`
 
-func (s *ProviderLoginService) readSAMLLogoutRequest(ctx context.Context, binding identity.CommandBinding) (samlLogoutRequestRow, samlLogoutRequestBinding, bool, error) {
-	command, err := base64.RawURLEncoding.Strict().DecodeString(string(binding.CommandID))
+func (s *ProviderLoginService) readSAMLLogoutRequest(ctx context.Context, tenant identity.TenantID, start identity.CommandID) (samlLogoutRequestRow, samlLogoutRequestBinding, bool, error) {
+	command, err := base64.RawURLEncoding.Strict().DecodeString(string(start))
 	if err != nil || len(command) != 16 {
 		return samlLogoutRequestRow{}, samlLogoutRequestBinding{}, false, identity.ForbiddenError{}
 	}
-	row := samlLogoutRequestRow{Tenant: binding.TenantID, Command: binding.CommandID}
+	row := samlLogoutRequestRow{Tenant: tenant, Command: start}
 	var id string
 	var wire []byte
 	err = s.router.pool.Raw().QueryRow(ctx, selectSAMLLogoutRequestSQL, string(row.Tenant), command).Scan(

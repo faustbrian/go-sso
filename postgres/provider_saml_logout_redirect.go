@@ -158,7 +158,7 @@ func (s *ProviderSAMLLogoutRedirectService) reserveProviderRedirect(ctx context.
 		FinalRedirect: p.request.FinalRedirect, SessionVersion: out.LocalRevocation.Version,
 		ProviderVersion: current.ProviderVersion, CredentialGeneration: current.CredentialGeneration,
 	}
-	row, stored, exists, err := login.readSAMLLogoutRequest(ctx, binding)
+	row, stored, exists, err := login.readSAMLLogoutRequest(ctx, binding.TenantID, binding.CommandID)
 	if err != nil {
 		return "", err
 	}
@@ -221,7 +221,7 @@ func (p *providerSAMLLogoutStartPhase) signAndStoreSAMLLogoutRequest(ctx context
 	}
 	// Competing retries can have generated another PSS signature; only the
 	// bytes from the one durable winner may ever leave this service.
-	row, payload, found, err := login.readSAMLLogoutRequest(ctx, binding)
+	row, payload, found, err := login.readSAMLLogoutRequest(ctx, binding.TenantID, binding.CommandID)
 	if err == nil && !found {
 		err = identity.UnavailableError{}
 	}
@@ -229,23 +229,29 @@ func (p *providerSAMLLogoutStartPhase) signAndStoreSAMLLogoutRequest(ctx context
 }
 
 func (r *ProviderRouter) loadExactSAMLLogoutRoute(ctx context.Context, tenant identity.TenantID, profile ProviderSAMLLogoutRedirectProfile) (sso.DomainRouteBinding, error) {
+	route, _, err := r.loadExactSAMLLogoutProfile(ctx, tenant, profile)
+	return route, err
+}
+
+func (r *ProviderRouter) loadExactSAMLLogoutProfile(ctx context.Context, tenant identity.TenantID, profile ProviderSAMLLogoutRedirectProfile) (sso.DomainRouteBinding, providerSAMLLoginProfile, error) {
 	configured := profile.Provider
 	request, err := sso.NewDomainRouteRequest(tenant, configured.Domain, configured.ProviderID)
 	if err != nil {
-		return sso.DomainRouteBinding{}, err
+		return sso.DomainRouteBinding{}, providerSAMLLoginProfile{}, err
 	}
 	route, err := r.RouteSAML(ctx, request)
 	if err != nil {
-		return sso.DomainRouteBinding{}, err
+		return sso.DomainRouteBinding{}, providerSAMLLoginProfile{}, err
 	}
 	selected, err := r.readProviderSAMLLoginProfile(ctx, route, configured)
 	if err != nil {
-		return sso.DomainRouteBinding{}, err
+		return sso.DomainRouteBinding{}, providerSAMLLoginProfile{}, err
 	}
 	if selected.configuration.EntityID != profile.IdentityProviderEntityID {
-		return sso.DomainRouteBinding{}, identity.ForbiddenError{}
+		return sso.DomainRouteBinding{}, providerSAMLLoginProfile{}, identity.ForbiddenError{}
 	}
-	return route.Bindings()
+	binding, err := route.Bindings()
+	return binding, selected, err
 }
 
 func (r *ProviderRouter) requireSAMLLogoutRoute(ctx context.Context, route sso.DomainRouteBinding) error {

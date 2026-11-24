@@ -67,11 +67,11 @@ func newSAMLStartFixture(t *testing.T) *samlStartFixture {
 	return newSAMLStartFixtureWithBundle(t, nil)
 }
 
-func newSAMLStartFixtureWithBundle(t *testing.T, signingBundle []byte) *samlStartFixture {
+func newSAMLStartFixtureWithBundle(t *testing.T, signingBundle []byte, idpCertificates ...[]byte) *samlStartFixture {
 	t.Helper()
 	// The canonical risk audit accepts opaque tenant IDs, not the legacy
 	// human-readable tenant label used in the activation-only fixture.
-	x := newProviderSAMLActivationFixtureWithBundle(t, discoveryFixtureTenant, signingBundle)
+	x := newProviderSAMLActivationFixtureWithBundle(t, discoveryFixtureTenant, signingBundle, idpCertificates...)
 	installSAMLStartHistory(t, x.f)
 	enabled, err := x.service.ProviderEnable(x.f.ctx, x.request)
 	if err != nil || enabled.Completion.Outcome != identity.CommitOutcomeCommitted || !enabled.Provider.Enabled {

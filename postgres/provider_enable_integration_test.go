@@ -25,14 +25,18 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-type enableProofObserver struct{}
+type enableProofObserver struct{ ttl time.Duration }
 
-func (enableProofObserver) ObserveDomain(ctx context.Context, claim organization.DomainClaim) (organization.DomainObservation, error) {
+func (o enableProofObserver) ObserveDomain(ctx context.Context, claim organization.DomainClaim) (organization.DomainObservation, error) {
 	if err := ctx.Err(); err != nil {
 		return organization.DomainObservation{}, err
 	}
 	at := time.Now().UTC().Truncate(time.Microsecond)
-	return organization.DomainObservation{Claim: claim, Method: organization.DomainDNS, ObservedAt: at, ExpiresAt: at.Add(time.Minute), Verified: true}, nil
+	ttl := o.ttl
+	if ttl == 0 {
+		ttl = time.Minute
+	}
+	return organization.DomainObservation{Claim: claim, Method: organization.DomainDNS, ObservedAt: at, ExpiresAt: at.Add(ttl), Verified: true}, nil
 }
 
 type enablePolicy struct{ deny bool }

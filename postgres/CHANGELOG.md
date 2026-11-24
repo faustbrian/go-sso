@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Settle signed SAML LogoutResponses against the one original request and
+  installed provider. Preserve previously committed local revocation on
+  provider failure, expiry and unavailable settlement. Exact replay can
+  recover the status without redisclosing the application continuation.
+  Install the additive response migration before enabling this native path.
+
 - Add an opt-in signed SAML provider redirect after exact local revocation.
   Reserve one encrypted request before disclosure and reuse its exact wire
   on authorized retries. No provider route or storage failure erases a

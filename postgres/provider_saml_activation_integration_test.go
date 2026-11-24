@@ -31,7 +31,7 @@ func newProviderSAMLActivationFixtureForTenant(t *testing.T, tenant identity.Ten
 	return newProviderSAMLActivationFixtureWithBundle(t, tenant, nil)
 }
 
-func newProviderSAMLActivationFixtureWithBundle(t *testing.T, tenant identity.TenantID, signingBundle []byte) providerEnableFixture {
+func newProviderSAMLActivationFixtureWithBundle(t *testing.T, tenant identity.TenantID, signingBundle []byte, idpCertificates ...[]byte) providerEnableFixture {
 	t.Helper()
 	f, base, config := newProviderFixtureForTenant(t, tenant, false,
 		organizationpg.DomainClaimMigrationSource{Version: 316},
@@ -39,7 +39,13 @@ func newProviderSAMLActivationFixtureWithBundle(t *testing.T, tenant identity.Te
 	installProviderSAMLActivationHistory(t, f)
 	f.domains = organization.DomainConfig{Version: 1, MaximumClaims: 5, EvidenceMaximumAge: time.Hour}
 	var err error
-	f.domainEvidence, err = organizationpg.NewDomainEvidenceSource(enableProofObserver{}, [32]byte{0x43})
+	observer := enableProofObserver{}
+	if len(idpCertificates) != 0 {
+		// Keep installed provider authority current past the outbound request
+		// cutoff so the response test can distinguish the two deadlines.
+		observer.ttl = 15 * time.Minute
+	}
+	f.domainEvidence, err = organizationpg.NewDomainEvidenceSource(observer, [32]byte{0x43})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +55,16 @@ func newProviderSAMLActivationFixtureWithBundle(t *testing.T, tenant identity.Te
 		t.Fatal("select SAML registration", err)
 	}
 	registration := providerSAMLRegistrationRequest(t, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+	if len(idpCertificates) != 0 {
+		configuration, err := sso.NewSAMLConfiguration(sso.SAMLConfigurationSpec{
+			EntityID: nativeSAMLCallbackIssuer, RedirectEndpoint: "https://idp.example.com/saml/redirect?tenant=enterprise",
+			SigningCertificates: idpCertificates,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		registration.Configuration = configuration
+	}
 	registered, err := base.ProviderRegisterSaml(f.ctx, registration)
 	if err != nil || registered.Completion.Outcome != identity.CommitOutcomeCommitted || registered.Provider.Enabled || registered.Provider.Version != 1 || registered.Provider.Protocol != "saml" {
 		t.Fatal("register exact disabled SAML predecessor", err)
