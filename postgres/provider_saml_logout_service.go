@@ -63,13 +63,30 @@ type ProviderSAMLLogoutService struct {
 
 // NewProviderSAMLLogoutService snapshots the selected session authority,
 // CSRF keys and allowlist. It performs no I/O and starts no background work.
+// It retains the login-service input's request-key namespace for existing
+// callers that already select dedicated logout custody.
 func NewProviderSAMLLogoutService(login *ProviderLoginService, cfg ProviderSAMLLogoutConfig) (*ProviderSAMLLogoutService, error) {
+	return newProviderSAMLLogoutService(login, cfg, nil)
+}
+
+// NewProviderSAMLLogoutServiceWithRequestKeys selects a stable logout
+// namespace distinct from canonical SAML sign-in. Keep the original keys
+// and namespace while any original logout request can still be retried.
+func NewProviderSAMLLogoutServiceWithRequestKeys(login *ProviderLoginService, cfg ProviderSAMLLogoutConfig, keys kernel.RequestKeyConfig) (*ProviderSAMLLogoutService, error) {
+	return newProviderSAMLLogoutService(login, cfg, &keys)
+}
+
+func newProviderSAMLLogoutService(login *ProviderLoginService, cfg ProviderSAMLLogoutConfig, keys *kernel.RequestKeyConfig) (*ProviderSAMLLogoutService, error) {
 	if login == nil || login.router == nil || login.config.RequestKeys.Namespace == "" ||
 		login.config.Coordinator.AdmissionPolicy == nil || login.config.Coordinator.QueryPolicy == nil ||
 		cfg.Admission.Profile.GlobalAuthorityID != login.config.GlobalAuthorityID ||
 		len(cfg.CSRFKeys) == 0 || len(cfg.CSRFKeys) > 32 ||
 		len(cfg.FinalRedirectAllowlist) == 0 || len(cfg.FinalRedirectAllowlist) > 64 {
 		return nil, sso.ErrInvalidInput
+	}
+	login, err := withSAMLLogoutRequestKeys(login, keys)
+	if err != nil {
+		return nil, err
 	}
 	seenKeys := make(map[uint32]struct{}, len(cfg.CSRFKeys))
 	for _, key := range cfg.CSRFKeys {
@@ -101,6 +118,28 @@ func NewProviderSAMLLogoutService(login *ProviderLoginService, cfg ProviderSAMLL
 	}
 	return &ProviderSAMLLogoutService{login: login, sessions: reader, retained: retained, effect: effect,
 		lookupKeys: slices.Clone(cfg.Session.LookupKeys), csrfKeys: slices.Clone(cfg.CSRFKeys), finalRedirect: allowed}, nil
+}
+
+func withSAMLLogoutRequestKeys(login *ProviderLoginService, keys *kernel.RequestKeyConfig) (*ProviderLoginService, error) {
+	if keys == nil {
+		return login, nil
+	}
+	selected := *keys
+	if selected.Namespace == login.config.RequestKeys.Namespace || selected.Policy.PolicyVersion != login.policyVersion {
+		return nil, sso.ErrInvalidInput
+	}
+	// Validate the opaque configuration through its owner, without starting a
+	// transaction or copying the caller's policy and key into the sign-in path.
+	registry, err := kernel.NewContributorRegistry([]kernel.Contributor{login.directory})
+	if err != nil {
+		return nil, sso.ErrInvalidInput
+	}
+	if _, err := kernel.NewCoordinatorWithRequestKeys(login.router.pool, registry, login.config.Coordinator, selected); err != nil {
+		return nil, sso.ErrInvalidInput
+	}
+	view := *login
+	view.config.RequestKeys = selected
+	return &view, nil
 }
 
 // Start revokes the selected original cookie session without a provider

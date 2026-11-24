@@ -125,7 +125,8 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 	authorizer := &nativeSAMLIDPLogoutJourneyPolicy{tenant: record.TenantID, user: record.UserID}
 	policy := kernel.CommandQueryPolicy{Authorization: authorizer, Clock: clock.System{}, PolicyVersion: 1}
 	loginConfig.Coordinator.QueryPolicy, loginConfig.Coordinator.AdmissionPolicy = &policy, &policy
-	loginConfig.RequestKeys, err = kernel.NewRequestKeyConfig("native-sso-login", [32]byte{0xaa}, policy)
+	loginConfig.RequestKeys.Policy = policy
+	logoutKeys, err := kernel.NewRequestKeyConfig("native-sso-login", [32]byte{0xaa}, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,10 +138,10 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 	// The independent receiver uses the protocol's canonical, queryless
 	// inbound verifier route; the signer separately tests fixed query support.
 	const responseEndpoint = "https://identity-provider.example.test/slo/response"
-	service, err := ssopg.NewProviderSAMLIDPLogoutService(login, ssopg.ProviderSAMLIDPLogoutConfig{
+	service, err := ssopg.NewProviderSAMLIDPLogoutServiceWithRequestKeys(login, ssopg.ProviderSAMLIDPLogoutConfig{
 		Custody: custody, Providers: []ssopg.ProviderSAMLIDPLogoutProfile{{Provider: profile,
 			IdentityProviderEntityID: nativeSAMLCallbackIssuer, ResponseEndpoint: responseEndpoint}},
-	})
+	}, logoutKeys)
 	if err != nil {
 		t.Fatal("compose installed-provider IdP request processing", err)
 	}

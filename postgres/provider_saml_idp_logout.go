@@ -96,10 +96,25 @@ type ProviderSAMLIDPLogoutService struct {
 // logout histories before enabling it. The native login actor and request-key
 // namespace must remain unchanged while original requests can be recovered.
 func NewProviderSAMLIDPLogoutService(login *ProviderLoginService, cfg ProviderSAMLIDPLogoutConfig) (*ProviderSAMLIDPLogoutService, error) {
+	return newProviderSAMLIDPLogoutService(login, cfg, nil)
+}
+
+// NewProviderSAMLIDPLogoutServiceWithRequestKeys selects a stable namespace
+// distinct from canonical SAML sign-in. Keep the original keys and namespace
+// while original signed logout requests can still be retried.
+func NewProviderSAMLIDPLogoutServiceWithRequestKeys(login *ProviderLoginService, cfg ProviderSAMLIDPLogoutConfig, keys kernel.RequestKeyConfig) (*ProviderSAMLIDPLogoutService, error) {
+	return newProviderSAMLIDPLogoutService(login, cfg, &keys)
+}
+
+func newProviderSAMLIDPLogoutService(login *ProviderLoginService, cfg ProviderSAMLIDPLogoutConfig, keys *kernel.RequestKeyConfig) (*ProviderSAMLIDPLogoutService, error) {
 	if login == nil || login.router == nil || !login.router.protocolRegistry || login.router.samlRouteValidate == nil ||
 		login.config.RequestKeys.Namespace == "" || login.config.Coordinator.AdmissionPolicy == nil || login.config.Coordinator.QueryPolicy == nil ||
 		cfg.Custody == nil || cfg.Custody.config.CurrentMatchKey == 0 || len(cfg.Providers) == 0 || len(cfg.Providers) > 128 {
 		return nil, sso.ErrInvalidInput
+	}
+	login, err := withSAMLLogoutRequestKeys(login, keys)
+	if err != nil {
+		return nil, err
 	}
 	service := &ProviderSAMLIDPLogoutService{login: login, custody: cfg.Custody, profiles: make(map[sso.ProviderID]samlIDPLogoutProvider, len(cfg.Providers))}
 	for _, profile := range cfg.Providers {
@@ -122,7 +137,6 @@ func NewProviderSAMLIDPLogoutService(login *ProviderLoginService, cfg ProviderSA
 		}
 		service.profiles[p.ProviderID] = samlIDPLogoutProvider{config: profile, wire: wire}
 	}
-	var err error
 	service.sessions, err = sessionpg.NewRepository(login.router.pool, login.config.Session)
 	if err != nil {
 		return nil, sso.ErrInvalidInput

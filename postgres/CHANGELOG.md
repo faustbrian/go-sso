@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add SAML logout constructors with an explicit request-key namespace
+  independent of canonical sign-in. Existing constructors retain their
+  replay namespace and configuration shapes.
+
 - Handle opt-in signed SAML IdP LogoutRequests against the installed provider
   and complete retained subject selection. Recheck targets and provider in the
   same native command as session revocation. Return a signed POST response only

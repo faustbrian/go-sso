@@ -73,7 +73,8 @@ func assertNativeSAMLLogoutWithDisabledProvider(t *testing.T, loseAcknowledgemen
 	policy := kernel.CommandQueryPolicy{Authorization: nativeSAMLLogoutStartPolicy{tenant: exact.TenantID, user: exact.UserID},
 		Clock: clock.System{}, PolicyVersion: 1}
 	loginConfig.Coordinator.QueryPolicy, loginConfig.Coordinator.AdmissionPolicy = &policy, &policy
-	loginConfig.RequestKeys, err = kernel.NewRequestKeyConfig("native-sso-login", [32]byte{0xaa}, policy)
+	loginConfig.RequestKeys.Policy = policy
+	logoutKeys, err := kernel.NewRequestKeyConfig("native-sso-login", [32]byte{0xaa}, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +84,10 @@ func assertNativeSAMLLogoutWithDisabledProvider(t *testing.T, loseAcknowledgemen
 	}
 	logoutConfig := ssopg.ProviderSAMLLogoutConfig{Session: validation, Admission: selection,
 		CSRFKeys: []session.CSRFKey{x.csrf}, FinalRedirectAllowlist: []string{nativeLogoutFinalRedirect}}
-	service, err := ssopg.NewProviderSAMLLogoutService(login, logoutConfig)
+	if _, err := ssopg.NewProviderSAMLLogoutServiceWithRequestKeys(login, logoutConfig, loginConfig.RequestKeys); !errors.Is(err, sso.ErrInvalidInput) {
+		t.Fatal("explicitly selecting the canonical login namespace for logout was accepted", err)
+	}
+	service, err := ssopg.NewProviderSAMLLogoutServiceWithRequestKeys(login, logoutConfig, logoutKeys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +139,7 @@ func assertNativeSAMLLogoutWithDisabledProvider(t *testing.T, loseAcknowledgemen
 		if err != nil {
 			t.Fatal("compose the exact-session commit-fault fixture", err)
 		}
-		firstService, err = ssopg.NewProviderSAMLLogoutService(faultLogin, logoutConfig)
+		firstService, err = ssopg.NewProviderSAMLLogoutServiceWithRequestKeys(faultLogin, logoutConfig, logoutKeys)
 		if err != nil {
 			t.Fatal("compose the controlled lost-acknowledgement operation", err)
 		}
