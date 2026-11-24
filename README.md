@@ -58,7 +58,10 @@ organization, provider, protocol and matching purpose, credential generation,
 current provider version, operation audience, configured key identity and the
 original UTC-microsecond lifetime. OIDC and OAuth 2.0 use `client-secret`.
 SAML uses `sp-signing-key` for the optional wire module's matching key and
-certificate bundle. `NewEncryptedCredentialReference`
+certificate bundle. Use `SAMLIDPSigningCertificatesPurpose` to seal a complete
+replacement set from `EncodeSAMLIDPSigningCertificates`. For this purpose,
+set `Generation` to `ProviderVersion+1`; it is independent of the SP signer's
+generation. `NewEncryptedCredentialReference`
 authenticates bounded envelope bytes and immediately clears temporary plaintext;
 it accepts and returns no raw secret. The reference is immutable and redacted.
 
@@ -69,8 +72,9 @@ version and generation. Caller-selected keys or a renewed lifetime cannot
 authorize a write. Native composition uses the separately configured
 `postgres.NewProviderCredentialsService` and a current fresh
 `org:sso-credentials` policy owner. Install its additive migration before opting
-in. Initial/replacement commands advance the shared provider version without
-changing metadata or mapping; only one current encrypted generation is retained.
+in. Commands advance the shared provider version without changing the mapping.
+IdP pin rotation replaces only the trusted certificates in encrypted provider
+metadata. Other variants retain only the new current encrypted credential.
 Original command retries return their exact historical result, never credential
 bytes or a renewed lifetime. This boundary does not enable a provider, authorize
 active-use overlap or drain, or make provider-network calls.

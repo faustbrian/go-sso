@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Define a bounded SAML IdP certificate pin-set bundle and a dedicated
+  encrypted rotation purpose without changing the SP signing generation.
+
 - Preserve the explicitly selected SAML protocol in bounded provider-route
   evidence without granting permission to start a browser transaction.
 

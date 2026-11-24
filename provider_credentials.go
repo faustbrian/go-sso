@@ -14,6 +14,11 @@ import (
 // credentials. A signing envelope is not an OIDC or OAuth 2.0 client secret.
 const SAMLSigningCredentialPurpose = "sp-signing-key"
 
+// SAMLIDPSigningCertificatesPurpose is the exact ingress purpose for a SAML
+// IdP signing-certificate pin set. Its generation is the successor provider
+// version, independent of the SP signing-credential generation.
+const SAMLIDPSigningCertificatesPurpose = "idp-signing-certificates"
+
 // SAMLSigningCredentialValidator validates locally borrowed signing material at
 // the selected instant and returns its original exclusive validity cutoff.
 // It is configured by trusted composition, not a request. It must honor
@@ -21,12 +26,14 @@ const SAMLSigningCredentialPurpose = "sp-signing-key"
 // This is wire validation only, not current provider or organization authority.
 type SAMLSigningCredentialValidator func(ctx context.Context, bundle []byte, at time.Time) (validUntil time.Time, err error)
 
-// CredentialReferenceContext is the complete immutable AAD for a client-secret
-// or SP-signing credential ingress envelope. It selects neither current ownership nor
-// permission. IDs and key identity are canonical 1..128 printable ASCII bytes.
-// Times must be UTC microsecond values with a positive lifetime. Generation is
-// the credential successor, while ProviderVersion is the current optimistic
-// provider version; the native owner must verify both against current state.
+// CredentialReferenceContext is the complete immutable AAD for client-secret,
+// SP-signing credential, or IdP signing-certificate ingress. It selects neither
+// current ownership nor permission. IDs and key identity are canonical 1..128
+// printable ASCII bytes. Times must be UTC microsecond values with a positive
+// lifetime. ProviderVersion is the current optimistic provider version. For IdP
+// pins Generation must equal ProviderVersion+1 without overflow; other purposes
+// use their independent credential successor. The native owner must verify
+// both against current state.
 type CredentialReferenceContext struct {
 	TenantID, OrganizationID, ProviderID string
 	Protocol, Purpose                    string
@@ -37,8 +44,9 @@ type CredentialReferenceContext struct {
 
 // EncryptionContext returns the exact non-secret authenticated binding for
 // trusted secret ingress. The separate credentials-rotate operation accepts
-// only OIDC/OAuth 2.0 client secrets and SAML SP-signing keys. No implicit canonicalization,
-// issuer lookup, key lookup or lifetime renewal is performed.
+// only OIDC/OAuth 2.0 client secrets, SAML SP-signing keys, and SAML IdP signing
+// certificate pin sets. No implicit canonicalization, issuer lookup, key lookup
+// or lifetime renewal is performed.
 func (c CredentialReferenceContext) EncryptionContext() (envelope.Context, error) {
 	for _, value := range []string{c.TenantID, c.OrganizationID, c.ProviderID, c.EnvelopeKeyID} {
 		if !providerClaimName(value) {
@@ -51,7 +59,13 @@ func (c CredentialReferenceContext) EncryptionContext() (envelope.Context, error
 			return envelope.Context{}, ErrInvalidInput
 		}
 	case "saml":
-		if c.Purpose != SAMLSigningCredentialPurpose {
+		switch c.Purpose {
+		case SAMLSigningCredentialPurpose:
+		case SAMLIDPSigningCertificatesPurpose:
+			if c.ProviderVersion == ^uint64(0) || c.Generation != c.ProviderVersion+1 {
+				return envelope.Context{}, ErrInvalidInput
+			}
+		default:
 			return envelope.Context{}, ErrInvalidInput
 		}
 	default:
@@ -179,7 +193,8 @@ func (CredentialOverlapPolicy) MarshalText() ([]byte, error) { return nil, ErrSe
 
 // ProviderCredentialsRotateRequest initializes or replaces one disabled static
 // provider's encrypted credential generation, for an OIDC/OAuth 2.0 client
-// secret or a SAML SP signing key. Fresh org:sso-credentials
+// secret, a SAML SP signing key, or a SAML IdP signing-certificate pin set.
+// Fresh org:sso-credentials
 // authorization and current provider ownership/version are mandatory at the
 // native transition. Preserve the complete original command across retries;
 // there is deliberately no external idempotency key or implicit overlap policy.
