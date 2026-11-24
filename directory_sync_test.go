@@ -99,6 +99,46 @@ func TestDirectorySyncCheckpointCannotMoveBetweenAdmissions(t *testing.T) {
 	}
 }
 
+func TestDirectoryBatchCommitmentPreservesExactAdmission(t *testing.T) {
+	batch := directoryBatch(t)
+	original, err := batch.Commitment()
+	if err != nil || original == ([32]byte{}) || original == batch.PredecessorCheckpoint {
+		t.Fatal("expected a nonzero commitment distinct from the predecessor", err)
+	}
+	snapshot, err := batch.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copy, err := snapshot.Commitment(); err != nil || copy != original {
+		t.Fatal("the detached original must retain the same commitment", err)
+	}
+	for name, mutate := range map[string]func(*sso.DirectoryDeltaBatch){
+		"tenant":       func(b *sso.DirectoryDeltaBatch) { b.TenantID = "another-tenant" },
+		"provider":     func(b *sso.DirectoryDeltaBatch) { b.ProviderID = "another-provider" },
+		"organization": func(b *sso.DirectoryDeltaBatch) { b.OrganizationID = "another-org" },
+		"source":       func(b *sso.DirectoryDeltaBatch) { b.ConnectionID = "another-source" },
+		"generation":   func(b *sso.DirectoryDeltaBatch) { b.Generation++ },
+		"mapping":      func(b *sso.DirectoryDeltaBatch) { b.MappingVersion++ },
+		"predecessor":  func(b *sso.DirectoryDeltaBatch) { b.PredecessorCheckpoint[31]++ },
+		"order":        func(b *sso.DirectoryDeltaBatch) { b.Deltas[0], b.Deltas[1] = b.Deltas[1], b.Deltas[0] },
+		"action": func(b *sso.DirectoryDeltaBatch) {
+			b.Deltas[0] = directoryMembership(t, "AQEBAQEBAQEBAQEBAQEBAQ", "group", sso.DirectoryMembershipRemove)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := directoryBatch(t)
+			mutate(&changed)
+			if next, err := changed.Commitment(); err != nil || next == original || next == ([32]byte{}) {
+				t.Fatal("changed admission shares the original commitment", err)
+			}
+		})
+	}
+	batch.Deltas[1] = batch.Deltas[0]
+	if got, err := batch.Commitment(); !errors.Is(err, sso.ErrInvalidInput) || got != ([32]byte{}) {
+		t.Fatal("invalid batch produced a durable commitment", err)
+	}
+}
+
 func TestDirectorySyncRejectsInvalidBatchAndMembership(t *testing.T) {
 	batch := directoryBatch(t)
 	for _, change := range []func(*sso.DirectoryDeltaBatch){

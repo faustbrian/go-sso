@@ -278,6 +278,10 @@ command ID and exact SCIM resource IDs. Neither display names nor
 `externalId` are accepted as identity authority. Group-to-Group membership
 and role inference are not part of this contract.
 
+Use the validated batch's `Commitment` to retain exact in-flight identity
+in the scoped native generation. It binds the predecessor and ordered
+changes; it is neither authorization nor a completion receipt.
+
 Before any write, native composition must independently admit the provider,
 connection, generation and mapping and enlist its `DirectorySyncContributor`.
 The contributor loads each original, service-account-owned

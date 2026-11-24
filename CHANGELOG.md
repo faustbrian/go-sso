@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Expose the validated directory batch commitment used by checkpoint
+  settlement so native storage can retain exact in-flight batch identity.
+  A commitment alone is not authority to write or move a cursor.
+
 - Add bounded directory group-member batch and checkpoint contracts. The
   checkpoint binds the connection and ordered child IDs; an unresolved child
   prevents advancement without losing settled siblings. Native admission and

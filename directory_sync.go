@@ -134,6 +134,16 @@ func (b DirectoryDeltaBatch) Snapshot() (DirectoryDeltaBatch, error) {
 	return b, nil
 }
 
+// Commitment identifies the validated scope, predecessor and ordered changes
+// for durable admission and exact retries. Persist it only in the scoped
+// generation that owns the batch. It proves neither admission nor completion.
+func (b DirectoryDeltaBatch) Commitment() ([32]byte, error) {
+	if err := b.Validate(); err != nil {
+		return [32]byte{}, err
+	}
+	return directoryBatchBinding(b), nil
+}
+
 // DirectoryApplyResult retains an exact ordered outcome per admitted child.
 // Treat ChildOutcomes and their receipt internals as read-only. A zero
 // Checkpoint is required during reconciliation. Before any use for cursor
@@ -152,10 +162,10 @@ type DirectoryApplyResult struct {
 // are detached. The adapter must load authoritative results from the original
 // coordinator; this function checks bindings, not persistence.
 func NewDirectoryApplyResult(batch DirectoryDeltaBatch, outcomes []Completion) (DirectoryApplyResult, error) {
-	if err := batch.Validate(); err != nil {
+	binding, err := batch.Commitment()
+	if err != nil {
 		return DirectoryApplyResult{}, err
 	}
-	binding := directoryBatchBinding(batch)
 	checkpoint, err := directorySuccessor(batch, binding, outcomes)
 	if err != nil {
 		return DirectoryApplyResult{}, err
@@ -175,10 +185,11 @@ func NewDirectoryApplyResult(batch DirectoryDeltaBatch, outcomes []Completion) (
 // against the same generation, mapping and predecessor.
 func (r DirectoryApplyResult) NextCheckpoint(batch DirectoryDeltaBatch) ([32]byte, error) {
 	var zero [32]byte
-	if err := batch.Validate(); err != nil {
+	binding, err := batch.Commitment()
+	if err != nil {
 		return zero, err
 	}
-	if r.Generation != batch.Generation || r.batch != directoryBatchBinding(batch) {
+	if r.Generation != batch.Generation || r.batch != binding {
 		return zero, ErrInvalidInput
 	}
 	next, err := directorySuccessor(batch, r.batch, r.ChildOutcomes)
