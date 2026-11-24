@@ -221,6 +221,30 @@ response can disclose `FinalRedirect`. Partial and other signed provider
 failures settle without redirect. Exact re-entry within the original window
 can recover a lost provider acknowledgement as `Replayed`, without another
 write or another redirect. A different response cannot replace the receipt.
+
+### Native SAML IdP-initiated logout request
+
+Select `NewProviderSAMLIDPLogoutService` with the same SAML sign-in subject
+custody, an installed provider, its exact issuer, and the approved HTTPS IdP
+POST response endpoint. Install `SAMLLogoutSubjectMigrationSource`, the
+kernel prepared request-key history, and the session adapter's
+`SSOSAMLIDPLogoutMigrationSource` before enabling this service. Permit the
+configured service actor to resolve `identity.sso.saml-slo` request admission
+and to act on and recover the selected user through current policies.
+
+Pass all decoded SAMLRequest form values and the trusted provider route ID to
+`HandleRequest`. Only the installed provider's signature and exact registered
+SP destination can select the retained NameID and optional SessionIndex. With
+no index, every matching current local session is considered; an incomplete,
+changed or oversized set is rejected, not truncated. This selected profile
+requires at least one matching session and does not select RelayState or
+register an HTTP endpoint.
+
+Read `LocalRevocations` even when response signing fails. Only a fresh known
+local commit can return signed response fields from `Response()`. Retry the
+same signed request within its original validity window to recover the local
+result without mutating again. Changed bytes under the same signed ID cannot
+replace that result. Neither request XML nor plaintext NameID is retained.
 Pass the response to the exact provider service only after transport admission;
 HTTP origin/form policy and callback rate admission are consumer-owned.
 

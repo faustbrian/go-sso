@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Handle opt-in signed SAML IdP LogoutRequests against the installed provider
+  and complete retained subject selection. Recheck targets and provider in the
+  same native command as session revocation. Return a signed POST response only
+  after known commit; exact retries recover the local result without changing
+  sessions or signing again.
+
 - Settle signed SAML LogoutResponses against the one original request and
   installed provider. Preserve previously committed local revocation on
   provider failure, expiry and unavailable settlement. Exact replay can
