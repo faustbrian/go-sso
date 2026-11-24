@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Select native directory administration with a primary browser cookie and
+  exact session-bound CSRF for writes. Keyless versioned cancellation can
+  recover its original outcome without changing the existing keyed API.
+
 - Reconcile bounded mapped Group-member batches in their original order.
   Recover issued child commands before continuing, and settle the cursor
   once from complete terminal receipts. Cancellation stops subsequent grant

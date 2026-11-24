@@ -42,6 +42,15 @@ children or unavailable authority keep the hold. Retry cancellation with the
 same key and version to recover its original completion. The accompanying
 status can include subsequent settlement.
 
+For a trusted browser transport, select `NewDirectorySyncBrowserService`
+with the original cookie and retained CSRF key ring. Supply the CSRF token
+on Start and Cancel only after enforcing exact Origin and rejecting mixed
+credential sources. The native owner checks the primary cookie record and
+fences its exact state inside Work; the normal bearer service is unchanged.
+Use `CancelExact` for a keyless retry of the same generation and expected
+version. That retry has a separate native key namespace and still requires
+current authorization. Neither selection publishes any HTTP routes.
+
 Select `WithGroupEdges` separately for the direct Group-to-User profile.
 Bind an explicit, versioned SCIM organization mapper, a configured native
 SCIM Group source, and the service account's synchronization authorization

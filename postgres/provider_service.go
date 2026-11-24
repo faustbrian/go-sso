@@ -59,6 +59,7 @@ type ProviderService struct {
 	authentication       organization.Authentication
 	network              string
 	directory            *kernel.Repository
+	directoryBrowser     *directoryBrowserSession
 	updateOrganization   string
 	updateAuthorization  ProviderUpdateAuthorization
 	enableAuthorization  ProviderEnableAuthorization
@@ -149,7 +150,11 @@ func (s *ProviderService) admit(ctx context.Context, organizationID, action stri
 	if err != nil {
 		return a, sso.ErrForbidden
 	}
-	credential, err := session.NewCredential(session.CredentialBearer, token)
+	transport := session.CredentialBearer
+	if s.directoryBrowser != nil {
+		transport = session.CredentialCookie
+	}
+	credential, err := session.NewCredential(transport, token)
 	if err != nil {
 		return a, sso.ErrForbidden
 	}
@@ -158,7 +163,10 @@ func (s *ProviderService) admit(ctx context.Context, organizationID, action stri
 		return providerAdmission{}, providerError(ctx, err)
 	}
 	bound, err := a.session.Session.Bindings()
-	if err != nil || a.session.ValidateAt(s.config.Clock.Now()) != nil || a.session.Session.CSRFState() != (session.CSRFState{}) || bound.TenantID != s.authentication.TenantID || bound.Authentication.Kind != session.AuthenticationVerified || bound.Authentication.Proof.Method != "password" || bound.Authentication.Proof.Assurance != authentication.AssuranceSingleFactor {
+	if err != nil || a.session.ValidateAt(s.config.Clock.Now()) != nil || bound.TenantID != s.authentication.TenantID || bound.Authentication.Kind != session.AuthenticationVerified || bound.Authentication.Proof.Method != "password" || bound.Authentication.Proof.Assurance != authentication.AssuranceSingleFactor {
+		return providerAdmission{}, sso.ErrForbidden
+	}
+	if !s.directoryBrowser.valid(a.session.Session, action != "org:sso-read") {
 		return providerAdmission{}, sso.ErrForbidden
 	}
 	original := identity.CommandBinding{TenantID: bound.TenantID, UserID: bound.UserID, ActorID: identity.ActorID(bound.UserID), ActorKind: authorization.SubjectUser}

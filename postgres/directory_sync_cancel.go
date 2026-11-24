@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -35,6 +37,38 @@ func (DirectorySyncCancelRequest) Format(s fmt.State, _ rune) {
 type DirectorySyncCancelResult struct {
 	Generation DirectorySyncGeneration
 	Completion identity.CommandResult
+}
+
+// CancelExact stops the exact generation/version without a caller-supplied
+// idempotency key. The same authorized actor and selection recover the same
+// native cancellation; a new expected version is a distinct intent. It grants
+// no access to another actor's receipt and does not accept an earlier keyed
+// Cancel as evidence for this separate natural-repeat operation.
+func (s *DirectorySyncService) CancelExact(ctx context.Context, id identity.CommandID, version uint64) (DirectorySyncCancelResult, error) {
+	if s == nil || s.provider == nil || version == 0 || version == math.MaxUint64 {
+		return DirectorySyncCancelResult{}, sso.ErrInvalidInput
+	}
+	if _, err := identity.ParseCommandID(string(id)); err != nil {
+		return DirectorySyncCancelResult{}, sso.ErrInvalidInput
+	}
+	// Derive only retry identity, never authority. Existing kernel custody
+	// partitions it by tenant, actor and operation and retains the full intent.
+	digest := sha256.New()
+	for _, part := range []string{"sso-directory-cancel-exact-v1", s.provider.updateOrganization, s.connection, string(id), strconv.FormatUint(version, 10)} {
+		_, _ = fmt.Fprintf(digest, "%d:%s", len(part), part)
+	}
+	key, err := identity.NewIdempotencyKey([]byte(hex.EncodeToString(digest.Sum(nil))))
+	if err != nil {
+		return DirectorySyncCancelResult{}, sso.ErrInvalidInput
+	}
+	// The repeat namespace cannot be selected by a caller-chosen direct key.
+	// Keep the configured custody key and policy; only lookup scope changes.
+	provider := *s.provider
+	namespace := sha256.Sum256([]byte("sso-directory-cancel-exact-v1:" + provider.config.RequestKeys.Namespace))
+	provider.config.RequestKeys.Namespace = "sso-directory-repeat-" + hex.EncodeToString(namespace[:])
+	selected := *s
+	selected.provider = &provider
+	return selected.Cancel(ctx, DirectorySyncCancelRequest{GenerationID: id, ExpectedVersion: version, Key: key})
 }
 
 // Cancel stops new children without changing grants, checkpoints or counts. A
