@@ -61,7 +61,11 @@ func SSOOAuth2AccountProviderNamespace(organizationID organization.ID, provider 
 // have to match the signed assertion and the authoritative account. This
 // namespace creates neither a link nor authority and is distinct from OAuth.
 func SSOSAMLAccountProviderNamespace(organizationID organization.ID, provider sso.ProviderID) (string, error) {
-	return ssoAccountProviderNamespace(organizationID, provider, "saml")
+	namespace, err := kernel.SSOSAMLAccountProviderNamespace(string(organizationID), string(provider))
+	if err != nil {
+		return "", sso.ErrInvalidInput
+	}
+	return namespace, nil
 }
 
 func ssoAccountProviderNamespace(organizationID organization.ID, provider sso.ProviderID, protocol string) (string, error) {

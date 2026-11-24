@@ -38,13 +38,17 @@ type samlCallbackOutput struct {
 	ObservedAt, ValidUntil time.Time
 	Replay                 samlCallbackReplay
 	Terminal               []byte
-	LogoutSubject          *samlStoredLogoutSubject   `json:",omitempty"`
-	LogoutCustody          *samlPreparedLogoutSubject `json:",omitempty"`
+	LogoutSubject          *samlStoredLogoutSubject     `json:",omitempty"`
+	LogoutCustody          *samlPreparedLogoutSubject   `json:",omitempty"`
+	RoleUpdate             *providerLoginRoleUpdateWire `json:",omitempty"`
 }
 
 func encodeSAMLCallbackOutput(saved samlCallbackOutput, subject *samlStoredLogoutSubject) ([]byte, error) {
 	if subject != nil {
 		saved.Schema, saved.LogoutSubject = 2, subject
+	}
+	if saved.RoleUpdate != nil {
+		saved.Schema += 2
 	}
 	return providerLoginPayloadEncode(saved)
 }
@@ -55,10 +59,15 @@ func decodeSAMLCallbackOutput(plain []byte, selected *samlStoredLogoutSubject) (
 		clearSAMLCallbackOutput(saved)
 		return samlCallbackOutput{}, err
 	}
-	valid := saved.Schema == 1 && saved.LogoutSubject == nil && selected == nil
+	expectedSchema := uint8(1)
 	if selected != nil {
-		valid = saved.Schema == 2 && saved.LogoutSubject != nil && *saved.LogoutSubject == *selected
+		expectedSchema = 2
 	}
+	if saved.RoleUpdate != nil {
+		expectedSchema += 2
+	}
+	valid := saved.Schema == expectedSchema && ((selected == nil && saved.LogoutSubject == nil) ||
+		(selected != nil && saved.LogoutSubject != nil && *saved.LogoutSubject == *selected))
 	if !valid {
 		clearSAMLCallbackOutput(saved)
 		return samlCallbackOutput{}, identity.ForbiddenError{}
@@ -113,7 +122,25 @@ func (p *providerLoginCallbackPhase) generateSAMLAccepted(ctx context.Context, g
 	}
 	replay := samlCallbackReplay{Response: sha256.Sum256([]byte(selected.evidence.ResponseID)),
 		Assertion: sha256.Sum256([]byte(selected.evidence.AssertionID)), RetainUntil: retained}
-	fields, command, err := p.prepareCallbackSession(selected.recipient, now, until, selected.recipient.member.Version, nil)
+	organizationVersion := selected.recipient.member.Version
+	var wireRole *providerLoginRoleUpdateWire
+	var effectFields []identity.FeatureField
+	if selected.roles != nil {
+		wireRole, err = p.prepareSAMLRoleUpdate(ctx)
+		if err != nil {
+			return nil, err
+		}
+		update, err := p.restoreSAMLRoleUpdate(wireRole)
+		if err != nil {
+			return nil, err
+		}
+		field, err := update.Field()
+		if err != nil {
+			return nil, err
+		}
+		effectFields, organizationVersion = []identity.FeatureField{field}, update.ExpectedOrganizationVersion()
+	}
+	fields, command, err := p.prepareCallbackSession(selected.recipient, now, until, organizationVersion, effectFields)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +168,7 @@ func (p *providerLoginCallbackPhase) generateSAMLAccepted(ctx context.Context, g
 	}
 	defer clear(terminal)
 	plain, err := encodeSAMLCallbackOutput(samlCallbackOutput{Schema: 1, Fields: fields, Risk: providerLoginStoredAdmission(admission.Prepared()),
-		ObservedAt: p.found.ObservedAt, ValidUntil: until, Replay: replay, Terminal: terminal, LogoutCustody: logout}, p.saml.logoutSubject)
+		ObservedAt: p.found.ObservedAt, ValidUntil: until, Replay: replay, Terminal: terminal, LogoutCustody: logout, RoleUpdate: wireRole}, p.saml.logoutSubject)
 	defer clear(plain)
 	if err != nil || len(plain) > providerLoginCallbackPlainLimit {
 		return nil, identity.UnavailableError{}
@@ -198,10 +225,25 @@ func (p *providerLoginCallbackPhase) restoreSAMLAccepted(ctx context.Context, ge
 		return identity.ForbiddenError{}
 	}
 	fields, err := p.callbackAccountSessionFields(record, account)
-	if err != nil || !reflect.DeepEqual(fields, saved.Fields) {
+	if err != nil {
 		return identity.ForbiddenError{}
 	}
-	if err := p.checkRestoredSession(record, account, providerLoginCallbackOutput{ObservedAt: saved.ObservedAt, ValidUntil: saved.ValidUntil}, selected.recipient.member.Version); err != nil {
+	organizationVersion := selected.recipient.member.Version
+	update, err := p.restoreSAMLRoleUpdate(saved.RoleUpdate)
+	if err != nil {
+		return err
+	}
+	if saved.RoleUpdate != nil {
+		roleField, err := update.Field()
+		if err != nil {
+			return err
+		}
+		fields, organizationVersion = append(fields, roleField), update.ExpectedOrganizationVersion()
+	}
+	if !reflect.DeepEqual(fields, saved.Fields) {
+		return identity.ForbiddenError{}
+	}
+	if err := p.checkRestoredSession(record, account, providerLoginCallbackOutput{ObservedAt: saved.ObservedAt, ValidUntil: saved.ValidUntil}, organizationVersion); err != nil {
 		return err
 	}
 	bindings, err := record.Bindings()
@@ -233,7 +275,7 @@ func (p *providerLoginCallbackPhase) restoreSAMLAccepted(ctx context.Context, ge
 		return err
 	}
 	p.execution = &providerLoginCallbackExecution{command: command, record: record, admission: admission, terminal: saved.Terminal,
-		generation: generation, digest: digest, validUntil: earlierLoginTime(saved.ValidUntil, selected.validUntil)}
+		generation: generation, digest: digest, validUntil: earlierLoginTime(saved.ValidUntil, selected.validUntil), roleUpdate: update}
 	p.saml.replay = saved.Replay
 	p.saml.logoutSubject = saved.LogoutSubject
 	p.saml.preparedLogout = saved.LogoutCustody
@@ -253,7 +295,12 @@ func (p *providerLoginCallbackPhase) applySAMLCallback(ctx context.Context, work
 	if err := reserveSAMLReplayInWork(ctx, work, p, claim); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	receipt, err := p.saml.effect.Apply(ctx, work, p, command, p.flow)
+	var receipt identity.FeatureReceipt
+	if p.saml.admitted.roles == nil {
+		receipt, err = p.saml.effect.Apply(ctx, work, p, command, p.flow)
+	} else {
+		receipt, err = p.saml.effect.ApplyWithOrganizationUpdate(ctx, work, p, command, p.flow, p)
+	}
 	if err != nil {
 		return identity.FeatureReceipt{}, err
 	}

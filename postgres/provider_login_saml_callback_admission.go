@@ -27,6 +27,8 @@ type samlCallbackAdmission struct {
 	recipient               providerLoginCallbackRecipient
 	grant                   kernel.CapabilityPlan
 	evidence                SAMLVerifiedResponse
+	roles                   *samlRoleSelection
+	logoutSubject           *samlStoredLogoutSubject
 	validatedAt, validUntil time.Time
 }
 
@@ -34,7 +36,7 @@ func (samlCallbackAdmission) Format(s fmt.State, _ rune) {
 	_, _ = s.Write([]byte("postgres.samlCallbackAdmission(redacted)"))
 }
 
-func (s *ProviderLoginService) admitSAMLCallback(ctx context.Context, found providerLoginCallbackLookup, r SAMLSigninCallbackRequest, verify SAMLResponseVerifier, policy sessionpg.IdentifierAdmissionConfig) (samlCallbackAdmission, error) {
+func (s *ProviderLoginService) admitSAMLCallback(ctx context.Context, found providerLoginCallbackLookup, r SAMLSigninCallbackRequest, verify SAMLResponseVerifier, policy sessionpg.IdentifierAdmissionConfig, roleSync *samlRoleSyncProfile) (samlCallbackAdmission, error) {
 	if err := s.checkLinkedProviderRecipientContext(ctx); err != nil {
 		return samlCallbackAdmission{}, err
 	}
@@ -121,10 +123,22 @@ func (s *ProviderLoginService) admitSAMLCallback(ctx context.Context, found prov
 	if !validProviderLoginCallbackMaterialInput(found, original, authority, now) {
 		return samlCallbackAdmission{}, sso.ErrForbidden
 	}
-	evidence, err := verify(ctx, SAMLResponseVerificationInput{SPEntityID: profile.spEntityID,
+	input := SAMLResponseVerificationInput{SPEntityID: profile.spEntityID,
 		IdentityProviderEntityID: profile.configuration.EntityID, AssertionConsumerURL: acs,
 		SigningCertificates: certificates, SAMLResponse: r.SAMLResponse, RequestID: "_" + string(original.Command.CommandID),
-		IssuedAt: original.Issued, ExpiresAt: original.Expires, Now: now})
+		IssuedAt: original.Issued, ExpiresAt: original.Expires, Now: now}
+	var evidence SAMLVerifiedResponse
+	var roles *samlRoleSelection
+	var logoutSubject *samlStoredLogoutSubject
+	if roleSync != nil {
+		if mapping, ok := roleSync.mappings[r.ProviderID]; ok {
+			evidence, logoutSubject, roles, err = roleSync.verify(ctx, profile, input, mapping)
+		} else {
+			evidence, err = verify(ctx, input)
+		}
+	} else {
+		evidence, err = verify(ctx, input)
+	}
 	if ctx.Err() != nil {
 		return samlCallbackAdmission{}, ctx.Err()
 	}
@@ -156,7 +170,7 @@ func (s *ProviderLoginService) admitSAMLCallback(ctx context.Context, found prov
 		return samlCallbackAdmission{}, err
 	}
 	return samlCallbackAdmission{original: original, authority: authority, flow: flow, recipient: recipient,
-		grant: grant, evidence: evidence, validatedAt: validatedAt, validUntil: deadline}, nil
+		grant: grant, evidence: evidence, roles: roles, logoutSubject: logoutSubject, validatedAt: validatedAt, validUntil: deadline}, nil
 }
 
 func validSAMLCallbackPolicy(s *ProviderLoginService, p sessionpg.IdentifierAdmissionConfig) bool {

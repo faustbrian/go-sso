@@ -69,6 +69,7 @@ type ProviderSAMLLoginCompletionService struct {
 	verifyLogoutSubject SAMLResponseWithLogoutSubjectVerifier
 	logoutCustody       *SAMLLogoutSubjectCustody
 	effect              *sessionpg.SSOSAMLSigninEffect
+	roleSync            *samlRoleSyncProfile
 }
 
 func (SAMLSigninCallbackRequest) Format(f fmt.State, _ rune) {
@@ -198,11 +199,14 @@ func (s *ProviderSAMLLoginCompletionService) SigninCallback(ctx context.Context,
 			return verified.Evidence, nil
 		}
 	}
-	admitted, err := s.start.admitSAMLCallback(ctx, found, request, verify, s.policy)
+	admitted, err := s.start.admitSAMLCallback(ctx, found, request, verify, s.policy, s.roleSync)
 	if err != nil {
 		return out, err
 	}
-	command, err := s.start.samlCallbackCommand(found, request)
+	if admitted.roles != nil && s.verifyLogoutSubject != nil {
+		logoutSubject = admitted.logoutSubject
+	}
+	command, err := s.start.samlCallbackCommand(found, request, admitted.roles)
 	if err != nil {
 		return out, providerError(ctx, err)
 	}
@@ -270,7 +274,7 @@ func (s *ProviderSAMLLoginCompletionService) SigninCallback(ctx context.Context,
 
 // Retain only a keyed digest of the exact submitted response and original
 // request/browser. A different signed response cannot replace a reserved one.
-func (s *ProviderLoginService) samlCallbackCommand(found providerLoginCallbackLookup, r SAMLSigninCallbackRequest) (identity.Command, error) {
+func (s *ProviderLoginService) samlCallbackCommand(found providerLoginCallbackLookup, r SAMLSigninCallbackRequest, roles *samlRoleSelection) (identity.Command, error) {
 	m := found.Binding.Metadata
 	key, ok := s.payload.StateKeys[m.StateKey]
 	if !ok || key == ([32]byte{}) || m.CallbackCommand == found.Row.StartCommandID ||
@@ -285,7 +289,11 @@ func (s *ProviderLoginService) samlCallbackCommand(found providerLoginCallbackLo
 	response := sha256.Sum256([]byte(r.SAMLResponse))
 	intent := providerLoginPayloadMAC(key, m.StateKey, "identity.sso.saml.callback-input.v1", frame,
 		[]byte(r.ReceivedAssertionConsumerURL), []byte(r.Browser.Origin), []byte(r.Browser.Network.String()), []byte(r.Browser.Device), response[:])
-	return newProviderLoginCallbackCommand(found, r.Browser, []identity.FeatureField{{
+	fields := []identity.FeatureField{{
 		Name: "sso.saml.callback-input", Value: identity.FeatureValue{Kind: identity.FeatureBytes, Bytes: intent[:]},
-	}})
+	}}
+	if roles != nil {
+		fields = append(fields, identity.FeatureField{Name: "sso.saml.role-mapping", Value: identity.FeatureValue{Kind: identity.FeatureBytes, Bytes: roles.policyDigest[:]}})
+	}
+	return newProviderLoginCallbackCommand(found, r.Browser, fields)
 }

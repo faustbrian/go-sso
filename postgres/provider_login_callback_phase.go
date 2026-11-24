@@ -340,7 +340,7 @@ func (p *providerLoginCallbackPhase) checkProviderCurrent(ctx context.Context, w
 	if p.execution.jit != nil {
 		owner = p.execution.jit.owner
 		owner.Version = p.execution.jit.membership.ExpectedOrganizationVersion()
-	} else if p.roleMapping != nil {
+	} else if p.roleMapping != nil || (p.saml != nil && p.saml.admitted.roles != nil) {
 		// Apply already checked the predecessor and the bound successor in
 		// this Work. Preserve the original observation's freshness window.
 		owner.Version = p.execution.roleUpdate.ExpectedOrganizationVersion()

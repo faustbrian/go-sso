@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Opt into provider-owned role replacement on SAML SP linked sign-in with
+  `WithRoleSync`. Signed booleans grant or withdraw only the selected
+  provider's roles; the exact role update, replay reservation and new session
+  commit together. Missing or ill-typed claims fail closed and local roles
+  are not changed.
+
 - Preserve selected native IdP logout targets when user authorization is
   denied or interrupted. Require reconciliation rather than claiming an
   unobserved outcome, and return no signed response or RelayState.

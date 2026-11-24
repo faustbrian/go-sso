@@ -152,6 +152,18 @@ acknowledged commit returns the normal session and its CSRF synchronizer;
 terminal replay and an unknown commit return neither credential. This native
 selection alone installs no route and does not select unsolicited login or SLO.
 
+For selected SP providers, call `WithRoleSync` on the completion service after
+installing the [provider role histories below](#optional-repeat-login-role-synchronization).
+Bind each mapping to the exact organization, provider, and installed mapping
+version. Each selected claim must be present as a signed XML Schema boolean:
+`true` grants its mapped role and `false` withdraws that provider's grant.
+Missing, null, or non-boolean values fail closed. The signed assertion issue
+time must be representable at PostgreSQL microsecond precision. The callback
+replaces only that provider's grants in the same transaction as session issuance
+and replay reservation; application-owned roles and membership are unchanged.
+Advance the installed mapping version before changing the rules. Unselected
+providers use the original verifier and role behavior.
+
 For the distinct, opt-in IdP-initiated linked-member profile, compose
 `NewProviderSAMLIDPAdmissionService` with the installed SAML verifier, select
 linked-recipient policy, and use `NewProviderSAMLIDPArrivalService` and
