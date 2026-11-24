@@ -27,6 +27,12 @@ import (
 )
 
 func TestNativeSAMLIDPConfirmationCommitsLinkedMemberSessionAndReplayPairOnce(t *testing.T) {
+	t.Run("default", func(t *testing.T) { assertNativeSAMLIDPConfirmationJourney(t, false) })
+	t.Run("with-logout-custody", func(t *testing.T) { assertNativeSAMLIDPConfirmationJourney(t, true) })
+}
+
+func assertNativeSAMLIDPConfirmationJourney(t *testing.T, withLogoutCustody bool) {
+	t.Helper()
 	x := newNativeSAMLIDPAdmissionFixture(t)
 	seedSAMLIDPLinkedRecipient(t, x)
 	f, tenant := x.enable.f, x.enable.proof.TenantID
@@ -71,19 +77,31 @@ func TestNativeSAMLIDPConfirmationCommitsLinkedMemberSessionAndReplayPairOnce(t 
 	installSAMLIDPStorage(t, f, migrationList(erasure[len(f.history):]))
 
 	verifications := 0
-	admission, err := ssopg.NewProviderSAMLIDPAdmissionService(x.router, ssopg.ProviderSAMLIDPAdmissionConfig{
-		TenantID: tenant, Profiles: []ssopg.StaticSAMLIDPAdmissionProfile{{Provider: x.profile, MaximumAge: time.Minute}},
-		Verify: func(ctx context.Context, input ssopg.SAMLIDPResponseVerificationInput) (ssopg.SAMLVerifiedResponse, error) {
-			verifications++
-			x.assertVerifierInput(t, ctx, input, time.Minute)
-			evidence := nativeSAMLIDPEvidence(input.Now)
-			if verifications == 3 {
-				evidence.ResponseID += "-late-authority"
-				evidence.AssertionID += "-late-authority"
-			}
-			return evidence, nil
-		},
-	})
+	verify := func(ctx context.Context, input ssopg.SAMLIDPResponseVerificationInput) (ssopg.SAMLVerifiedResponse, error) {
+		verifications++
+		x.assertVerifierInput(t, ctx, input, time.Minute)
+		evidence := nativeSAMLIDPEvidence(input.Now)
+		if verifications >= 3 {
+			evidence.ResponseID += "-late-authority"
+			evidence.AssertionID += "-late-authority"
+		}
+		return evidence, nil
+	}
+	admissionConfig := ssopg.ProviderSAMLIDPAdmissionConfig{TenantID: tenant, Profiles: []ssopg.StaticSAMLIDPAdmissionProfile{{Provider: x.profile, MaximumAge: time.Minute}}}
+	var admission *ssopg.ProviderSAMLIDPAdmissionService
+	if withLogoutCustody {
+		installSAMLIDPStorage(t, f, ssopg.SAMLLogoutSubjectMigrationSource{Version: 422})
+		admission, err = ssopg.NewProviderSAMLIDPAdmissionServiceWithLogoutSubject(x.router, admissionConfig, func(ctx context.Context, input ssopg.SAMLIDPResponseVerificationInput) (ssopg.SAMLVerifiedLoginResponse, error) {
+			evidence, err := verify(ctx, input)
+			return ssopg.SAMLVerifiedLoginResponse{Evidence: evidence, LogoutSubject: ssopg.SAMLLogoutSubject{
+				ProviderSubject: evidence.ProviderSubject, SubjectFormat: evidence.SubjectFormat, SessionIndex: evidence.SessionIndex,
+				NameQualifier: input.IdentityProviderEntityID, SPNameQualifier: input.SPEntityID,
+			}}, err
+		})
+	} else {
+		admissionConfig.Verify = verify
+		admission, err = ssopg.NewProviderSAMLIDPAdmissionService(x.router, admissionConfig)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +163,18 @@ func TestNativeSAMLIDPConfirmationCommitsLinkedMemberSessionAndReplayPairOnce(t 
 	})
 	if err != nil {
 		t.Fatal("compose public native confirmation", err)
+	}
+	if withLogoutCustody {
+		custody, err := ssopg.NewSAMLLogoutSubjectCustody(ssopg.SAMLLogoutSubjectCustodyConfig{
+			KeyReference: x.enable.config.KeyReference, CurrentMatchKey: 1, MatchKeys: map[uint32][32]byte{1: {0xa2}},
+		})
+		if err != nil {
+			t.Fatal("compose durable logout custody", err)
+		}
+		service, err = service.WithLogoutSubjectCustody(custody)
+		if err != nil {
+			t.Fatal("enable selected IdP confirmation logout correlation", err)
+		}
 	}
 	// No SP operation may supply correlation or browser state for this journey.
 	if _, err := f.pool.Raw().Exec(f.ctx, `ALTER TABLE sso_providers.login_transactions RENAME TO fixture_unavailable_sp_logins`); err != nil {
@@ -262,6 +292,19 @@ FROM sso_providers.saml_idp_confirmations WHERE tenant_id=$1`, tenant).
 		t.Fatal("public native confirmation did not commit the original linked session", err)
 	}
 	spec, err := got.Issuance.Session.Bindings()
+	if err == nil && withLogoutCustody {
+		commandID, err := base64.RawURLEncoding.Strict().DecodeString(string(got.Completion.Binding.CommandID))
+		if err != nil {
+			t.Fatal("decode original confirmation command", err)
+		}
+		var bound bool
+		if err := f.pool.Raw().QueryRow(f.ctx, `SELECT EXISTS(SELECT FROM sso_providers.saml_logout_subjects
+ WHERE tenant_id=$1 AND session_id=$2 AND family_id=$3 AND user_id=$4 AND provider_id=$5
+ AND issuance_command_id=$6 AND issuance_purpose='identity.sso.saml-idp-init')`, string(tenant), spec.SessionID,
+			spec.FamilyID, string(spec.UserID), string(request.ProviderID), commandID).Scan(&bound); err != nil || !bound {
+			t.Fatal("IdP confirmation did not commit exact original logout correlation with issuance", err)
+		}
+	}
 	if err != nil || spec.TenantID != tenant || spec.UserID != "owner" || spec.Audience != "native-saml-idp-app" ||
 		spec.Authentication.Proof.Method != "sso-saml" || spec.Authentication.CredentialID != "idp-credential" ||
 		got.Completion.Binding.RecordID != string(pending.CommandID) || got.Completion.Binding.CommandID == pending.CommandID {
@@ -435,4 +478,74 @@ WHEN (NEW.purpose='identity.sso.saml-idp-init') EXECUTE FUNCTION organization_se
 	}
 	assertUnsettled(late.CommandID)
 	assertCommitted()
+
+	if withLogoutCustody {
+		assertSAMLIDPRecoveryChecksLogoutCustody(t, f, x, arrival, service)
+	}
+}
+
+func assertSAMLIDPRecoveryChecksLogoutCustody(t *testing.T, f *orgFixture, x *nativeSAMLIDPAdmissionFixture,
+	arrival *ssopg.ProviderSAMLIDPArrivalService, service *ssopg.ProviderSAMLIDPConfirmationService,
+) {
+	t.Helper()
+	pending, err := arrival.Prepare(f.ctx, x.request())
+	if err != nil || pending.Outcome != identity.CommitOutcomeCommitted {
+		t.Fatal("prepare a separate confirmation for uncertain-outcome recovery", err)
+	}
+	browser, form, _, ok := pending.TakeConfirmation()
+	if !ok {
+		t.Fatal("take original browser custody")
+	}
+	// The existing issuance fault rolls back Apply. Unavailable audit also
+	// prevents terminal failure from being written, leaving an attached command.
+	if _, err := f.pool.Raw().Exec(f.ctx, `CREATE FUNCTION audit.fixture_unavailable_saml_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'isolated SAML audit failure'; END $$;
+CREATE TRIGGER fixture_unavailable_saml_audit BEFORE INSERT ON audit.records
+FOR EACH ROW EXECUTE FUNCTION audit.fixture_unavailable_saml_audit()`); err != nil {
+		t.Fatal("install isolated terminal-failure fault", err)
+	}
+	out, err := service.Confirm(f.ctx, ssopg.SAMLIDPConfirmationRequest{TenantID: x.enable.proof.TenantID,
+		ProviderID: x.profile.ProviderID, PendingID: pending.CommandID, Origin: x.profile.TrustedOrigin, Browser: browser, Form: form})
+	b := out.Completion.Binding
+	assertNativeSAMLCallbackWithholdsIssuance(t, out)
+	if out.Completion.Outcome != identity.CommitOutcomeUnknown || b.CommandID == "" || err == nil {
+		t.Fatal("fixture did not leave an uncertain confirmation", out.Completion.Outcome, err)
+	}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(string(b.CommandID))
+	if err != nil {
+		t.Fatal("decode owning command ID", err)
+	}
+	if _, err := f.pool.Raw().Exec(f.ctx, `DROP TRIGGER fixture_unavailable_saml_audit ON audit.records`); err != nil {
+		t.Fatal("restore audit before authorized recovery", err)
+	}
+	if n, err := f.pool.Raw().Exec(f.ctx, `UPDATE identity.commands SET lease_until=clock_timestamp()-interval '1 millisecond'
+ WHERE command_id=$1 AND state='pending' AND command_plan IS NOT NULL`, raw); err != nil || n.RowsAffected() != 1 {
+		t.Fatal("expire the attached command's claim", err)
+	}
+	if n, err := f.pool.Raw().Exec(f.ctx, `INSERT INTO sso_providers.saml_logout_subjects
+ (tenant_id,organization_id,provider_id,user_id,session_id,family_id,issuance_command_id,issuance_purpose,
+  issued_at,expires_at,match_key_version,subject_digest,session_index_digest,subject_envelope)
+ SELECT tenant_id,organization_id,provider_id,user_id,'fixture-retained-saml-subject',family_id,$2,issuance_purpose,
+  issued_at,expires_at,match_key_version,subject_digest,session_index_digest,subject_envelope
+ FROM sso_providers.saml_logout_subjects WHERE tenant_id=$1`, b.TenantID, raw); err != nil || n.RowsAffected() != 1 {
+		t.Fatal("model contradictory retained custody for the same command", err)
+	}
+
+	q := identity.RecoveryQuery{TenantID: b.TenantID, UserID: b.UserID, ActorID: b.ActorID, ActorKind: b.ActorKind,
+		OperationID: b.OperationID, CommandID: b.CommandID, RecordID: b.RecordID}
+	caller := authorization.DecisionContext{PolicyRevision: 1, Request: authorization.Request{Tenant: authorization.TenantID(b.TenantID),
+		Subject: authorization.Subject{Kind: b.ActorKind, ID: authorization.SubjectID(b.ActorID)}, Action: authorization.Action(b.OperationID),
+		Resource: authorization.Resource{Type: "identity.user", ID: authorization.ResourceID(b.UserID)}}}
+	got, err := service.RecoverConfirmation(f.ctx, q, caller)
+	var unknown identity.UnknownCommitError
+	if got.Outcome != identity.CommitOutcomeUnknown || got.Binding != b || !errors.As(err, &unknown) || unknown.CommandID != b.CommandID {
+		t.Fatal("recovery treated contradictory custody as evidence of rollback", got.Outcome, err)
+	}
+	if _, err := f.pool.Raw().Exec(f.ctx, `DELETE FROM sso_providers.saml_logout_subjects WHERE tenant_id=$1 AND issuance_command_id=$2`, b.TenantID, raw); err != nil {
+		t.Fatal("remove fixture-only contradictory custody", err)
+	}
+	got, err = service.RecoverConfirmation(f.ctx, q, caller)
+	if got.Outcome != identity.CommitOutcomeNotCommitted || got.Binding != b || err == nil {
+		t.Fatal("recovery could not prove rollback once the contradictory custody was absent", got.Outcome, err)
+	}
 }

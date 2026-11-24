@@ -22,23 +22,30 @@ import (
 )
 
 type samlIDPConfirmationPhase struct {
-	arrival      *ProviderSAMLIDPArrivalService
-	effect       *sessionpg.SSOSAMLIDPConfirmationEffect
-	issuer       *session.SessionIssuer
-	audience     string
-	remember     session.RememberPolicy
-	pending      samlIDPPendingArrival
-	original     samlIDPArrivalOrigin
-	command      identity.Command
-	grant        kernel.CapabilityPlan
-	declaration  kernel.CommandPlan
-	prepared     session.PreparedIssuance
-	execution    identity.Command
-	record       session.Session
-	generation   uint64
-	sealedDigest [32]byte
-	acknowledged identity.CommandResult
-	canDisclose  bool
+	arrival        *ProviderSAMLIDPArrivalService
+	effect         *sessionpg.SSOSAMLIDPConfirmationEffect
+	issuer         *session.SessionIssuer
+	audience       string
+	remember       session.RememberPolicy
+	pending        samlIDPPendingArrival
+	original       samlIDPArrivalOrigin
+	command        identity.Command
+	grant          kernel.CapabilityPlan
+	declaration    kernel.CommandPlan
+	prepared       session.PreparedIssuance
+	execution      identity.Command
+	record         session.Session
+	generation     uint64
+	sealedDigest   [32]byte
+	acknowledged   identity.CommandResult
+	canDisclose    bool
+	logoutCustody  *SAMLLogoutSubjectCustody
+	preparedLogout *samlPreparedLogoutSubject
+}
+
+type samlIDPConfirmationLogoutOutput struct {
+	Fields []identity.FeatureField
+	Logout samlPreparedLogoutSubject
 }
 
 var _ kernel.SSOSAMLIDPConfirmationContributor = (*samlIDPConfirmationPhase)(nil)
@@ -174,7 +181,23 @@ func (a samlIDPConfirmationAdmission) Generate(ctx context.Context, generation u
 	if err != nil {
 		return nil, err
 	}
-	plain, err := providerLoginPayloadEncode(append(sessionFields, accountFields...))
+	fields := append(sessionFields, accountFields...)
+	var output any = fields
+	if p.logoutCustody != nil {
+		input, _ := p.command.SAMLIDPConfirmationFeature()
+		scope := p.logoutIssuerScope()
+		anchor, err := samlLogoutSubjectAnchor(input.Binding, record, scope)
+		if err != nil {
+			return nil, err
+		}
+		logout, err := p.logoutCustody.prepare(ctx, p.arrival.payload.Envelope, anchor, scope, p.original.LogoutSubject)
+		if err != nil {
+			return nil, err
+		}
+		defer clear(logout.Envelope)
+		output = samlIDPConfirmationLogoutOutput{Fields: fields, Logout: *logout}
+	}
+	plain, err := providerLoginPayloadEncode(output)
 	defer clear(plain)
 	if err != nil || len(plain) > providerLoginCallbackPlainLimit {
 		return nil, identity.UnavailableError{}
@@ -231,7 +254,20 @@ func (p *samlIDPConfirmationPhase) RestoreFeaturePreparation(ctx context.Context
 	}
 	defer clear(plain)
 	var fields []identity.FeatureField
-	if err := providerLoginPayloadDecode(plain, &fields); err != nil || len(fields) == 0 || len(fields)+len(original.Fields) > 128 {
+	var output samlIDPConfirmationLogoutOutput
+	keep := false
+	defer func() {
+		if !keep {
+			clear(output.Logout.Envelope)
+		}
+	}()
+	if p.logoutCustody == nil {
+		err = providerLoginPayloadDecode(plain, &fields)
+	} else {
+		err = providerLoginPayloadDecode(plain, &output)
+		fields = output.Fields
+	}
+	if err != nil || len(fields) == 0 || len(fields)+len(original.Fields) > 128 {
 		return deny()
 	}
 	original.Fields = append(original.Fields, fields...)
@@ -250,6 +286,15 @@ func (p *samlIDPConfirmationPhase) RestoreFeaturePreparation(ctx context.Context
 	admitted, err := kernel.SSOSAMLIDPConfirmationAccount(restored)
 	if err != nil || admitted != p.account() || !p.matchesRecord(record) {
 		return deny()
+	}
+	if p.logoutCustody != nil {
+		scope := p.logoutIssuerScope()
+		anchor, err := samlLogoutSubjectAnchor(original.Binding, record, scope)
+		if err != nil || p.logoutCustody.validatePrepared(&output.Logout, anchor, scope, p.original.LogoutSubject) != nil {
+			return deny()
+		}
+		p.preparedLogout = &output.Logout
+		keep = true
 	}
 	p.execution, p.record, p.generation, p.sealedDigest = restored, record, generation, digest
 	return restored, p.declaration, nil
@@ -363,7 +408,24 @@ func (p *samlIDPConfirmationPhase) ApplyFeature(ctx context.Context, w kernel.Wo
 		ResponseDigest: sha256.Sum256([]byte(e.ResponseID)), AssertionDigest: sha256.Sum256([]byte(e.AssertionID)), Fingerprint: fp, Generation: gen, RetainUntil: retained}); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	return p.effect.Apply(ctx, w, p, c)
+	receipt, err := p.effect.Apply(ctx, w, p, c)
+	if err != nil {
+		return identity.FeatureReceipt{}, err
+	}
+	if p.logoutCustody != nil {
+		anchor, err := samlLogoutSubjectAnchor(binding, p.record, p.logoutIssuerScope())
+		if err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+		if err := persistSAMLLogoutSubject(ctx, w, p, c, anchor, p.preparedLogout); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+	}
+	return receipt, nil
+}
+
+func (p *samlIDPConfirmationPhase) logoutIssuerScope() samlLogoutIssuerScope {
+	return samlLogoutIssuerScope{string(p.pending.Organization), string(p.pending.Provider), p.original.Issuer}
 }
 
 func (p *samlIDPConfirmationPhase) CheckFeatureCommit(ctx context.Context, w kernel.Work, c identity.Command) error {
@@ -415,6 +477,9 @@ func (p *samlIDPConfirmationPhase) RecoverParticipant(ctx context.Context, w ker
 	status, err = p.effect.Recover(ctx, w, p)
 	if err != nil || status != kernel.RecoveryNotCommitted {
 		return kernel.RecoveryUnknown, err
+	}
+	if p.logoutCustody != nil {
+		return recoverSAMLLogoutSubjectAbsence(ctx, w, p)
 	}
 	return kernel.RecoveryNotCommitted, nil
 }

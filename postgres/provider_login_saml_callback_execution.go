@@ -15,10 +15,12 @@ import (
 )
 
 type samlLoginCallbackPhase struct {
-	effect        *sessionpg.SSOSAMLSigninEffect
-	admitted      samlCallbackAdmission
-	replay        samlCallbackReplay
-	logoutSubject *samlStoredLogoutSubject
+	effect         *sessionpg.SSOSAMLSigninEffect
+	admitted       samlCallbackAdmission
+	replay         samlCallbackReplay
+	logoutSubject  *samlStoredLogoutSubject
+	logoutCustody  *SAMLLogoutSubjectCustody
+	preparedLogout *samlPreparedLogoutSubject
 }
 
 // Persist the replay commitment and the original reconciliation cutoff, not
@@ -36,7 +38,8 @@ type samlCallbackOutput struct {
 	ObservedAt, ValidUntil time.Time
 	Replay                 samlCallbackReplay
 	Terminal               []byte
-	LogoutSubject          *samlStoredLogoutSubject `json:",omitempty"`
+	LogoutSubject          *samlStoredLogoutSubject   `json:",omitempty"`
+	LogoutCustody          *samlPreparedLogoutSubject `json:",omitempty"`
 }
 
 func encodeSAMLCallbackOutput(saved samlCallbackOutput, subject *samlStoredLogoutSubject) ([]byte, error) {
@@ -49,7 +52,7 @@ func encodeSAMLCallbackOutput(saved samlCallbackOutput, subject *samlStoredLogou
 func decodeSAMLCallbackOutput(plain []byte, selected *samlStoredLogoutSubject) (samlCallbackOutput, error) {
 	var saved samlCallbackOutput
 	if err := providerLoginPayloadDecode(plain, &saved); err != nil {
-		clear(saved.Terminal)
+		clearSAMLCallbackOutput(saved)
 		return samlCallbackOutput{}, err
 	}
 	valid := saved.Schema == 1 && saved.LogoutSubject == nil && selected == nil
@@ -57,10 +60,17 @@ func decodeSAMLCallbackOutput(plain []byte, selected *samlStoredLogoutSubject) (
 		valid = saved.Schema == 2 && saved.LogoutSubject != nil && *saved.LogoutSubject == *selected
 	}
 	if !valid {
-		clear(saved.Terminal)
+		clearSAMLCallbackOutput(saved)
 		return samlCallbackOutput{}, identity.ForbiddenError{}
 	}
 	return saved, nil
+}
+
+func clearSAMLCallbackOutput(saved samlCallbackOutput) {
+	clear(saved.Terminal)
+	if saved.LogoutCustody != nil {
+		clear(saved.LogoutCustody.Envelope)
+	}
 }
 
 var _ kernel.SSOSAMLSigninContributor = (*providerLoginCallbackPhase)(nil)
@@ -103,9 +113,27 @@ func (p *providerLoginCallbackPhase) generateSAMLAccepted(ctx context.Context, g
 	}
 	replay := samlCallbackReplay{Response: sha256.Sum256([]byte(selected.evidence.ResponseID)),
 		Assertion: sha256.Sum256([]byte(selected.evidence.AssertionID)), RetainUntil: retained}
-	fields, _, err := p.prepareCallbackSession(selected.recipient, now, until, selected.recipient.member.Version, nil)
+	fields, command, err := p.prepareCallbackSession(selected.recipient, now, until, selected.recipient.member.Version, nil)
 	if err != nil {
 		return nil, err
+	}
+	var logout *samlPreparedLogoutSubject
+	if p.saml.logoutCustody != nil {
+		record, err := sessionpg.SSOSAMLSigninSession(command)
+		if err != nil {
+			return nil, err
+		}
+		feature, _ := command.Feature()
+		scope := p.logoutIssuerScope()
+		anchor, err := samlLogoutSubjectAnchor(feature.Binding, record, scope)
+		if err != nil {
+			return nil, err
+		}
+		logout, err = p.saml.logoutCustody.prepare(ctx, p.service.payload.Envelope, anchor, scope, p.saml.logoutSubject)
+		if err != nil {
+			return nil, err
+		}
+		defer clear(logout.Envelope)
 	}
 	terminal, err := p.service.payload.sealProviderLoginProtocolCallbackTerminal(ctx, p.found, providerProtocolSAML)
 	if err != nil {
@@ -113,7 +141,7 @@ func (p *providerLoginCallbackPhase) generateSAMLAccepted(ctx context.Context, g
 	}
 	defer clear(terminal)
 	plain, err := encodeSAMLCallbackOutput(samlCallbackOutput{Schema: 1, Fields: fields, Risk: providerLoginStoredAdmission(admission.Prepared()),
-		ObservedAt: p.found.ObservedAt, ValidUntil: until, Replay: replay, Terminal: terminal}, p.saml.logoutSubject)
+		ObservedAt: p.found.ObservedAt, ValidUntil: until, Replay: replay, Terminal: terminal, LogoutCustody: logout}, p.saml.logoutSubject)
 	defer clear(plain)
 	if err != nil || len(plain) > providerLoginCallbackPlainLimit {
 		return nil, identity.UnavailableError{}
@@ -142,7 +170,7 @@ func (p *providerLoginCallbackPhase) restoreSAMLAccepted(ctx context.Context, ge
 	owned := false
 	defer func() {
 		if !owned {
-			clear(saved.Terminal)
+			clearSAMLCallbackOutput(saved)
 		}
 	}()
 	saved, err = decodeSAMLCallbackOutput(plain, p.saml.logoutSubject)
@@ -184,6 +212,17 @@ func (p *providerLoginCallbackPhase) restoreSAMLAccepted(ctx context.Context, ge
 	if err != nil || vector.Factor.Binding.Version != selected.recipient.factorVersion || vector.Authorization.Version != selected.recipient.policyVersion {
 		return identity.ForbiddenError{}
 	}
+	if (p.saml.logoutCustody == nil) != (saved.LogoutCustody == nil) {
+		return identity.ForbiddenError{}
+	}
+	if p.saml.logoutCustody != nil {
+		feature, _ := command.Feature()
+		scope := p.logoutIssuerScope()
+		anchor, err := samlLogoutSubjectAnchor(feature.Binding, record, scope)
+		if err != nil || p.saml.logoutCustody.validatePrepared(saved.LogoutCustody, anchor, scope, saved.LogoutSubject) != nil {
+			return identity.ForbiddenError{}
+		}
+	}
 	terminal, err := p.service.payload.openProviderLoginProtocolCallbackTerminal(ctx, p.found.Row, saved.Terminal, providerProtocolSAML)
 	if err != nil || terminal.Metadata != p.found.Binding.Metadata {
 		return identity.ForbiddenError{}
@@ -197,6 +236,7 @@ func (p *providerLoginCallbackPhase) restoreSAMLAccepted(ctx context.Context, ge
 		generation: generation, digest: digest, validUntil: earlierLoginTime(saved.ValidUntil, selected.validUntil)}
 	p.saml.replay = saved.Replay
 	p.saml.logoutSubject = saved.LogoutSubject
+	p.saml.preparedLogout = saved.LogoutCustody
 	owned = true
 	return nil
 }
@@ -220,16 +260,36 @@ func (p *providerLoginCallbackPhase) applySAMLCallback(ctx context.Context, work
 	if err := p.checkProviderCurrent(ctx, work); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
+	if p.saml.logoutCustody != nil {
+		anchor, err := samlLogoutSubjectAnchor(binding, p.execution.record, p.logoutIssuerScope())
+		if err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+		if err := persistSAMLLogoutSubject(ctx, work, p, command, anchor, p.saml.preparedLogout); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+	}
 	if err := p.service.completeProviderLoginCallback(ctx, work, p, command, p.found, p.execution.validUntil, p.execution.terminal); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
 	return receipt, nil
 }
 
+func (p *providerLoginCallbackPhase) logoutIssuerScope() samlLogoutIssuerScope {
+	row := p.found.Row
+	return samlLogoutIssuerScope{row.OrganizationID, row.ProviderID, p.original.Issuer}
+}
+
 func (p *providerLoginCallbackPhase) recoverSAMLCallback(ctx context.Context, work kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
 	status, err := p.saml.effect.Recover(ctx, work, p)
 	if err != nil || status != kernel.RecoveryNotCommitted {
 		return status, err
+	}
+	if p.saml.logoutCustody != nil {
+		status, err = recoverSAMLLogoutSubjectAbsence(ctx, work, p)
+		if err != nil || status != kernel.RecoveryNotCommitted {
+			return status, err
+		}
 	}
 	// A recovery invocation can settle only an uncommitted original command.
 	// Any retained replay member contradicts that claim. Do not select by

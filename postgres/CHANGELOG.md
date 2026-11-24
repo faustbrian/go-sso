@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Optionally retain encrypted SAML logout correlation with the original issued
+  session on either sign-in path. A failed correlation write rolls back
+  issuance. Install the subject migration before selecting this custody.
+
 - Let selected SAML sign-in verifiers return the exact signed logout subject
   alongside login evidence. Preserve it in existing encrypted preparation for
   both sign-in paths; existing callers and payloads are unchanged.

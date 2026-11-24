@@ -67,6 +67,7 @@ type ProviderSAMLLoginCompletionService struct {
 	csrfKey             session.CSRFKey
 	verify              SAMLResponseVerifier
 	verifyLogoutSubject SAMLResponseWithLogoutSubjectVerifier
+	logoutCustody       *SAMLLogoutSubjectCustody
 	effect              *sessionpg.SSOSAMLSigninEffect
 }
 
@@ -142,6 +143,18 @@ func NewProviderSAMLLoginCompletionServiceWithLogoutSubject(start *ProviderLogin
 	return newProviderSAMLLoginCompletionService(start, c, verify)
 }
 
+// WithLogoutSubjectCustody selects durable correlation for newly issued SP
+// sessions. It requires the combined verifier and installed subject migration.
+// The original service is unchanged. Logout routing is configured separately.
+func (s *ProviderSAMLLoginCompletionService) WithLogoutSubjectCustody(custody *SAMLLogoutSubjectCustody) (*ProviderSAMLLoginCompletionService, error) {
+	if s == nil || s.verifyLogoutSubject == nil || custody == nil || custody.config.CurrentMatchKey == 0 {
+		return nil, sso.ErrInvalidInput
+	}
+	selected := *s
+	selected.logoutCustody = custody
+	return &selected, nil
+}
+
 // SigninCallback verifies the exact original prompt and browser, then commits
 // the replay pair, original one-use capability and session in one native Work.
 // Only the acknowledged fresh invocation discloses a normal session and CSRF.
@@ -196,11 +209,14 @@ func (s *ProviderSAMLLoginCompletionService) SigninCallback(ctx context.Context,
 	phase := &providerLoginCallbackPhase{
 		providerLoginCallbackInvocation: providerLoginCallbackInvocation{service: s.start, found: found, original: admitted.original,
 			authority: admitted.authority, flow: admitted.flow, browser: request.Browser, command: command},
-		grant: admitted.grant, policy: s.policy, saml: &samlLoginCallbackPhase{effect: s.effect, admitted: admitted, logoutSubject: logoutSubject},
+		grant: admitted.grant, policy: s.policy, saml: &samlLoginCallbackPhase{effect: s.effect, admitted: admitted, logoutSubject: logoutSubject, logoutCustody: s.logoutCustody},
 	}
 	defer func() {
 		if phase.execution != nil {
 			clear(phase.execution.terminal)
+		}
+		if phase.saml.preparedLogout != nil {
+			clear(phase.saml.preparedLogout.Envelope)
 		}
 	}()
 	phase.issuer, err = session.NewSSOSAMLSessionIssuerWithCSRF(phase, s.issuer, s.csrfKey)

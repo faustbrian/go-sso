@@ -46,9 +46,10 @@ func (ProviderSAMLIDPConfirmationConfig) MarshalText() ([]byte, error) {
 // using the pending writer's primary. It never introduces an SP transaction,
 // invokes the wire verifier again, or activates an HTTP route.
 type ProviderSAMLIDPConfirmationService struct {
-	arrival *ProviderSAMLIDPArrivalService
-	config  ProviderSAMLIDPConfirmationConfig
-	effect  *sessionpg.SSOSAMLIDPConfirmationEffect
+	arrival       *ProviderSAMLIDPArrivalService
+	config        ProviderSAMLIDPConfirmationConfig
+	effect        *sessionpg.SSOSAMLIDPConfirmationEffect
+	logoutCustody *SAMLLogoutSubjectCustody
 }
 
 func (*ProviderSAMLIDPConfirmationService) Format(f fmt.State, _ rune) {
@@ -85,6 +86,18 @@ func NewProviderSAMLIDPConfirmationService(arrival *ProviderSAMLIDPArrivalServic
 	return &ProviderSAMLIDPConfirmationService{arrival: arrival, config: c, effect: effect}, nil
 }
 
+// WithLogoutSubjectCustody retains the original signed subject for newly
+// confirmed sessions. It requires selected signed-subject admission and the
+// installed subject migration. The original service is unchanged.
+func (s *ProviderSAMLIDPConfirmationService) WithLogoutSubjectCustody(custody *SAMLLogoutSubjectCustody) (*ProviderSAMLIDPConfirmationService, error) {
+	if s == nil || s.arrival == nil || s.arrival.admission == nil || s.arrival.admission.verifyLogoutSubject == nil || custody == nil || custody.config.CurrentMatchKey == 0 {
+		return nil, sso.ErrInvalidInput
+	}
+	selected := *s
+	selected.logoutCustody = custody
+	return &selected, nil
+}
+
 // Confirm authenticates both original browser values and atomically consumes
 // pending custody, both SAML replay identifiers and the original one-time grant
 // with the normal session. Only the acknowledged new write releases session and
@@ -101,7 +114,12 @@ func (s *ProviderSAMLIDPConfirmationService) Confirm(ctx context.Context, reques
 	}
 	defer clear(pending.Envelope)
 	defer clear(original.Proof)
-	phase := &samlIDPConfirmationPhase{arrival: s.arrival, effect: s.effect, pending: pending, original: original, audience: s.config.Audience, remember: s.config.Remember}
+	phase := &samlIDPConfirmationPhase{arrival: s.arrival, effect: s.effect, pending: pending, original: original, audience: s.config.Audience, remember: s.config.Remember, logoutCustody: s.logoutCustody}
+	defer func() {
+		if phase.preparedLogout != nil {
+			clear(phase.preparedLogout.Envelope)
+		}
+	}()
 	command, b, err := s.confirmationCommand(pending, request)
 	if err != nil {
 		return out, providerError(ctx, err)
@@ -236,7 +254,7 @@ func (s *ProviderSAMLIDPConfirmationService) RecoverConfirmation(ctx context.Con
 		q.ActorID != s.arrival.config.ActorID || q.ActorKind != authorization.SubjectServiceAccount || q.UserID == "" || q.AnonymousFlowID != "" || q.LinkMode != 0 {
 		return identity.CommandResult{}, sso.ErrForbidden
 	}
-	c, _, err := s.coordinator(&samlIDPConfirmationPhase{arrival: s.arrival, effect: s.effect})
+	c, _, err := s.coordinator(&samlIDPConfirmationPhase{arrival: s.arrival, effect: s.effect, logoutCustody: s.logoutCustody})
 	if err != nil {
 		return identity.CommandResult{}, providerError(ctx, err)
 	}
