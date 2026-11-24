@@ -6,11 +6,6 @@ import (
 	"log/slog"
 )
 
-type verifiedPOSTResponseData struct {
-	evidence                       POSTResponseEvidence
-	nameQualifier, spNameQualifier string
-}
-
 // LogoutSubjectEvidence is the exact signed NameID and session index from an
 // accepted login assertion. Empty qualifiers or index mean they were absent,
 // not configured defaults. This is for strong subject matching under SAML

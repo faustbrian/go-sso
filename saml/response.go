@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/faustbrian/go-sso"
 	"github.com/knroy/go-xml/v2/xdm"
 )
 
@@ -54,6 +55,7 @@ type POSTResponseProfile struct {
 	sp, idp, acs string
 	signing      []pinnedSAMLCertificate
 	skew         time.Duration
+	mapping      *postAssertionMapping
 }
 
 // NewPOSTResponseProfile validates exact identities and copies the approved
@@ -67,7 +69,8 @@ func NewPOSTResponseProfile(config POSTResponseConfig) (POSTResponseProfile, err
 	if err != nil {
 		return POSTResponseProfile{}, err
 	}
-	return POSTResponseProfile{config.SPEntityID, config.IdentityProviderEntityID, config.AssertionConsumerURL, keys, config.ClockSkew}, nil
+	return POSTResponseProfile{sp: config.SPEntityID, idp: config.IdentityProviderEntityID,
+		acs: config.AssertionConsumerURL, signing: keys, skew: config.ClockSkew}, nil
 }
 
 func parsePinnedSigningCertificates(certificates [][]byte) ([]pinnedSAMLCertificate, error) {
@@ -131,6 +134,12 @@ type POSTResponseEvidence struct {
 // VerifiedPOSTResponse is detached evidence, not a replay reservation,
 // application principal, session, or permission to issue one.
 type VerifiedPOSTResponse struct{ verified verifiedPOSTResponseData }
+
+type verifiedPOSTResponseData struct {
+	evidence                       POSTResponseEvidence
+	nameQualifier, spNameQualifier string
+	assertion                      *sso.ProtocolAssertion
+}
 
 // Evidence explicitly returns the detached identity fields and replay set.
 // A zero or denied result returns no evidence.

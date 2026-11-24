@@ -29,6 +29,7 @@ type IDPInitiatedPOSTResponseConfig struct {
 type IDPInitiatedPOSTResponseProfile struct {
 	verifier   POSTResponseProfile
 	maximumAge time.Duration
+	providerID string
 }
 
 // NewIDPInitiatedPOSTResponseProfile derives the exact non-default ACS from
@@ -55,7 +56,7 @@ func NewIDPInitiatedPOSTResponseProfile(config IDPInitiatedPOSTResponseConfig) (
 	if err != nil {
 		return IDPInitiatedPOSTResponseProfile{}, err
 	}
-	return IDPInitiatedPOSTResponseProfile{verifier: verifier, maximumAge: config.MaximumAge}, nil
+	return IDPInitiatedPOSTResponseProfile{verifier: verifier, maximumAge: config.MaximumAge, providerID: config.ProviderID}, nil
 }
 
 func validIDPInitiatedProviderSegment(id string) bool {

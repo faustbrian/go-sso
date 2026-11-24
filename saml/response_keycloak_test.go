@@ -8,6 +8,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/faustbrian/go-sso"
 )
 
 // The synthetic Response and Assertion were independently signed by the
@@ -57,17 +59,49 @@ func TestPOSTResponseAcceptsIndependentKeycloakRSAPSSSignatures(t *testing.T) {
 		!evidence.ValidUntil.Equal(issued.Add(3*time.Minute)) || !evidence.AssertionExpiresAt.Equal(issued.Add(4*time.Minute)) {
 		t.Fatal("lost the exact signed identity, replay pair or expiry")
 	}
+	if _, err := verified.ProtocolAssertion(); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("unselected legacy validation returned a scoped assertion", err)
+	}
+
+	mapping, err := sso.NewAttributeMapping(sso.AttributeMappingSpec{Version: 4, SubjectClaim: "name_id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := profile.WithAssertionMapping(sso.Provider{
+		ID: "interop", OrganizationID: "org-interop", Protocol: "saml", Version: 3, MappingVersion: 4, Enabled: true,
+	}, mapping)
+	if err != nil {
+		t.Fatal("configure the installed mapping:", err)
+	}
+	verified, err = selected.Validate(t.Context(), input)
+	if err != nil {
+		t.Fatal("rejecting the selected independently signed POST:", err)
+	}
+	assertion, err := verified.ProtocolAssertion()
+	if err != nil || assertion.ProviderSubject != "interop-member" || len(assertion.Attributes) != 1 {
+		t.Fatal("a subject-only mapping lost signed provenance:", err)
+	}
+	subject, err := assertion.Attributes[0].Spec()
+	if err != nil || subject.Name != "name_id" || subject.Presence != sso.AttributeValue || subject.StringValue == nil ||
+		*subject.StringValue != "interop-member" || subject.Verified || subject.Authoritative ||
+		subject.Provenance != (sso.AttributeProvenance{ProviderID: "interop", ProviderProfileVersion: 3,
+			Issuer: "https://idp.example.test/realms/interop", Source: sso.AttributeSourceSAMLAssertion}) {
+		t.Fatal("wrong detached subject observation or scope:", err)
+	}
 
 	altered := bytes.Replace(wire, []byte("interop-member"), []byte("other--member"), 1)
 	if bytes.Equal(wire, altered) {
 		t.Fatal("the negative control did not reach signed content")
 	}
 	input.SAMLResponse = base64.StdEncoding.EncodeToString(bytes.TrimSpace(altered))
-	denied, err := profile.Validate(t.Context(), input)
+	denied, err := selected.Validate(t.Context(), input)
 	if !errors.Is(err, ErrInvalidSignature) {
 		t.Fatal("altered independent assertion did not fail signature verification:", err)
 	}
 	if _, err := denied.Evidence(); err == nil {
 		t.Fatal("altered independent assertion returned trusted evidence")
+	}
+	if _, err := denied.ProtocolAssertion(); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("altered independent assertion returned mapped evidence", err)
 	}
 }

@@ -91,6 +91,26 @@ both IDs and consume the original browser correlation before issuing a
 session. An unsuccessful validation never returns evidence. Neither a good
 signature nor the returned IDs are an authentication grant on their own.
 
+Use `profile.WithAssertionMapping(provider, mapping)` to explicitly select
+the same installed, enabled provider and mapping version as the signing
+profile. After `Validate`, call `result.ProtocolAssertion()` for the detached
+`sso.ProtocolAssertion`. Both SP- and IdP-initiated profiles support this opt-in;
+the IdP profile also requires the provider ID to match its configured ACS.
+Without the opt-in, `Evidence()` and `LogoutSubject()` work as before and
+`ProtocolAssertion()` returns `ErrInvalidInput`.
+
+The signed NameID is the stable subject and the `name_id` observation. The
+configured email, email-verification and display names are exact, distinct
+`Attribute` names, never aliases from `FriendlyName`. Selected attributes carry
+the configured provider and mapping versions with the exact authenticated IdP
+issuer. Missing, explicitly nil and empty string are distinct. This scalar
+profile rejects duplicates, arrays, selected complex values and encrypted
+attributes that could conceal a selected name. An `xsi:type`, where supplied,
+must agree with the locally selected string or boolean decoder. A signed value
+does not by itself verify email or confer authority; the SSO owner applies
+current policy and owns replay and session effects. See [SAML Core §§2.3.3,
+2.7.3](https://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf).
+
 For an explicitly selected IdP-initiated protocol integration, construct
 `NewIDPInitiatedPOSTResponseProfile` with the approved issuer, audience,
 external HTTPS origin, canonical provider ID, signing pins and maximum

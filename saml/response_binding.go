@@ -47,8 +47,6 @@ func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResp
 		!samlElement(parts[3], samlAssertionNS, "Conditions") || !samlElement(parts[4], samlAssertionNS, "AuthnStatement") {
 		return verifiedPOSTResponseData{}, false
 	}
-	// Unselected AttributeStatements confer no privilege. They remain signed,
-	// but are not mapped by the existing-linked-NameID profile.
 	for _, part := range parts[5:] {
 		if !samlElement(part, samlAssertionNS, "AttributeStatement") {
 			return verifiedPOSTResponseData{}, false
@@ -74,13 +72,21 @@ func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResp
 	if !binding.now.Before(validUntil) {
 		return verifiedPOSTResponseData{}, false
 	}
-	return verifiedPOSTResponseData{
+	result := verifiedPOSTResponseData{
 		evidence: POSTResponseEvidence{
 			AssertionID: samlAttr(assertion, "ID"), ProviderSubject: subject.value, SubjectFormat: subject.format,
 			SessionIndex: remoteSessionIndex, AssertionExpiresAt: assertionExpiry, ValidUntil: validUntil,
 		},
 		nameQualifier: subject.nameQualifier, spNameQualifier: subject.spNameQualifier,
-	}, true
+	}
+	if p.mapping != nil {
+		mapped, err := p.mapping.project(subject.value, parts[5:])
+		if err != nil {
+			return verifiedPOSTResponseData{}, false
+		}
+		result.assertion = &mapped
+	}
+	return result, true
 }
 
 func (p POSTResponseProfile) bindConditions(n *xdm.Node, now time.Time) (time.Time, bool) {

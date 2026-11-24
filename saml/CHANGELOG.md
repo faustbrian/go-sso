@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add opt-in signed SAML assertion mapping for SP and IdP-initiated login.
+  Return the exact NameID, issuer and selected scalar observations, preserving
+  absent, nil and empty values without granting email, membership or role trust.
+
 - Preserve an installed URN IdP identifier in signed LogoutRequests. The
   browser redirect destination still requires the same approved HTTPS URL.
 
