@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Implement the SSO protocol adapter for a single original SP SAML
+  transaction. Sign its retained Redirect request and complete a bounded
+  POST with mapped observations and optional detached replay evidence.
+
 - Add opt-in signed SAML assertion mapping for SP and IdP-initiated login.
   Return the exact NameID, issuer and selected scalar observations, preserving
   absent, nil and empty values without granting email, membership or role trust.

@@ -111,6 +111,16 @@ does not by itself verify email or confer authority; the SSO owner applies
 current policy and owns replay and session effects. See [SAML Core §§2.3.3,
 2.7.3](https://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf).
 
+For a coordinator using `sso.ProtocolAdapter`, construct `NewSPProtocolAdapter`
+with the original bound `LoginTransaction`, AuthnRequest, capability deadline,
+signer, and matching Redirect and mapped POST profiles. After admitting the
+callback, supply the already extracted Base64 `SAMLResponse` as
+`ProtocolCallback.Payload`; the adapter closes it. Leave room in the byte
+budget to establish EOF without reading past the bound. An SP callback that
+also needs the replay pair calls `CompleteVerified` once and consumes both
+projections from that result. The adapter does not reserve the replay pair or
+issue a session. Unsolicited responses keep their separate verifier.
+
 For an explicitly selected IdP-initiated protocol integration, construct
 `NewIDPInitiatedPOSTResponseProfile` with the approved issuer, audience,
 external HTTPS origin, canonical provider ID, signing pins and maximum
