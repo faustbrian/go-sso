@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Replace a disabled SAML provider's IdP signing certificates through the
+  dedicated credential rotation operation. Preserve the installed SP signer,
+  IdP identity, endpoints, domains and mapping. Original retries recover the
+  same outcome without applying rotation again.
+
 - Opt into provider-owned role replacement on SAML SP linked sign-in with
   `WithRoleSync`. Signed booleans grant or withdraw only the selected
   provider's roles; the exact role update, replay reservation and new session

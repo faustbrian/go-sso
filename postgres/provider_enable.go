@@ -138,6 +138,11 @@ func withAuthenticatedProtocolProviderCredential(ctx context.Context, crypto *en
 	if json.Unmarshal(contextWire, &binding) != nil || binding.Protocol != protocol || binding.TenantID != tenant || binding.OrganizationID != organization || binding.ProviderID != provider || binding.Generation != generation || binding.ProviderVersion != installed-1 {
 		return sso.ErrUnavailable
 	}
+	// The stored SAML credential row owns only the SP signer. IdP trust lives
+	// in provider metadata and must never be borrowed as signing material.
+	if protocol == providerProtocolSAML && binding.Purpose != sso.SAMLSigningCredentialPurpose {
+		return sso.ErrUnavailable
+	}
 	canonical, err := json.Marshal(binding)
 	if err != nil || !bytes.Equal(canonical, contextWire) {
 		return sso.ErrUnavailable

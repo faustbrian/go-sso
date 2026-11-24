@@ -50,9 +50,9 @@ type ProviderCredentialsConfig struct {
 
 // ProviderCredentialsService initializes or replaces a disabled static
 // provider's credential. OAuth 2.0 requires WithOAuthRegistration on the
-// organization-bound ProviderService. SAML SP signing material requires
-// WithSAMLSigningCredentialValidator. Configure that base service first and
-// install ProviderCredentialsMigrationSource. No constructor performs
+// organization-bound ProviderService. SAML IdP pins require WithSAMLRegistration;
+// SP signing material requires WithSAMLSigningCredentialValidator. Configure the
+// base service first and install ProviderCredentialsMigrationSource. No constructor performs
 // I/O, grants current authorization or bypasses canonical native risk policy.
 // Concurrent calls use independent native contributors; the caller owns all
 // existing pool/key/policy resources for the complete recovery lifetime.
@@ -148,8 +148,9 @@ func (s *ProviderCredentialsService) admit(ctx context.Context) (a providerAdmis
 // through the existing native request/preparation owners. The internal key is
 // derived only from CommandID within native tenant/actor/operation scope; there
 // is no external key, new workflow journal or caller-authorized recovery scope.
-// Initial and replacement writes advance the shared provider version, replace
-// only the current encrypted generation, and atomically retain audit/outbox.
+// Initial and replacement writes advance the shared provider version and
+// atomically retain audit/outbox. SAML IdP pin replacement changes only the
+// trusted certificate set in provider metadata, not the SP signing key.
 // Original retries disclose historical results, not current credential access.
 // The ingress protocol must match the authenticated provider metadata.
 func (s *ProviderCredentialsService) ProviderCredentialsRotate(ctx context.Context, r sso.ProviderCredentialsRotateRequest) (out sso.ProviderCredentialsRotateResult, err error) {
@@ -164,8 +165,14 @@ func (s *ProviderCredentialsService) ProviderCredentialsRotate(ctx context.Conte
 	if reference.Protocol == providerProtocolOAuth2 && !s.base.oauthRegistration {
 		return out, sso.ErrForbidden
 	}
-	if reference.Protocol == providerProtocolSAML && s.base.samlSigningValidator == nil {
-		return out, sso.ErrForbidden
+	if reference.Protocol == providerProtocolSAML {
+		if reference.Purpose == sso.SAMLIDPSigningCertificatesPurpose {
+			if s.base.samlValidator == nil || s.base.samlOrigin == "" {
+				return out, sso.ErrForbidden
+			}
+		} else if s.base.samlSigningValidator == nil {
+			return out, sso.ErrForbidden
+		}
 	}
 	wire, err := r.CredentialReference.EncryptedEnvelope().MarshalBinary()
 	if err != nil || len(wire) == 0 || len(wire) > 32768 {
@@ -198,7 +205,7 @@ func (s *ProviderCredentialsService) ProviderCredentialsRotate(ctx context.Conte
 		return out, err
 	}
 	bound, _ := a.session.Session.Bindings()
-	op := credentialsOperation()
+	op := p.operation()
 	scope := kernel.RequestKeyScope{TenantID: s.base.authentication.TenantID, ActorID: identity.ActorID(bound.UserID), ActorKind: authorization.SubjectUser, Method: "POST", RouteID: op.OperationID}
 	caller := s.base.kernelDecision(bound.UserID, "identity.request-admission", op.OperationID)
 	caller.Request.Action = authorization.Action(op.OperationID)

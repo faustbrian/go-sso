@@ -64,6 +64,18 @@ is disabled. The fresh credentials authority and the original certificate
 expiry bound the write. Original retries recover only the historical result;
 successful installation does not enable the provider or publish SP metadata.
 
+To replace a disabled SAML provider's IdP trust, use the same credentials
+service with `WithSAMLRegistration` and a separate envelope whose purpose is
+`sso.SAMLIDPSigningCertificatesPurpose`. Encode the full DER pin set with
+`sso.EncodeSAMLIDPSigningCertificates`; use the exact current provider
+version and its successor as the generation. This does not use the SP key
+generation. Only the IdP signing certificates change; entity ID, Redirect
+endpoint, domains, mapping, and the installed SP signer are preserved.
+The no-overlap policy keeps no automatic predecessor set. Include both
+certificates explicitly in the replacement if a trust transition needs both.
+Re-enable through `ProviderEnable` with current proof and signer checkpoints.
+No new migration or new HTTP surface is needed for this native operation.
+
 For native SAML activation, also install `ProviderEnableMigrationSource` and
 the login-transaction disposition history described below. Select both
 enablement and disablement authorization on the organization-bound service.
@@ -824,7 +836,8 @@ provider enablement or present-day credential authority. Unknown exposes no
 active result and requires original reconciliation; missing preparation cannot
 become a fresh mutation. Native preparation retains only re-enveloped non-secret
 metadata, not predecessor client-secret ciphertext. No active-use overlap,
-drain, SAML keys/certificates, provider calls, login, HTTP or app is selected.
+drain, provider calls, login, HTTP or app is selected by this client-secret
+profile. The separate SAML ingress purposes are described above.
 
 The executable boundary is in
 [provider_credentials_integration_test.go](provider_credentials_integration_test.go)

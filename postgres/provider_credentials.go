@@ -40,6 +40,20 @@ func credentialsOperation() identity.FeatureOperation {
 	return identity.FeatureOperation{Owner: "sso", OperationID: "identity.sso.provider.credentials-rotate", SchemaID: "sso-disabled-static-oidc-credentials-rotate-v1", SchemaVersion: 1, RecordRequirement: identity.FeatureRecordRequired}
 }
 
+const samlIDPPinsRotationProfile = "disabled-static-saml-idp-signing-certificates-v1"
+
+func (p *ProviderCredentialsContributor) operation() identity.FeatureOperation {
+	op := credentialsOperation()
+	if p.replacesSAMLIDPPins() {
+		op.SchemaID = "sso-" + samlIDPPinsRotationProfile
+	}
+	return op
+}
+
+func (p *ProviderCredentialsContributor) replacesSAMLIDPPins() bool {
+	return p != nil && p.request.CredentialReference.Context().Purpose == sso.SAMLIDPSigningCertificatesPurpose
+}
+
 // ProviderCredentialsContributor is the invocation-local native credentials
 // participant. Only ProviderCredentialsService composes it; zero is unusable.
 // It owns no transaction or journal and is never shared across invocations.
@@ -67,8 +81,8 @@ var _ kernel.FeatureCommitContributor = (*ProviderCredentialsContributor)(nil)
 func (*ProviderCredentialsContributor) Descriptor() kernel.ContributorDescriptor {
 	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "identity.sso.provider-credentials", Version: 1}
 }
-func (*ProviderCredentialsContributor) FeatureOperations() []identity.FeatureOperation {
-	return []identity.FeatureOperation{credentialsOperation()}
+func (p *ProviderCredentialsContributor) FeatureOperations() []identity.FeatureOperation {
+	return []identity.FeatureOperation{p.operation()}
 }
 func (ProviderCredentialsContributor) Format(s fmt.State, _ rune) {
 	_, _ = s.Write([]byte("sso.postgres.ProviderCredentialsContributor(redacted)"))
@@ -103,7 +117,8 @@ func (p *ProviderCredentialsContributor) lifecycle() kernel.LifecyclePlan {
 }
 
 func (p *ProviderCredentialsContributor) requestContext(b kernel.RequestKeyPreparationBinding) (envelope.Context, error) {
-	if p == nil || p.service == nil || b.Namespace != p.service.base.config.RequestKeys.Namespace || b.Scope.RouteID != credentialsOperation().OperationID || b.Scope.Method != "POST" || b.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: credentialsOperation()}) || b.PolicyVersion != p.service.base.config.PolicyVersion || b.Admission.CommandID == "" || b.IntentDigest == ([32]byte{}) {
+	op := p.operation()
+	if p == nil || p.service == nil || b.Namespace != p.service.base.config.RequestKeys.Namespace || b.Scope.RouteID != op.OperationID || b.Scope.Method != "POST" || b.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: op}) || b.PolicyVersion != p.service.base.config.PolicyVersion || b.Admission.CommandID == "" || b.IntentDigest == ([32]byte{}) {
 		return envelope.Context{}, sso.ErrInvalidInput
 	}
 	frame, err := json.Marshal(struct {
@@ -120,7 +135,11 @@ func (p *ProviderCredentialsContributor) requestContext(b kernel.RequestKeyPrepa
 		return envelope.Context{}, sso.ErrInvalidInput
 	}
 	digest := sha256.Sum256(frame)
-	return envelope.NewContext(map[string]string{"owner": "sso/provider-credentials-request", "profile": "disabled-static-oidc-no-overlap-v1", "binding": hex.EncodeToString(digest[:])})
+	profile := "disabled-static-oidc-no-overlap-v1"
+	if p.replacesSAMLIDPPins() {
+		profile = samlIDPPinsRotationProfile
+	}
+	return envelope.NewContext(map[string]string{"owner": "sso/provider-credentials-request", "profile": profile, "binding": hex.EncodeToString(digest[:])})
 }
 
 func (p *ProviderCredentialsContributor) codec() *ProviderContributor {
@@ -215,7 +234,7 @@ func (p *ProviderCredentialsContributor) prepare(ctx context.Context, b kernel.R
 	if err = p.loadConfiguration(ctx); err != nil {
 		return err
 	}
-	if binding.Protocol == providerProtocolSAML {
+	if binding.Protocol == providerProtocolSAML && !p.replacesSAMLIDPPins() {
 		contextWire, err := json.Marshal(binding)
 		if err != nil {
 			return sso.ErrInvalidInput
@@ -231,7 +250,7 @@ func (p *ProviderCredentialsContributor) prepare(ctx context.Context, b kernel.R
 			p.admission.until = until
 		}
 	}
-	op := credentialsOperation()
+	op := p.operation()
 	p.binding = identity.CommandBinding{CommandID: b.Admission.CommandID, TenantID: bound.TenantID, UserID: bound.UserID, ActorID: identity.ActorID(bound.UserID), ActorKind: authorization.SubjectUser, OperationID: op.OperationID, RecordID: p.request.ProviderID, SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion, PolicyID: s.config.PolicyID, PolicyVersion: s.config.PolicyVersion, CorrelationID: string(p.request.CommandID)}
 	if p.binding.ValidateFor(op) != nil {
 		return sso.ErrInvalidInput
@@ -295,11 +314,18 @@ func (p *ProviderCredentialsContributor) loadConfiguration(ctx context.Context) 
 		return sso.ErrInvalidInput
 	}
 	p.previousGeneration, err = strconv.ParseUint(generationText, 10, 64)
-	if err != nil || p.previousGeneration == math.MaxUint64 {
+	if err != nil {
 		return sso.ErrUnavailable
 	}
-	if p.request.CredentialReference.Context().Generation != p.previousGeneration+1 {
-		return sso.ErrConflict
+	// The credential row holds the SP signer (or client secret), never IdP
+	// trust. Pin rotation uses the successor metadata version as its generation.
+	if !p.replacesSAMLIDPPins() {
+		if p.previousGeneration == math.MaxUint64 {
+			return sso.ErrUnavailable
+		}
+		if p.request.CredentialReference.Context().Generation != p.previousGeneration+1 {
+			return sso.ErrConflict
+		}
 	}
 	p.mappingVersion, err = strconv.ParseUint(mappingText, 10, 64)
 	if err != nil || p.mappingVersion == 0 {
@@ -320,7 +346,10 @@ func (p *ProviderCredentialsContributor) loadConfiguration(ctx context.Context) 
 	}
 	protocol := p.request.CredentialReference.Context().Protocol
 	if protocol == providerProtocolSAML {
-		_, err = s.readProviderSAMLConfiguration(p.metadata, p.mappingVersion, int(pending))
+		current, err := s.readProviderSAMLConfiguration(p.metadata, p.mappingVersion, int(pending))
+		if err == nil && p.replacesSAMLIDPPins() {
+			return p.prepareSAMLIDPPins(ctx, current)
+		}
 		return err
 	}
 	_, err = readProviderConfigurationDomains(protocol, p.metadata, p.mappingVersion, int(pending))
@@ -388,18 +417,19 @@ func (p *ProviderCredentialsContributor) RestoreRequestKey(ctx context.Context, 
 	}
 	canonical, _ := json.Marshal(saved)
 	original := identity.CommandBinding(saved)
-	if !bytes.Equal(canonical, plain) || original.ValidateFor(credentialsOperation()) != nil || original.CommandID != b.Admission.CommandID || original.TenantID != b.Scope.TenantID || original.UserID != identity.UserID(b.Scope.ActorID) || original.ActorID != b.Scope.ActorID || original.ActorKind != authorization.SubjectUser || original.RecordID != p.request.ProviderID || original.PolicyID != p.service.base.config.PolicyID || original.PolicyVersion != b.PolicyVersion || original.CorrelationID != string(p.request.CommandID) {
+	if !bytes.Equal(canonical, plain) || original.ValidateFor(p.operation()) != nil || original.CommandID != b.Admission.CommandID || original.TenantID != b.Scope.TenantID || original.UserID != identity.UserID(b.Scope.ActorID) || original.ActorID != b.Scope.ActorID || original.ActorKind != authorization.SubjectUser || original.RecordID != p.request.ProviderID || original.PolicyID != p.service.base.config.PolicyID || original.PolicyVersion != b.PolicyVersion || original.CorrelationID != string(p.request.CommandID) {
 		return identity.CommandBinding{}, sso.ErrUnavailable
 	}
 	return original, nil
 }
 
 func (p *ProviderCredentialsContributor) ValidateFeatureCommand(c identity.Command, plan kernel.CommandPlan) error {
-	if p == nil || p.service == nil || p.command != c || p.binding.ValidateFor(credentialsOperation()) != nil || plan.Feature == nil || *plan.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: credentialsOperation()}) || plan.SubjectType != "sso_provider" || plan.CommandCounters == nil || *plan.CommandCounters != p.counter || plan.Lifecycle == nil || *plan.Lifecycle != p.lifecycle() || len(plan.Audits) != 1 || plan.Audits[0].EventType != credentialsOperation().OperationID || !plan.Audits[0].Required || plan.Audits[0].RequiredRecordCount != 1 || plan.Audits[0].RetentionClass != "protected" || plan.Capability != nil || plan.CapabilityIssuance != nil || plan.OTP != nil || plan.Delivery != nil {
+	op := p.operation()
+	if p == nil || p.service == nil || p.command != c || p.binding.ValidateFor(op) != nil || plan.Feature == nil || *plan.Feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: op}) || plan.SubjectType != "sso_provider" || plan.CommandCounters == nil || *plan.CommandCounters != p.counter || plan.Lifecycle == nil || *plan.Lifecycle != p.lifecycle() || len(plan.Audits) != 1 || plan.Audits[0].EventType != op.OperationID || !plan.Audits[0].Required || plan.Audits[0].RequiredRecordCount != 1 || plan.Audits[0].RetentionClass != "protected" || plan.Capability != nil || plan.CapabilityIssuance != nil || plan.OTP != nil || plan.Delivery != nil {
 		return sso.ErrInvalidInput
 	}
 	spec, valid := c.Feature()
-	if !valid || spec.Binding != p.binding || spec.Operation != credentialsOperation() {
+	if !valid || spec.Binding != p.binding || spec.Operation != op {
 		return sso.ErrInvalidInput
 	}
 	for _, field := range spec.Fields {
@@ -415,20 +445,21 @@ func (p *ProviderCredentialsContributor) ValidateFeaturePreparation(c identity.C
 
 func (p *ProviderCredentialsContributor) plan(final bool) (kernel.CommandPlan, error) {
 	b := p.binding
+	op := p.operation()
 	builder, err := audit.NewBuilder(audit.BuilderConfig{})
 	if err != nil {
 		return kernel.CommandPlan{}, sso.ErrUnavailable
 	}
-	seed, err := builder.Build(audit.RecordInput{OccurredAt: p.admission.verified, Action: credentialsOperation().OperationID, Outcome: audit.OutcomeSucceeded, Actor: audit.ActorInput{Kind: audit.ActorHuman, ID: string(b.ActorID)}, Subject: audit.SubjectInput{Type: "sso_provider", ID: b.RecordID}, Context: audit.ContextInput{TenantID: string(b.TenantID), CorrelationID: b.CorrelationID}, Policy: audit.PolicyMetadata{PolicyID: b.PolicyID, Version: strconv.FormatUint(b.PolicyVersion, 10)}, Changes: audit.ChangeSetInput{Redacted: true}, Attributes: map[string]string{"command.id": string(b.CommandID), "aggregate.type": "sso_provider", "aggregate.id": b.RecordID, "aggregate.before_version": strconv.FormatUint(p.request.ExpectedVersion, 10), "aggregate.after_version": strconv.FormatUint(p.request.ExpectedVersion+1, 10), "retention.class": "protected"}})
+	seed, err := builder.Build(audit.RecordInput{OccurredAt: p.admission.verified, Action: op.OperationID, Outcome: audit.OutcomeSucceeded, Actor: audit.ActorInput{Kind: audit.ActorHuman, ID: string(b.ActorID)}, Subject: audit.SubjectInput{Type: "sso_provider", ID: b.RecordID}, Context: audit.ContextInput{TenantID: string(b.TenantID), CorrelationID: b.CorrelationID}, Policy: audit.PolicyMetadata{PolicyID: b.PolicyID, Version: strconv.FormatUint(b.PolicyVersion, 10)}, Changes: audit.ChangeSetInput{Redacted: true}, Attributes: map[string]string{"command.id": string(b.CommandID), "aggregate.type": "sso_provider", "aggregate.id": b.RecordID, "aggregate.before_version": strconv.FormatUint(p.request.ExpectedVersion, 10), "aggregate.after_version": strconv.FormatUint(p.request.ExpectedVersion+1, 10), "retention.class": "protected"}})
 	if err != nil {
 		return kernel.CommandPlan{}, sso.ErrInvalidInput
 	}
-	digest, err := kernel.FeatureAuditBindingDigest(b, credentialsOperation(), "sso_provider", seed)
+	digest, err := kernel.FeatureAuditBindingDigest(b, op, "sso_provider", seed)
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
 	lifecycle := p.lifecycle()
-	plan := kernel.CommandPlan{Contributors: p.registry.Descriptors(), Feature: &kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: credentialsOperation()}, SubjectType: "sso_provider", Lifecycle: &lifecycle, CommandCounters: &p.counter, Audits: []kernel.AuditPlan{{EventType: credentialsOperation().OperationID, SchemaVersion: 1, Required: true, RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384, RetentionPolicyVersion: 1, RetentionClass: "protected", BindingDigest: digest}}}
+	plan := kernel.CommandPlan{Contributors: p.registry.Descriptors(), Feature: &kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: op}, SubjectType: "sso_provider", Lifecycle: &lifecycle, CommandCounters: &p.counter, Audits: []kernel.AuditPlan{{EventType: op.OperationID, SchemaVersion: 1, Required: true, RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384, RetentionPolicyVersion: 1, RetentionClass: "protected", BindingDigest: digest}}}
 	if final {
 		return p.coordinator.PrepareCommandPlan(b, p.command, plan)
 	}
@@ -440,7 +471,7 @@ func (p *ProviderCredentialsContributor) admit(ctx context.Context, w kernel.Wor
 		return identity.ForbiddenError{}
 	}
 	b, feature, _, err := w.FeatureScope(p)
-	if err != nil || b != p.binding || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: credentialsOperation()}) {
+	if err != nil || b != p.binding || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) {
 		return identity.ForbiddenError{}
 	}
 	a, config := p.admission, p.service.base.config
@@ -501,7 +532,9 @@ func (p *ProviderCredentialsContributor) requireProvider(ctx context.Context, w 
 	version, generation := p.request.ExpectedVersion, p.previousGeneration
 	if after {
 		version++
-		generation++
+		if !p.replacesSAMLIDPPins() {
+			generation++
+		}
 	}
 	rows, err := w.Query(ctx, `SELECT p.metadata_version::text,p.enabled,COALESCE(c.generation,0)::text FROM sso_providers.providers p LEFT JOIN sso_providers.credentials c USING(tenant_id,organization_id,provider_id) WHERE p.tenant_id=$1 AND p.organization_id=$2 AND p.provider_id=$3 FOR UPDATE OF p`, string(p.binding.TenantID), p.service.base.updateOrganization, p.binding.RecordID)
 	if err != nil {
@@ -633,17 +666,10 @@ func (p *ProviderCredentialsContributor) ApplyFeature(ctx context.Context, w ker
 	if n != 1 {
 		return identity.FeatureReceipt{}, identity.ConflictError{}
 	}
-	contextWire, err := json.Marshal(p.request.CredentialReference.Context())
-	if err != nil {
-		return identity.FeatureReceipt{}, sso.ErrUnavailable
-	}
-	credentialGeneration := p.request.CredentialReference.Context().Generation
-	n, err = w.Exec(ctx, `INSERT INTO sso_providers.credentials(tenant_id,organization_id,provider_id,generation,provider_version,envelope,credential_context) VALUES($1,$2,$3,$4::numeric,$5::numeric,$6,$7) ON CONFLICT(tenant_id,organization_id,provider_id) DO UPDATE SET generation=EXCLUDED.generation,provider_version=EXCLUDED.provider_version,envelope=EXCLUDED.envelope,credential_context=EXCLUDED.credential_context WHERE sso_providers.credentials.generation=$8::numeric`, string(b.TenantID), s.updateOrganization, b.RecordID, strconv.FormatUint(credentialGeneration, 10), strconv.FormatUint(p.request.ExpectedVersion+1, 10), p.credentialWire, contextWire, strconv.FormatUint(p.previousGeneration, 10))
-	if err != nil {
-		return identity.FeatureReceipt{}, err
-	}
-	if n != 1 {
-		return identity.FeatureReceipt{}, identity.ConflictError{}
+	if !p.replacesSAMLIDPPins() {
+		if err := p.writeInstalledCredential(ctx, w, b); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
 	}
 	bound, err := json.Marshal(providerStoredBinding(b))
 	if err != nil {
@@ -656,12 +682,28 @@ func (p *ProviderCredentialsContributor) ApplyFeature(ctx context.Context, w ker
 	if n != 1 {
 		return identity.FeatureReceipt{}, sso.ErrUnavailable
 	}
-	return identity.FeatureReceipt{Operation: credentialsOperation(), BeforeVersion: p.request.ExpectedVersion, AfterVersion: p.request.ExpectedVersion + 1}, nil
+	return identity.FeatureReceipt{Operation: p.operation(), BeforeVersion: p.request.ExpectedVersion, AfterVersion: p.request.ExpectedVersion + 1}, nil
+}
+
+func (p *ProviderCredentialsContributor) writeInstalledCredential(ctx context.Context, w kernel.Work, b identity.CommandBinding) error {
+	reference := p.request.CredentialReference.Context()
+	contextWire, err := json.Marshal(reference)
+	if err != nil {
+		return sso.ErrUnavailable
+	}
+	rows, err := w.Exec(ctx, `INSERT INTO sso_providers.credentials(tenant_id,organization_id,provider_id,generation,provider_version,envelope,credential_context) VALUES($1,$2,$3,$4::numeric,$5::numeric,$6,$7) ON CONFLICT(tenant_id,organization_id,provider_id) DO UPDATE SET generation=EXCLUDED.generation,provider_version=EXCLUDED.provider_version,envelope=EXCLUDED.envelope,credential_context=EXCLUDED.credential_context WHERE sso_providers.credentials.generation=$8::numeric`, string(b.TenantID), p.service.base.updateOrganization, b.RecordID, strconv.FormatUint(reference.Generation, 10), strconv.FormatUint(p.request.ExpectedVersion+1, 10), p.credentialWire, contextWire, strconv.FormatUint(p.previousGeneration, 10))
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return identity.ConflictError{}
+	}
+	return nil
 }
 
 func (p *ProviderCredentialsContributor) RecoverParticipant(ctx context.Context, w kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
 	b, feature, lifecycle, err := w.FeatureScope(p)
-	if err != nil || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: credentialsOperation()}) || lifecycle != p.lifecycle() {
+	if err != nil || feature != (kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}) || lifecycle != p.lifecycle() {
 		return kernel.RecoveryUnknown, sso.ErrUnavailable
 	}
 	rows, err := w.Query(ctx, `SELECT binding,organization_id,provider_id FROM sso_providers.credential_effects WHERE command_id=$1 AND tenant_id=$2`, string(b.CommandID), string(b.TenantID))
