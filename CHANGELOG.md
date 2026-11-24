@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add bounded directory group-member batch and checkpoint contracts. The
+  checkpoint binds the connection and ordered child IDs; an unresolved child
+  prevents advancement without losing settled siblings. Native admission and
+  durable cursor persistence remain separate.
+
 - Define a bounded SAML IdP certificate pin-set bundle and a dedicated
   encrypted rotation purpose without changing the SP signing generation.
 

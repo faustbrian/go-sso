@@ -268,6 +268,28 @@ Method changes cannot replace an original challenge or renew it. Use a new
 organization-owned immutable claim after an authorized withdrawal; no automatic
 renewal, takeover, DNS fallback or HTTPS-to-DNS downgrade is implemented.
 
+## Directory group-member checkpoint contract
+
+The selected `DirectoryDeltaBatch` binds an exact tenant, organization,
+enterprise provider, SCIM connection, generation, mapping version and
+predecessor checkpoint. Construct one `NewDirectoryGroupMembershipDelta`
+for each ordered User-to-Group edge change, with its original stable child
+command ID and exact SCIM resource IDs. Neither display names nor
+`externalId` are accepted as identity authority. Group-to-Group membership
+and role inference are not part of this contract.
+
+Before any write, native composition must independently admit the provider,
+connection, generation and mapping and enlist its `DirectorySyncContributor`.
+The contributor loads each original, service-account-owned
+`DirectoryTeamMembershipOperation` outcome and uses
+`NewDirectoryApplyResult` to bind those outcomes to the admitted batch.
+`NextCheckpoint` checks that exact batch again, returning
+`ErrDirectoryReconciliation` with no successor when any child is unknown,
+conflicted or still running. Recover the original child commands rather than
+allocating replacements. Conditional cursor persistence is the native SSO
+owner's responsibility; this module alone does not expose directory
+provisioning, start generations, or authorize organization mutations.
+
 ## Custody and recovery
 
 Generate a command ID using `identity.NewCommandID` and preserve it. There is one
