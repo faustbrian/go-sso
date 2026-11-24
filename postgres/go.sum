@@ -185,6 +185,8 @@ github.com/faustbrian/go-scim/organization v0.0.0-20261124133721-fcba0a04b990 h1
 github.com/faustbrian/go-scim/organization v0.0.0-20261124133721-fcba0a04b990/go.mod h1:U+ia9Fa0n5cSJpZzEYF59FQ50PQv6xzHsBKOdUY3E4k=
 github.com/faustbrian/go-scim/organization v0.0.0-20261124134445-60e166e25fd9 h1:qu2kFWYZJ2qQ+2a97GcRVmZPFKjRXsAEy682oozA48U=
 github.com/faustbrian/go-scim/organization v0.0.0-20261124134445-60e166e25fd9/go.mod h1:y9jpra2b6mSmgIRqRPQeYrG6yr8Giik1tGcpW/nEn1g=
+github.com/faustbrian/go-scim/organization v0.0.0-20261124142207-32943a04df43 h1:PtKf9CWhDc39NpbRS8lh9Bx5cXKmRaj0T4BC54TWyQQ=
+github.com/faustbrian/go-scim/organization v0.0.0-20261124142207-32943a04df43/go.mod h1:zjCqHemb6DdC9zlp1mZ0J8zIN/Y0lxPEZTVkhQTrU40=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261124132804-3a7e6a61e856 h1:33jht1N/TrbIqiI5bOlVgJ3Ht+FGgVCKtiNpz5zRkhY=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261124132804-3a7e6a61e856/go.mod h1:fmS8i5F2AwljYb5MuBdn90vtMT/RxcR1Mdqhmh4rB/A=
 github.com/faustbrian/go-secret-envelope/v2 v2.0.1 h1:1GHj2WZhKZihdhlbsU12o7T5kaA9z7IOy/1RQGu3RhA=
@@ -199,6 +201,8 @@ github.com/faustbrian/go-sso v0.0.0-20261124114714-6370e14f728e h1:h2KRxztPGlQsn
 github.com/faustbrian/go-sso v0.0.0-20261124114714-6370e14f728e/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso v0.0.0-20261124130914-a92664a37162 h1:PaezdWDH/kdicZBIBBci6/xSR6ZJxquBkFhnd06uN24=
 github.com/faustbrian/go-sso v0.0.0-20261124130914-a92664a37162/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
+github.com/faustbrian/go-sso v0.0.0-20261124141854-d9579eed5ba7 h1:IyFBo+Rgh64ySty1rHsbr8k05+yLuDSGJzk4uHYLky4=
+github.com/faustbrian/go-sso v0.0.0-20261124141854-d9579eed5ba7/go.mod h1:8t+cOqDVJC60hGJHau0RBT4qE2ujMatsVWgXvkE/Bzk=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734 h1:wi/Fl8h5KagSJogEvLMKRfY2dkNGRTC1HNcndrUL45o=
 github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734/go.mod h1:WI4BJ4aQ1ki49oDREV0ORq21xMfxr+CvP+fshGTPEkQ=
 github.com/faustbrian/go-sso/oidc v0.0.0-20261123000546-023dd34bb0c7 h1:uTAK484FW2rqPpGoQcRdJq20C0WgMSEUJLbhG9r9KEo=

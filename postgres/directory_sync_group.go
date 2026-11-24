@@ -27,7 +27,8 @@ const directoryApplyAction = "identity.sso.directory-sync-apply"
 // DirectorySyncGroupEdgesConfig opts the organization-bound native generation
 // into the direct Group-to-User profile. Source and Mapping are existing owner
 // responsibilities. ApplyAuthorization supplies the time-bounded sync
-// decision; Authorization separately authorizes original child recovery.
+// decision; Authorization separately authorizes child admission observations
+// and original child recovery through the kernel's distinct decision scopes.
 // A configured SCIM source by itself cannot authorize synchronization.
 type DirectorySyncGroupEdgesConfig struct {
 	Source             *scimpostgres.GroupsService
@@ -91,17 +92,17 @@ func (DirectoryGroupSyncService) MarshalJSON() ([]byte, error) {
 	return nil, sso.ErrSensitiveSerialization
 }
 
-// Apply selects one explicitly mapped direct edge from a current apply-mode
-// generation. The predecessor remains installed until the original identity
-// journal confirms the child commit. An unresolved acknowledgement must be
-// retried with exactly the same generation, batch and child command ID.
+// Apply executes a bounded, explicitly mapped batch in its original order.
+// Retry unresolved work with the same generation, batch and command IDs.
+// An observed prefix is not a settled cursor. After cancellation, the exact
+// held batch may be reconciled but no further grant writes are admitted.
 func (s *DirectoryGroupSyncService) Apply(ctx context.Context, generation identity.CommandID, batch sso.DirectoryDeltaBatch) (out sso.DirectoryApplyResult, err error) {
 	defer func() {
 		if recover() != nil {
 			out, err = sso.DirectoryApplyResult{}, sso.ErrUnavailable
 		}
 	}()
-	if s == nil || s.generation == nil || ctx == nil || len(batch.Deltas) != 1 {
+	if s == nil || s.generation == nil || ctx == nil {
 		return out, sso.ErrInvalidInput
 	}
 	if _, err := identity.ParseCommandID(string(generation)); err != nil {
@@ -116,7 +117,19 @@ func (s *DirectoryGroupSyncService) Apply(ctx context.Context, generation identi
 	}
 	result, err := reconciler.ApplyDirectoryDelta(ctx, batch)
 	if err != nil {
-		if errors.Is(err, sso.ErrDirectoryReconciliation) && result.Checkpoint == ([32]byte{}) {
+		if len(result.ChildOutcomes) != 0 && result.Checkpoint == ([32]byte{}) {
+			if !executor.child.mayDisclose() {
+				return out, sso.ErrForbidden
+			}
+			if executor.stoppedPrefix {
+				stopErr := executor.child.settleStopped(ctx)
+				if !executor.child.mayDisclose() {
+					return out, sso.ErrForbidden
+				}
+				if stopErr != nil {
+					return result, stopErr
+				}
+			}
 			return result, err
 		}
 		return out, err
@@ -129,35 +142,90 @@ func (s *DirectoryGroupSyncService) Apply(ctx context.Context, generation identi
 	}
 	// A known committed child must not be disclosed on a connection that
 	// outlived the original observation while settling its cursor.
-	if _, err := executor.child.admission.source.Bindings(); err != nil ||
-		!s.generation.provider.config.Clock.Now().Before(executor.child.admission.validUntil) {
+	if !executor.child.mayDisclose() {
 		return out, sso.ErrForbidden
 	}
 	return result, nil
 }
 
+func (p *directoryGroupChild) mayDisclose() bool {
+	if p == nil {
+		return false
+	}
+	_, err := p.admission.source.Bindings()
+	return err == nil && p.service.generation.provider.config.Clock.Now().Before(p.admission.validUntil)
+}
+
 // Only the configured native executor can enlist the original Work and load
 // its authoritative result. The mapper retains no journal or cursor access.
 type nativeDirectoryEdgeExecutor struct {
-	service    *DirectoryGroupSyncService
-	generation identity.CommandID
-	child      *directoryGroupChild
+	service       *DirectoryGroupSyncService
+	generation    identity.CommandID
+	child         *directoryGroupChild
+	stoppedPrefix bool
 }
 
 func (e *nativeDirectoryEdgeExecutor) ExecuteMappedDirectoryMemberships(ctx context.Context, mapped scimorganization.DirectoryMembershipBatch) ([]sso.Completion, error) {
-	if len(mapped.Memberships) != 1 {
+	if len(mapped.Memberships) == 0 || len(mapped.Memberships) != len(mapped.Source.Deltas) {
 		return nil, sso.ErrInvalidInput
 	}
-	child, err := e.service.prepare(ctx, e.generation, mapped)
+	batch, err := e.service.prepareBatch(ctx, e.generation, mapped.Source)
 	if err != nil {
 		return nil, err
 	}
-	e.child = child
-	receipt, err := child.executeOriginal(ctx)
-	if receipt.Feature == nil || receipt.Validate() != nil {
-		return nil, err
+	e.child = batch
+	stopped := batch.generation.State == DirectorySyncCanceling || batch.generation.State == DirectorySyncCanceled
+	stoppedAtPredecessor := batch.generation.State == DirectorySyncCanceled && batch.generation.Checkpoint == mapped.Source.PredecessorCheckpoint
+	var unstartedSuffix bool
+	var lastCommitted int
+	receipts := make([]sso.Completion, 0, len(mapped.Memberships))
+	for _, member := range mapped.Memberships {
+		child, err := batch.prepareChild(ctx, member)
+		if err != nil {
+			return receipts, err
+		}
+		receipt, absent, err := child.executeOriginal(ctx)
+		if absent && stopped {
+			unstartedSuffix = true
+			continue
+		}
+		if absent {
+			return receipts, sso.ErrForbidden
+		}
+		if receipt.Feature != nil && receipt.Validate() == nil && !unstartedSuffix {
+			receipts = append(receipts, receipt)
+			if receipt.Outcome == identity.CommitOutcomeCommitted {
+				lastCommitted = len(receipts)
+			}
+		}
+		if err != nil {
+			if stoppedAtPredecessor && lastCommitted != 0 {
+				return receipts[:lastCommitted], sso.ErrDirectoryReconciliation
+			}
+			return receipts, err
+		}
+		if unstartedSuffix {
+			// A completed tail after a genuinely unstarted child is not an
+			// ordered prefix. Do not close the generation on that evidence.
+			return receipts, sso.ErrDirectoryReconciliation
+		}
 	}
-	return []sso.Completion{receipt}, err
+	if stoppedAtPredecessor {
+		// A stale worker may get an abort receipt after cancellation closed.
+		// It cannot extend the applied prefix or turn it into settlement.
+		if lastCommitted == 0 || lastCommitted == len(mapped.Memberships) {
+			return nil, sso.ErrDirectoryReconciliation
+		}
+		return receipts[:lastCommitted], sso.ErrDirectoryReconciliation
+	}
+	if batch.generation.State == DirectorySyncCanceling && unstartedSuffix && lastCommitted != 0 {
+		e.stoppedPrefix = true
+		return receipts[:lastCommitted], sso.ErrDirectoryReconciliation
+	}
+	if len(receipts) != len(mapped.Memberships) {
+		return receipts, sso.ErrDirectoryReconciliation
+	}
+	return receipts, nil
 }
 
 type directoryEdgeAdmission struct {
@@ -168,8 +236,7 @@ type directoryEdgeAdmission struct {
 	validUntil time.Time
 }
 
-func (s *DirectoryGroupSyncService) prepare(ctx context.Context, id identity.CommandID, mapped scimorganization.DirectoryMembershipBatch) (*directoryGroupChild, error) {
-	batch := mapped.Source
+func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch) (*directoryGroupChild, error) {
 	provider := s.generation.provider
 	if batch.TenantID != provider.authentication.TenantID || string(batch.OrganizationID) != provider.updateOrganization ||
 		batch.ConnectionID != s.generation.connection {
@@ -193,6 +260,12 @@ func (s *DirectoryGroupSyncService) prepare(ctx context.Context, id identity.Com
 	}
 	switch current.State {
 	case DirectorySyncRunning, DirectorySyncReconciling, DirectorySyncCanceling:
+	case DirectorySyncCanceled:
+		// Multi-edge replay may recover an exact stopped prefix or an
+		// already-installed successor, but cannot start another child.
+		if len(batch.Deltas) < 2 {
+			return nil, sso.ErrForbidden
+		}
 	default:
 		return nil, sso.ErrForbidden
 	}
@@ -200,7 +273,23 @@ func (s *DirectoryGroupSyncService) prepare(ctx context.Context, id identity.Com
 	if err != nil {
 		return nil, err
 	}
-	m := mapped.Memberships[0]
+	child := &directoryGroupChild{service: s, generation: current, batch: batch, commitment: commitment, admission: admitted}
+	if current.State == DirectorySyncReconciling || current.State == DirectorySyncCanceling {
+		var pending bool
+		err := provider.pool.Raw().QueryRow(ctx, directoryPendingGroupBatchSQL, child.generationArgs()...).Scan(&pending)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && !pending {
+			return nil, sso.ErrForbidden
+		}
+		if err != nil {
+			return nil, providerError(ctx, err)
+		}
+	}
+	return child, nil
+}
+
+func (p *directoryGroupChild) prepareChild(ctx context.Context, m scimorganization.DirectoryMembershipIntent) (*directoryGroupChild, error) {
+	batch, admitted := p.batch, p.admission
+	provider := p.service.generation.provider
 	grantScope := organizationpg.DirectoryTeamGrantScope{
 		TenantID: batch.TenantID, OrganizationID: batch.OrganizationID, ProviderID: organization.ID(batch.ProviderID),
 		ConnectionID: organization.ID(batch.ConnectionID), GroupID: organization.ID(m.GroupID), TeamID: m.TeamID, UserID: m.UserID,
@@ -219,27 +308,15 @@ func (s *DirectoryGroupSyncService) prepare(ctx context.Context, id identity.Com
 		return nil, sso.ErrForbidden
 	}
 	op := sso.DirectoryTeamMembershipOperation()
-	correlation := sha256.Sum256(append(append([]byte("sso/postgres/directory-child/v1\x00"), id...), commitment[:]...))
+	correlation := sha256.Sum256(append(append([]byte("sso/postgres/directory-child/v1\x00"), p.generation.ID...), p.commitment[:]...))
 	binding := identity.CommandBinding{
 		CommandID: m.CommandID, TenantID: batch.TenantID, UserID: m.UserID, ActorKind: authorization.SubjectServiceAccount, ActorID: admitted.bindings.ActorID,
 		OperationID: op.OperationID, SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion, PolicyID: provider.config.PolicyID, PolicyVersion: provider.config.PolicyVersion,
 		CorrelationID: hex.EncodeToString(correlation[:]), RecordID: update.RecordID(),
 	}
-	child := &directoryGroupChild{service: s, generation: current, batch: batch, commitment: commitment,
-		admission: admitted, edge: edge, update: update, binding: binding}
-	if current.State == DirectorySyncCanceling {
-		// Cancellation grants no permission to recover other previously known
-		// commands. Check the exact hold before looking at the child journal.
-		var pending bool
-		err := provider.pool.Raw().QueryRow(ctx, directoryPendingGroupBatchSQL, child.generationArgs()...).Scan(&pending)
-		if errors.Is(err, pgx.ErrNoRows) || err == nil && !pending {
-			return nil, sso.ErrForbidden
-		}
-		if err != nil {
-			return nil, providerError(ctx, err)
-		}
-	}
-	return child, nil
+	child := *p
+	child.edge, child.update, child.binding = edge, update, binding
+	return &child, nil
 }
 
 func (s *DirectoryGroupSyncService) observe(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch) (directoryEdgeAdmission, error) {

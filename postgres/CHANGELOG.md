@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Reconcile bounded mapped Group-member batches in their original order.
+  Recover issued child commands before continuing, and settle the cursor
+  once from complete terminal receipts. Cancellation stops subsequent grant
+  writes and preserves the predecessor when only a prefix executed.
+
 - Cancel an exact directory generation with fresh administrator authority.
   Do not change committed grants or its cursor; if a child is held, settle
   only the original child before closing the generation. Recover cancellation

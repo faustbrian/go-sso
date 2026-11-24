@@ -33,12 +33,14 @@ changes, cancels work, advances a source cursor, or enables an HTTP route.
 `Cancel` requires a fresh authorized organization administrator, the exact
 generation and its expected version, and a retained idempotency key. An idle
 generation stops without changing its cursor, counts or applied grants. If a
-committed child is still held, the generation becomes `canceling`; only that
-exact original child can settle and close it under current source authority.
-Cancellation preserves the hold if that authority is no longer available.
-Retry cancellation with the same
-key and version to recover the original completion. The accompanying status
-is current and can therefore include the subsequently settled child.
+batch is still held, the generation becomes `canceling`. Reconcile the exact
+original batch under current source authority; cancellation admits no new
+grant writes. A fully resolved batch can settle. If only a committed prefix
+was executed and the suffix is confirmed unstarted, cancellation closes at
+the original predecessor without changing the settled counts. Uncertain
+children or unavailable authority keep the hold. Retry cancellation with the
+same key and version to recover its original completion. The accompanying
+status can include subsequent settlement.
 
 Select `WithGroupEdges` separately for the direct Group-to-User profile.
 Bind an explicit, versioned SCIM organization mapper, a configured native
@@ -47,14 +49,15 @@ and retained epoch. Supply the synchronization policy's earliest absolute
 expiry; it remains bounded by the original source observation, including
 at final commit and cursor settlement. Install the actual SCIM source/Group, organization
 team/source-grant, identity Work, audit and outbox schemas first.
-`Apply` takes the exact generation ID and a one-edge batch with its
-original child command and predecessor. It verifies the Group/User
-projection and writes only the corresponding team source grant. Any
-unresolved child leaves the predecessor in place. Retry with the same
-exact input to reconcile a lost acknowledgment; do not allocate a new
-child ID. Directory withdrawal does not remove local or other-source
-grants. Dry-run execution, nested groups, role sync, multi-edge
-execution and HTTP/Reference composition are not selected by this adapter.
+`Apply` takes the exact generation ID and bounded ordered batch with the
+original child IDs and predecessor. It verifies each Group/User projection
+and writes only the corresponding team source grant. It stops on an
+unresolved child and can return confirmed prefix receipts without a new
+checkpoint. Retry the same input to recover; do not allocate a new child ID.
+Only complete terminal receipts can advance the cursor and settled counts.
+Directory withdrawal does not remove local or other-source grants. Dry-run
+execution, nested groups, role sync and HTTP/Reference composition are not
+selected by this adapter.
 
 ### Optional SAML replay schema
 

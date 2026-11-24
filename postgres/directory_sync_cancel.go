@@ -38,9 +38,10 @@ type DirectorySyncCancelResult struct {
 }
 
 // Cancel stops new children without changing grants, checkpoints or counts. A
-// generation holding a committed but unsettled child remains canceling until
-// the exact original child settles. Cancellation is independent of whether
-// the old provider still admits new work.
+// generation holding an unsettled batch remains canceling until the exact
+// original results can be reconciled; no suffix may acquire new grant
+// effects. Cancellation is independent of whether the old provider still
+// admits new work.
 func (s *DirectorySyncService) Cancel(ctx context.Context, r DirectorySyncCancelRequest) (DirectorySyncCancelResult, error) {
 	if s == nil || s.provider == nil || ctx == nil || r.ExpectedVersion == 0 || r.ExpectedVersion == math.MaxUint64 {
 		return DirectorySyncCancelResult{}, sso.ErrInvalidInput

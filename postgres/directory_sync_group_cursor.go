@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"slices"
 	"strconv"
 
 	authoritypg "github.com/faustbrian/go-authorization/v3/postgres"
@@ -21,11 +22,24 @@ const directoryHoldGroupBatchSQL = `UPDATE sso_providers.directory_sync_generati
 const directoryPendingGroupBatchSQL = `SELECT true FROM sso_providers.directory_sync_generations
  WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state IN ('reconciling','canceling')`
 
+const directoryContinueGroupBatchSQL = `SELECT true FROM sso_providers.directory_sync_generations
+ WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state='reconciling' FOR UPDATE`
+
+// When every child definitively failed, no grant transaction installed a
+// hold. That complete batch may settle only while the predecessor remains
+// unclaimed; it cannot replace a competing hold or close a canceled run.
 const directoryAdvanceGroupBatchSQL = `UPDATE sso_providers.directory_sync_generations
  SET state=CASE state WHEN 'canceling' THEN 'canceled' ELSE 'running' END,checkpoint=$11,pending_batch=NULL,
- version=version+1,read_count=read_count+1,applied_count=applied_count+1
- WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state IN ('reconciling','canceling')
- AND clock_timestamp()<$12 AND version<18446744073709551615 AND read_count<18446744073709551615`
+ version=version+1,read_count=read_count+$13::numeric,applied_count=applied_count+$14::numeric,rejected_count=rejected_count+$15::numeric
+ WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9
+ AND ((pending_batch=$10 AND state IN ('reconciling','canceling'))
+ OR (state='running' AND pending_batch IS NULL AND $13::numeric>1 AND $14::numeric=0))
+ AND clock_timestamp()<$12 AND version<18446744073709551615 AND read_count<=18446744073709551615-$13::numeric`
+
+const directoryStopGroupBatchSQL = `UPDATE sso_providers.directory_sync_generations
+ SET state='canceled',pending_batch=NULL,version=version+1
+ WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state='canceling'
+ AND clock_timestamp()<$11 AND version<18446744073709551615`
 
 func (p *directoryGroupChild) generationArgs() []any {
 	b := p.batch
@@ -54,10 +68,15 @@ func (p *directoryGroupChild) holdGeneration(ctx context.Context, work kernel.Wo
 	if err != nil {
 		return err
 	}
-	if n != 1 {
+	if n == 1 {
+		return nil
+	}
+	if len(p.batch.Deltas) == 1 {
 		return identity.ConflictError{}
 	}
-	return nil
+	// Each original continuation holds the same row until the grant and
+	// receipt commit. Cancellation and child effects cannot pass each other.
+	return p.requireGroupBatch(ctx, work, directoryContinueGroupBatchSQL)
 }
 
 type directoryWorkQuery interface {
@@ -65,7 +84,11 @@ type directoryWorkQuery interface {
 }
 
 func (p *directoryGroupChild) requirePendingGeneration(ctx context.Context, work directoryWorkQuery) error {
-	rows, err := work.Query(ctx, directoryPendingGroupBatchSQL, p.generationArgs()...)
+	return p.requireGroupBatch(ctx, work, directoryPendingGroupBatchSQL)
+}
+
+func (p *directoryGroupChild) requireGroupBatch(ctx context.Context, work directoryWorkQuery, query string) error {
+	rows, err := work.Query(ctx, query, p.generationArgs()...)
 	if err != nil {
 		return err
 	}
@@ -77,18 +100,15 @@ func (p *directoryGroupChild) requirePendingGeneration(ctx context.Context, work
 	return nil
 }
 
-func (p *directoryGroupChild) RecoverParticipant(ctx context.Context, work kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
+func (p *directoryGroupChild) RecoverParticipant(_ context.Context, work kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
 	b, registration, _, err := work.FeatureScope(p)
 	if err != nil || b != p.binding || registration != p.registration() {
 		return kernel.RecoveryUnknown, identity.ForbiddenError{}
 	}
-	// The exact pending marker and team grant share the original child
-	// transaction. Absence cannot prove rollback; a subsequent settlement
-	// may have cleared it. No new authority observation can reopen the child.
-	if err := p.requirePendingGeneration(ctx, work); err != nil {
-		return kernel.RecoveryUnknown, nil
-	}
-	return kernel.RecoveryCommitted, nil
+	// Grant, audit, outbox and the terminal receipt share a transaction.
+	// Only the kernel's locked expired pending journal can establish this
+	// noncommit, not the presence or absence of the shared batch marker.
+	return kernel.RecoveryNotCommitted, nil
 }
 
 func (p *directoryGroupChild) settle(ctx context.Context, result sso.DirectoryApplyResult) error {
@@ -96,6 +116,24 @@ func (p *directoryGroupChild) settle(ctx context.Context, result sso.DirectoryAp
 	if err != nil {
 		return sso.ErrDirectoryReconciliation
 	}
+	var committed int
+	for _, receipt := range result.ChildOutcomes {
+		if receipt.Outcome == identity.CommitOutcomeCommitted {
+			committed++
+		}
+	}
+	observed := len(result.ChildOutcomes)
+	args := append(p.generationArgs(), next[:], p.admission.validUntil,
+		strconv.Itoa(observed), strconv.Itoa(committed), strconv.Itoa(observed-committed))
+	return p.settleGeneration(ctx, directoryAdvanceGroupBatchSQL, args, next, DirectorySyncRunning, DirectorySyncCanceled)
+}
+
+func (p *directoryGroupChild) settleStopped(ctx context.Context) error {
+	args := append(p.generationArgs(), p.admission.validUntil)
+	return p.settleGeneration(ctx, directoryStopGroupBatchSQL, args, p.batch.PredecessorCheckpoint, DirectorySyncCanceled)
+}
+
+func (p *directoryGroupChild) settleGeneration(ctx context.Context, query string, args []any, checkpoint [32]byte, replayStates ...DirectorySyncState) error {
 	provider := p.service.generation.provider
 	tx, err := provider.pool.Raw().Begin(ctx)
 	if err != nil {
@@ -114,8 +152,7 @@ func (p *directoryGroupChild) settle(ctx context.Context, result sso.DirectoryAp
 		lockedProvider != string(p.batch.ProviderID) || !provider.config.Clock.Now().Before(p.admission.validUntil) {
 		return sso.ErrDirectoryReconciliation
 	}
-	args := append(p.generationArgs(), next[:], p.admission.validUntil)
-	tag, err := tx.Exec(ctx, directoryAdvanceGroupBatchSQL, args...)
+	tag, err := tx.Exec(ctx, query, args...)
 	if err != nil {
 		return sso.ErrDirectoryReconciliation
 	}
@@ -125,8 +162,10 @@ func (p *directoryGroupChild) settle(ctx context.Context, result sso.DirectoryAp
 		row := tx.QueryRow(ctx, directoryGenerationReadSQL, string(p.generation.ID), string(p.batch.TenantID),
 			string(p.batch.OrganizationID), p.batch.ConnectionID)
 		existing, err := scanDirectoryGeneration(p.generation.ID, row.Scan)
-		if err != nil || existing.current.Checkpoint != next ||
-			(existing.current.State != DirectorySyncRunning && existing.current.State != DirectorySyncCanceled) {
+		if err != nil || existing.current.Checkpoint != checkpoint {
+			return sso.ErrDirectoryReconciliation
+		}
+		if !slices.Contains(replayStates, existing.current.State) {
 			return sso.ErrDirectoryReconciliation
 		}
 	}

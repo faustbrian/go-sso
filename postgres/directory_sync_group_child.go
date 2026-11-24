@@ -3,7 +3,6 @@ package postgres
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strconv"
 
 	"github.com/faustbrian/go-audit"
@@ -46,38 +45,55 @@ func (p *directoryGroupChild) lifecycle() kernel.LifecyclePlan {
 	return kernel.LifecyclePlan{EventType: "sso.directory_sync.team_membership_changed.v1", BeforeVersion: p.update.BeforeVersion(), AfterVersion: p.update.AfterVersion()}
 }
 
-func (p *directoryGroupChild) executeOriginal(ctx context.Context) (sso.Completion, error) {
+func (p *directoryGroupChild) executeOriginal(ctx context.Context) (receipt sso.Completion, absent bool, err error) {
 	coordinator, registry, err := p.coordinator()
 	if err != nil {
-		return sso.Completion{}, providerError(ctx, err)
+		return receipt, false, providerError(ctx, err)
 	}
-	receipt, err := coordinator.RecoverFeatureCommand(ctx, providerRecovery(p.binding), p.receiptCaller())
-	if receipt.Binding.CommandID == "" {
-		// Missing history is never proof of rollback. Only the current
-		// predecessor may try reserving the original stable child. The
-		// kernel rejects an already reserved ID with different input.
-		var denied identity.ForbiddenError
-		if !errors.As(err, &denied) || p.generation.State != DirectorySyncRunning || p.generation.Checkpoint != p.batch.PredecessorCheckpoint {
-			return sso.Completion{}, providerError(ctx, err)
+	query, caller := providerRecovery(p.binding), p.receiptCaller()
+	observed, err := coordinator.ObserveCommandAdmission(ctx, query, caller)
+	if observed.Validate() != nil {
+		if err == nil {
+			err = identity.UnavailableError{}
 		}
-		receipt, err = p.execute(ctx, coordinator, registry)
+		return receipt, false, providerError(ctx, err)
+	}
+	if observed.Absent {
+		if p.generation.Checkpoint != p.batch.PredecessorCheckpoint ||
+			(p.generation.State != DirectorySyncRunning && p.generation.State != DirectorySyncReconciling) {
+			return receipt, true, nil
+		}
+		var owned bool
+		receipt, owned, err = p.execute(ctx, coordinator, registry)
+		if !owned && receipt.Binding.CommandID != "" {
+			// A concurrent reservation can change the authoritative observation.
+			// On retry require scoped admission and separately authorized recovery
+			// before returning its history or acting on it.
+			return sso.Completion{}, false, sso.ErrDirectoryReconciliation
+		}
+	} else {
+		if observed.Record.Binding != p.binding {
+			return receipt, false, sso.ErrForbidden
+		}
+		receipt, err = coordinator.RecoverFeatureCommand(ctx, query, caller)
 	}
 	if err != nil && receipt.Binding.CommandID == "" {
-		return sso.Completion{}, providerError(ctx, err)
+		return sso.Completion{}, false, providerError(ctx, err)
 	}
-	if receipt.Binding != p.binding {
-		return sso.Completion{}, sso.ErrForbidden
+	if receipt.Binding != p.binding || receipt.Feature == nil || receipt.Validate() != nil {
+		return sso.Completion{}, false, sso.ErrForbidden
 	}
-	if err != nil || receipt.Outcome != identity.CommitOutcomeCommitted {
-		if receipt.Outcome == identity.CommitOutcomeUnknown || receipt.Outcome == identity.CommitOutcomeInProgress {
-			return receipt, sso.ErrDirectoryReconciliation
+	switch receipt.Outcome {
+	case identity.CommitOutcomeCommitted:
+		return receipt, false, providerError(ctx, err)
+	case identity.CommitOutcomeNotCommitted:
+		if len(p.batch.Deltas) == 1 && err != nil {
+			return receipt, false, providerError(ctx, err)
 		}
-		if err != nil {
-			return receipt, providerError(ctx, err)
-		}
-		return receipt, sso.ErrConflict
+		return receipt, false, nil
+	default:
+		return receipt, false, sso.ErrDirectoryReconciliation
 	}
-	return receipt, nil
 }
 
 func (p *directoryGroupChild) receiptCaller() authorization.DecisionContext {
@@ -106,30 +122,33 @@ func (p *directoryGroupChild) coordinator() (*kernel.Coordinator, *kernel.Contri
 	query := *config.QueryPolicy
 	query.Authorization = p.service.config.Authorization
 	config.QueryPolicy = &query
+	admission := *config.AdmissionPolicy
+	admission.Authorization = p.service.config.Authorization
+	config.AdmissionPolicy = &admission
 	coordinator, err := kernel.NewCoordinator(provider.pool, registry, config)
 	return coordinator, registry, err
 }
 
-func (p *directoryGroupChild) execute(ctx context.Context, coordinator *kernel.Coordinator, registry *kernel.ContributorRegistry) (identity.CommandResult, error) {
+func (p *directoryGroupChild) execute(ctx context.Context, coordinator *kernel.Coordinator, registry *kernel.ContributorRegistry) (identity.CommandResult, bool, error) {
 	fields := []identity.FeatureField{{Name: "sso.directory-batch", Value: identity.FeatureValue{Kind: identity.FeatureBytes, Bytes: bytes.Clone(p.commitment[:])}}}
 	for _, field := range []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field} {
 		value, err := field()
 		if err != nil {
-			return identity.CommandResult{}, err
+			return identity.CommandResult{}, false, err
 		}
 		fields = append(fields, value)
 	}
 	op := sso.DirectoryTeamMembershipOperation()
 	cmd, err := identity.NewFeatureCommand(identity.FeatureCommandSpec{Operation: op, Binding: p.binding, Fields: fields})
 	if err != nil {
-		return identity.CommandResult{}, err
+		return identity.CommandResult{}, false, err
 	}
 	p.command = cmd
 	plan, err := p.plan(registry)
 	if err != nil {
-		return identity.CommandResult{}, err
+		return identity.CommandResult{}, false, err
 	}
-	return executeProviderLogoutCommand(ctx, coordinator, p.binding, cmd, plan)
+	return executeProviderFeatureCommand(ctx, coordinator, p.binding, cmd, plan)
 }
 
 func (p *directoryGroupChild) plan(registry *kernel.ContributorRegistry) (kernel.CommandPlan, error) {
