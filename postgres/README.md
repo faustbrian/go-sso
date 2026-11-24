@@ -257,10 +257,16 @@ requires at least one matching session and does not select RelayState or
 register an HTTP endpoint.
 
 Read `LocalRevocations` even when response signing fails. Only a fresh known
-local commit can return signed response fields from `Response()`. Retry the
-same signed request within its original validity window to recover the local
-result without mutating again. Changed bytes under the same signed ID cannot
-replace that result. Neither request XML nor plaintext NameID is retained.
+local commit can return signed response fields from `Response()`. If user
+authorization denies or is interrupted after target selection, the native
+result retains the selected targets with reconciliation required, preserves
+the authorization error and returns no observed command receipt. Selection
+alone cannot establish whether an earlier attempt committed. After restoring
+authorization, retry the same signed request within its original validity
+window; a committed reply is recovered without mutating again or signing
+another response. Changed bytes under the same signed ID cannot replace that
+result. Neither request XML nor plaintext NameID is retained. Keep the local
+projection internal; it is not part of the IdP response.
 Pass the response to the exact provider service only after transport admission;
 HTTP origin/form policy and callback rate admission are consumer-owned.
 

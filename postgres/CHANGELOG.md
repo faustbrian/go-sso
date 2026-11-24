@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve selected native IdP logout targets when user authorization is
+  denied or interrupted. Require reconciliation rather than claiming an
+  unobserved outcome, and return no signed response or RelayState.
+
 - Opt into SP-generated SAML logout RelayState with `WithRelayState`.
   Acknowledged local logout survives remote failure. The signed request and
   one-use grant commit together; only the original handle and signed response

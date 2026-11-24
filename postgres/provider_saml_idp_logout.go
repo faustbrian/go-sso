@@ -59,6 +59,8 @@ func (ProviderSAMLIDPLogoutRequest) MarshalText() ([]byte, error) {
 // response signing. After selection, every target has its retained predecessor
 // plus one as the revocation version. An unknown commit sets reconciliation
 // required and never marks local state committed or exposes response wire.
+// If user authorization was interrupted after preparation, no command receipt
+// is returned, even when the original request might have previously executed.
 type ProviderSAMLIDPLogoutResult struct {
 	LocalRevocations []saml.LocalRevocation
 	Completion       identity.CommandResult
@@ -251,6 +253,9 @@ func (s *ProviderSAMLIDPLogoutService) handleRequest(ctx context.Context, input 
 		return out, providerError(ctx, err)
 	}
 	if err = p.authorizeUser(ctx, p.prepared.binding().UserID); err != nil {
+		// Resolving the immutable request key does not observe its journal.
+		// A denied retry cannot declare the original command uncommitted.
+		out.LocalRevocations = p.localRevocations(identity.CommitOutcomeUnknown)
 		return out, providerError(ctx, err)
 	}
 	result, fresh, err := p.execute(ctx, coordinator, registry)
@@ -354,19 +359,30 @@ func (p *samlIDPLogoutPhase) project(result identity.CommandResult, outcomeErr e
 	if exact && (result.Outcome != identity.CommitOutcomeCommitted || committed) {
 		out.Completion = result
 	}
-	reconciliation := !committed && out.Completion.Outcome != identity.CommitOutcomeNotCommitted
-	for _, target := range p.prepared.Intent.Targets {
-		out.LocalRevocations = append(out.LocalRevocations, saml.LocalRevocation{
-			SessionID: target.SessionID, Version: target.Version + 1, Committed: committed, ReconciliationRequired: reconciliation,
-		})
-	}
-	if reconciliation {
+	out.LocalRevocations = p.localRevocations(out.Completion.Outcome)
+	if localRevocationNeedsReconciliation(out.Completion.Outcome) {
 		return out, identity.UnknownCommitError{CommandID: binding.CommandID}
 	}
 	if !committed && outcomeErr == nil {
 		outcomeErr = sso.ErrUnavailable
 	}
 	return out, providerError(nil, outcomeErr)
+}
+
+func (p *samlIDPLogoutPhase) localRevocations(outcome identity.CommitOutcome) []saml.LocalRevocation {
+	committed := outcome == identity.CommitOutcomeCommitted
+	reconcile := localRevocationNeedsReconciliation(outcome)
+	revocations := make([]saml.LocalRevocation, 0, len(p.prepared.Intent.Targets))
+	for _, target := range p.prepared.Intent.Targets {
+		revocations = append(revocations, saml.LocalRevocation{
+			SessionID: target.SessionID, Version: target.Version + 1, Committed: committed, ReconciliationRequired: reconcile,
+		})
+	}
+	return revocations
+}
+
+func localRevocationNeedsReconciliation(outcome identity.CommitOutcome) bool {
+	return outcome != identity.CommitOutcomeCommitted && outcome != identity.CommitOutcomeNotCommitted
 }
 
 func samlIDPLogoutRequestKey(id [32]byte) (identity.IdempotencyKey, error) {

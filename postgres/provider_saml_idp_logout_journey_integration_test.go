@@ -212,6 +212,55 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 			}
 		})
 	}
+	requireInterrupted := func(t *testing.T, got ssopg.ProviderSAMLIDPLogoutRelayResult, err, wantErr error) {
+		t.Helper()
+		if !errors.Is(err, wantErr) || got.Completion.Outcome != identity.CommitOutcomeInvalid {
+			t.Fatal("interrupted authorization changed the error or invented a command receipt", err)
+		}
+		want := []saml.LocalRevocation{{SessionID: record.SessionID, Version: record.Version + 1, ReconciliationRequired: true}}
+		if !reflect.DeepEqual(got.LocalRevocations, want) {
+			t.Fatal("interrupted authorization lost the selected target or misreported its unknown revocation")
+		}
+		_, exposed := got.Response()
+		if echo, echoed := got.RelayState(); exposed || echoed || echo != "" {
+			t.Fatal("interrupted authorization disclosed a signed reply or RelayState")
+		}
+	}
+	for _, tc := range []struct {
+		name, requestID string
+		wantErr         error
+		setPolicy       func(context.CancelFunc)
+	}{
+		{"user authorization denied", "", sso.ErrForbidden,
+			func(context.CancelFunc) { authorizer.denyUser = true }},
+		{"user authorization unavailable", "_native-idp-logout-policy-down", sso.ErrUnavailable,
+			func(context.CancelFunc) {
+				authorizer.beforeUserAuthorization = func(context.Context) error { return sso.ErrUnavailable }
+			}},
+		{"user authorization canceled", "_native-idp-logout-canceled", context.Canceled,
+			func(cancel context.CancelFunc) {
+				authorizer.beforeUserAuthorization = func(ctx context.Context) error {
+					cancel()
+					return ctx.Err()
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			defer func() { authorizer.denyUser, authorizer.beforeUserAuthorization = false, nil }()
+			tc.setPolicy(cancel)
+			blocked := request
+			if tc.requestID != "" {
+				blocked = wire(tc.requestID, nativeSAMLCallbackSubject, index, idpKey, issuedAt)
+			}
+			got, err := service.HandleRequestWithRelayState(callCtx, blocked, []string{relayState})
+			requireInterrupted(t, got, err, tc.wantErr)
+			if after := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID); after != before {
+				t.Fatal("interrupted user authorization changed the session or committed logout effects")
+			}
+		})
+	}
 	var originalExpiry time.Time
 	if err := f.pool.Raw().QueryRow(ctx, `SELECT expires_at FROM sso_providers.saml_logout_subjects WHERE tenant_id=$1 AND session_id=$2`, record.TenantID, record.SessionID).Scan(&originalExpiry); err != nil {
 		t.Fatal("retain exact fixture correlation before the in-Work recheck probe", err)
@@ -259,7 +308,7 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 	got, err := service.HandleRequestWithRelayState(ctx, request, []string{relayState})
 	t.Logf("signed IdP logout HandleRequest elapsed: %s", time.Since(operationStarted))
 	if err != nil || got.Completion.Outcome != identity.CommitOutcomeCommitted || len(got.LocalRevocations) != 1 {
-		t.Fatal("signed installed-provider request did not commit its real retained session", err)
+		t.Fatal("exact signed retry after authorization recovered did not commit its retained session", err)
 	}
 	local := got.LocalRevocations[0]
 	if local.Validate() != nil || local.SessionID != record.SessionID || local.Version != record.Version+1 || !local.Committed || local.ReconciliationRequired {
@@ -295,6 +344,15 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 		committed.commands != before.commands+1 || committed.audits != before.audits+1 || committed.events != before.events+1 {
 		t.Fatal("logout did not retain one native session transition, command, audit and lifecycle effect")
 	}
+	t.Run("denied retry after acknowledged commit", func(t *testing.T) {
+		authorizer.denyUser = true
+		defer func() { authorizer.denyUser = false }()
+		denied, err := service.HandleRequestWithRelayState(ctx, request, []string{relayState})
+		requireInterrupted(t, denied, err, sso.ErrForbidden)
+		if after := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID); after != committed {
+			t.Fatal("denied retry changed the committed local result or generated another effect")
+		}
+	})
 	replay, err := service.HandleRequestWithRelayState(ctx, request, []string{relayState})
 	if _, exposed := replay.Response(); err != nil || exposed || !reflect.DeepEqual(replay.LocalRevocations, got.LocalRevocations) ||
 		!reflect.DeepEqual(replay.Completion, got.Completion) {
@@ -315,7 +373,7 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 			conflict, err := service.HandleRequestWithRelayState(ctx, request, changedRelay)
 			_, responseExposed := conflict.Response()
 			echo, relayExposed := conflict.RelayState()
-			if !errors.Is(err, sso.ErrConflict) || responseExposed || relayExposed || echo != "" {
+			if !errors.Is(err, sso.ErrConflict) || responseExposed || relayExposed || echo != "" || len(conflict.LocalRevocations) != 0 {
 				t.Fatal("changed or omitted RelayState reused the original message intent or exposed wire fields", err)
 			}
 			if after := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID); after != committed {
@@ -508,6 +566,7 @@ func nativeSAMLIDPLogoutDenseAdmission(t *testing.T, x providerEnableFixture, na
 type nativeSAMLIDPLogoutJourneyPolicy struct {
 	tenant                  identity.TenantID
 	user                    identity.UserID
+	denyUser                bool
 	beforeUserAuthorization func(context.Context) error
 }
 
@@ -520,6 +579,9 @@ func (p *nativeSAMLIDPLogoutJourneyPolicy) Decide(ctx context.Context, c authori
 	resolvesKey := r.Resource.Type == "identity.request-admission" && r.Resource.ID == "identity.sso.saml-slo"
 	if c.PolicyRevision == 1 && r.Tenant == authorization.TenantID(p.tenant) && r.Subject.Kind == authorization.SubjectServiceAccount &&
 		r.Subject.ID == "native-sso-login" && r.Action == "identity.sso.saml-slo" && (ownsUser || resolvesKey) {
+		if ownsUser && p.denyUser {
+			return authorization.Decision{Outcome: authorization.Deny, Revision: 1}, nil
+		}
 		if ownsUser && p.beforeUserAuthorization != nil {
 			hook := p.beforeUserAuthorization
 			p.beforeUserAuthorization = nil
