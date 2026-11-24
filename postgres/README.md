@@ -30,6 +30,16 @@ The stored checkpoint is a commitment; the zero request value selects a
 source-scoped initial commitment. Neither call applies external membership
 changes, cancels work, advances a source cursor, or enables an HTTP route.
 
+`Cancel` requires a fresh authorized organization administrator, the exact
+generation and its expected version, and a retained idempotency key. An idle
+generation stops without changing its cursor, counts or applied grants. If a
+committed child is still held, the generation becomes `canceling`; only that
+exact original child can settle and close it under current source authority.
+Cancellation preserves the hold if that authority is no longer available.
+Retry cancellation with the same
+key and version to recover the original completion. The accompanying status
+is current and can therefore include the subsequently settled child.
+
 Select `WithGroupEdges` separately for the direct Group-to-User profile.
 Bind an explicit, versioned SCIM organization mapper, a configured native
 SCIM Group source, and the service account's synchronization authorization
@@ -43,7 +53,7 @@ projection and writes only the corresponding team source grant. Any
 unresolved child leaves the predecessor in place. Retry with the same
 exact input to reconcile a lost acknowledgment; do not allocate a new
 child ID. Directory withdrawal does not remove local or other-source
-grants. Dry-run, nested groups, role sync, cancellation, multi-edge
+grants. Dry-run execution, nested groups, role sync, multi-edge
 execution and HTTP/Reference composition are not selected by this adapter.
 
 ### Optional SAML replay schema

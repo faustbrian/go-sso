@@ -18,7 +18,7 @@ require (
 	github.com/faustbrian/go-identity/oauth v0.0.0-20261123033150-16bb95b21f95
 	github.com/faustbrian/go-identity/password/postgres v0.0.0-20261028082559-7ca5d4db76d2
 	github.com/faustbrian/go-identity/postgres v0.0.0-20261124105449-b80eb17a2361
-	github.com/faustbrian/go-identity/risk v0.0.0-20261124125401-3845f97fe8aa
+	github.com/faustbrian/go-identity/risk v0.0.0-20261124135856-92af48b3c9fc
 	github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261124125758-d8bd5f7b074a
 	github.com/faustbrian/go-identity/session v0.0.0-20261123125537-8d9afa5e1a45
 	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261124104504-c56933838be6

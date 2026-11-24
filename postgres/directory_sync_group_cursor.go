@@ -19,11 +19,12 @@ const directoryHoldGroupBatchSQL = `UPDATE sso_providers.directory_sync_generati
  AND version<18446744073709551614`
 
 const directoryPendingGroupBatchSQL = `SELECT true FROM sso_providers.directory_sync_generations
- WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state='reconciling'`
+ WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state IN ('reconciling','canceling')`
 
 const directoryAdvanceGroupBatchSQL = `UPDATE sso_providers.directory_sync_generations
- SET state='running',checkpoint=$11,pending_batch=NULL,version=version+1,read_count=read_count+1,applied_count=applied_count+1
- WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state='reconciling'
+ SET state=CASE state WHEN 'canceling' THEN 'canceled' ELSE 'running' END,checkpoint=$11,pending_batch=NULL,
+ version=version+1,read_count=read_count+1,applied_count=applied_count+1
+ WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state IN ('reconciling','canceling')
  AND clock_timestamp()<$12 AND version<18446744073709551615 AND read_count<18446744073709551615`
 
 func (p *directoryGroupChild) generationArgs() []any {
@@ -124,7 +125,8 @@ func (p *directoryGroupChild) settle(ctx context.Context, result sso.DirectoryAp
 		row := tx.QueryRow(ctx, directoryGenerationReadSQL, string(p.generation.ID), string(p.batch.TenantID),
 			string(p.batch.OrganizationID), p.batch.ConnectionID)
 		existing, err := scanDirectoryGeneration(p.generation.ID, row.Scan)
-		if err != nil || existing.current.Checkpoint != next || existing.current.State != DirectorySyncRunning {
+		if err != nil || existing.current.Checkpoint != next ||
+			(existing.current.State != DirectorySyncRunning && existing.current.State != DirectorySyncCanceled) {
 			return sso.ErrDirectoryReconciliation
 		}
 	}

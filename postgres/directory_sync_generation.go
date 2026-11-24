@@ -131,7 +131,7 @@ func (s *DirectorySyncService) Start(ctx context.Context, r DirectorySyncStartRe
 	if err != nil {
 		return out, sso.ErrInvalidInput
 	}
-	coordinator, registry, err := s.startCoordinator(phase)
+	coordinator, registry, err := s.adminCoordinator(phase)
 	if err != nil {
 		return out, err
 	}
@@ -213,7 +213,7 @@ func (s *DirectorySyncService) initialCheckpoint(provider sso.ProviderID, reques
 	return sha256.Sum256([]byte("sso/directory-sync-initial/v1\x00" + scope))
 }
 
-func (s *DirectorySyncService) startCoordinator(phase *directorySyncStartPhase) (*kernel.Coordinator, *kernel.ContributorRegistry, error) {
+func (s *DirectorySyncService) adminCoordinator(phase kernel.Contributor) (*kernel.Coordinator, *kernel.ContributorRegistry, error) {
 	p := s.provider
 	audits, err := auditpg.NewIdentityContributor(auditpg.Config{})
 	if err != nil {

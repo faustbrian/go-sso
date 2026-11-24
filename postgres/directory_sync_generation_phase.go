@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strconv"
+	"time"
 
 	"github.com/faustbrian/go-audit"
 	identity "github.com/faustbrian/go-identity"
@@ -58,22 +59,27 @@ func (p *directorySyncStartPhase) intentFields() []identity.FeatureField {
 }
 
 func (p *directorySyncStartPhase) plan(registry *kernel.ContributorRegistry) (kernel.CommandPlan, error) {
-	b := p.binding
-	op := directorySyncStartOperation()
+	return directoryAdminPlan(registry, p.binding, p.registration(), p.lifecycle(), p.counter, p.original.verified)
+}
+
+func directoryAdminPlan(registry *kernel.ContributorRegistry, b identity.CommandBinding, registration kernel.FeatureRegistration,
+	lifecycle kernel.LifecyclePlan, counter kernel.CommandCounterPlan, verified time.Time) (kernel.CommandPlan, error) {
+	op := registration.Operation
 	const subject = "directory_sync"
 	builder, err := audit.NewBuilder(audit.BuilderConfig{})
 	if err != nil {
 		return kernel.CommandPlan{}, sso.ErrUnavailable
 	}
 	record, err := builder.Build(audit.RecordInput{
-		OccurredAt: p.original.verified, Action: op.OperationID, Outcome: audit.OutcomeSucceeded,
+		OccurredAt: verified, Action: op.OperationID, Outcome: audit.OutcomeSucceeded,
 		Actor: audit.ActorInput{Kind: audit.ActorHuman, ID: string(b.ActorID)}, Subject: audit.SubjectInput{Type: subject, ID: b.RecordID},
 		Context: audit.ContextInput{TenantID: string(b.TenantID), CorrelationID: b.CorrelationID},
 		Policy:  audit.PolicyMetadata{PolicyID: b.PolicyID, Version: strconv.FormatUint(b.PolicyVersion, 10)},
 		Changes: audit.ChangeSetInput{Redacted: true},
 		Attributes: map[string]string{
 			"command.id": string(b.CommandID), "aggregate.type": subject, "aggregate.id": b.RecordID,
-			"aggregate.before_version": "0", "aggregate.after_version": "1", "retention.class": "protected",
+			"aggregate.before_version": strconv.FormatUint(lifecycle.BeforeVersion, 10),
+			"aggregate.after_version":  strconv.FormatUint(lifecycle.AfterVersion, 10), "retention.class": "protected",
 		},
 	})
 	if err != nil {
@@ -83,9 +89,8 @@ func (p *directorySyncStartPhase) plan(registry *kernel.ContributorRegistry) (ke
 	if err != nil {
 		return kernel.CommandPlan{}, err
 	}
-	registration, lifecycle := p.registration(), p.lifecycle()
 	return kernel.CommandPlan{Contributors: registry.Descriptors(), Feature: &registration, SubjectType: subject,
-		Lifecycle: &lifecycle, CommandCounters: &p.counter,
+		Lifecycle: &lifecycle, CommandCounters: &counter,
 		Audits: []kernel.AuditPlan{{EventType: op.OperationID, SchemaVersion: 1, BindingDigest: digest, RetentionPolicyVersion: 1,
 			RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384, RetentionClass: "protected", Required: true}}}, nil
 }

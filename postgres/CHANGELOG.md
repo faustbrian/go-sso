@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Cancel an exact directory generation with fresh administrator authority.
+  Do not change committed grants or its cursor; if a child is held, settle
+  only the original child before closing the generation. Recover cancellation
+  by its original idempotency key without producing another audit or event.
+
 - Opt in to one exact SCIM Group/User edge through native SSO. Apply and
   withdraw the matching team source grant in original identity Work;
   retain the predecessor until the original child receipt is known.

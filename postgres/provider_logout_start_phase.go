@@ -215,26 +215,36 @@ func (p *providerLogoutStartPhase) execute(ctx context.Context, c *kernel.Coordi
 }
 
 func executeProviderLogoutCommand(ctx context.Context, c *kernel.Coordinator, b identity.CommandBinding, command identity.Command, declaration kernel.CommandPlan) (identity.CommandResult, error) {
+	result, _, err := executeProviderFeatureCommand(ctx, c, b, command, declaration)
+	return result, err
+}
+
+// The ownership bit distinguishes results from this execution from receipts
+// returned by reservation. Callers with separate query authority can then
+// require an authorized lookup before disclosing reservation observations.
+func executeProviderFeatureCommand(ctx context.Context, c *kernel.Coordinator, b identity.CommandBinding, command identity.Command, declaration kernel.CommandPlan) (identity.CommandResult, bool, error) {
 	plan, err := c.PrepareCommandPlan(b, command, declaration)
 	if err != nil {
-		return identity.CommandResult{}, err
+		return identity.CommandResult{}, false, err
 	}
 	reservation, existing, err := c.ReserveCommand(ctx, b, command, plan)
 	// A newly acknowledged reservation also has an in-progress receipt. Only
 	// the nonzero handle distinguishes ownership from an observed busy command.
 	if err != nil || reservation == (kernel.Reservation{}) {
-		return existing, err
+		return existing, false, err
 	}
 	work, err := c.Begin(ctx, reservation)
 	if err != nil {
-		return identity.CommandResult{}, err
+		return identity.CommandResult{}, true, err
 	}
 	defer c.Abort(work, identity.UnavailableError{})
 	result, err := c.ApplyFeature(ctx, work, command)
 	if err != nil {
-		return c.Abort(work, err)
+		result, err = c.Abort(work, err)
+		return result, true, err
 	}
-	return c.Commit(work, result)
+	result, err = c.Commit(work, result)
+	return result, true, err
 }
 
 const providerLogoutInsertSQL = `INSERT INTO sso_providers.logout_transactions

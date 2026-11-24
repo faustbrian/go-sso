@@ -188,7 +188,12 @@ func (s *DirectoryGroupSyncService) prepare(ctx context.Context, id identity.Com
 	}
 	current := stored.current
 	if current.Mode != DirectorySyncApply || current.Provider != batch.ProviderID || current.Number != batch.Generation ||
-		current.MappingVersion != batch.MappingVersion || (current.State != DirectorySyncRunning && current.State != DirectorySyncReconciling) {
+		current.MappingVersion != batch.MappingVersion {
+		return nil, sso.ErrForbidden
+	}
+	switch current.State {
+	case DirectorySyncRunning, DirectorySyncReconciling, DirectorySyncCanceling:
+	default:
 		return nil, sso.ErrForbidden
 	}
 	commitment, err := batch.Commitment()
@@ -220,8 +225,21 @@ func (s *DirectoryGroupSyncService) prepare(ctx context.Context, id identity.Com
 		OperationID: op.OperationID, SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion, PolicyID: provider.config.PolicyID, PolicyVersion: provider.config.PolicyVersion,
 		CorrelationID: hex.EncodeToString(correlation[:]), RecordID: update.RecordID(),
 	}
-	return &directoryGroupChild{service: s, generation: current, batch: batch, commitment: commitment,
-		admission: admitted, edge: edge, update: update, binding: binding}, nil
+	child := &directoryGroupChild{service: s, generation: current, batch: batch, commitment: commitment,
+		admission: admitted, edge: edge, update: update, binding: binding}
+	if current.State == DirectorySyncCanceling {
+		// Cancellation grants no permission to recover other previously known
+		// commands. Check the exact hold before looking at the child journal.
+		var pending bool
+		err := provider.pool.Raw().QueryRow(ctx, directoryPendingGroupBatchSQL, child.generationArgs()...).Scan(&pending)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && !pending {
+			return nil, sso.ErrForbidden
+		}
+		if err != nil {
+			return nil, providerError(ctx, err)
+		}
+	}
+	return child, nil
 }
 
 func (s *DirectoryGroupSyncService) observe(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch) (directoryEdgeAdmission, error) {
