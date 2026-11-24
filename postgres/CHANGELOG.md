@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Select direct Group Apply independently of human administration. The
+  configured SCIM service account, generation and original Work fences
+  retain authority; the existing `WithGroupEdges` path remains supported.
+
 - Select native directory administration with a primary browser cookie and
   exact session-bound CSRF for writes. Keyless versioned cancellation can
   recover its original outcome without changing the existing keyed API.

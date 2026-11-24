@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"strconv"
 	"testing"
 	"time"
@@ -24,7 +25,18 @@ func TestNativeDirectorySyncCommitsMappedSCIMEdgeBeforeAdvancing(t *testing.T) {
 	fixture := newDirectoryGroupApplyFixture(t)
 	ctx := fixture.provider.f.ctx
 	start := fixture.start(t)
-	worker := fixture.worker(t, fixture.sync)
+	providerConfig := fixture.provider.config
+	config := ssopg.DirectoryGroupSyncConfig{
+		TenantID: fixture.scope.TenantID, OrganizationID: fixture.scope.OrganizationID, ConnectionID: fixture.scope.ConnectionID,
+		Clock: providerConfig.Clock, MaximumDuration: providerConfig.MaximumDuration,
+		PolicyID: providerConfig.PolicyID, PolicyVersion: providerConfig.PolicyVersion, Coordinator: providerConfig.Coordinator,
+	}
+	config.Coordinator.RetainedFingerprintKeys = maps.Clone(config.Coordinator.RetainedFingerprintKeys)
+	edges := fixture.workerConfig(t)
+	worker, err := ssopg.NewDirectoryGroupSyncService(fixture.provider.f.pool, config, edges)
+	if err != nil {
+		t.Fatal("select direct directory executor without human session credentials", err)
+	}
 	organizationRepo, err := organizationpg.NewRepository(fixture.provider.f.pool, organizationpg.Config{
 		MaximumDuration: fixture.provider.config.MaximumDuration,
 	})
@@ -38,6 +50,18 @@ func TestNativeDirectorySyncCommitsMappedSCIMEdgeBeforeAdvancing(t *testing.T) {
 	}
 
 	add := fixture.batch(t, start, sso.DirectoryMembershipAdd)
+	foreignConfig := config
+	foreignConfig.ConnectionID = "different-source"
+	foreign, err := ssopg.NewDirectoryGroupSyncService(fixture.provider.f.pool, foreignConfig, edges)
+	if err != nil {
+		t.Fatal("select a separate connection scope", err)
+	}
+	if result, err := foreign.Apply(ctx, start.ID, add); !errors.Is(err, sso.ErrForbidden) || result.Checkpoint != ([32]byte{}) || len(result.ChildOutcomes) != 0 {
+		t.Fatal("direct executor disclosed or admitted a generation outside its configured connection", err)
+	}
+	// Configuration belongs to the caller until construction finishes; a
+	// running executor must retain its original fingerprint key independently.
+	delete(config.Coordinator.RetainedFingerprintKeys, config.Coordinator.CurrentFingerprintKeyVersion)
 	result, err := worker.Apply(ctx, start.ID, add)
 	if err != nil || len(result.ChildOutcomes) != 1 || result.ChildOutcomes[0].Outcome != identity.CommitOutcomeCommitted {
 		t.Fatal("mapped add did not obtain a committed original child", err)

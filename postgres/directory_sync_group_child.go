@@ -105,7 +105,7 @@ func (p *directoryGroupChild) receiptCaller() authorization.DecisionContext {
 }
 
 func (p *directoryGroupChild) coordinator() (*kernel.Coordinator, *kernel.ContributorRegistry, error) {
-	provider := p.service.generation.provider
+	service := p.service
 	audits, err := auditpg.NewIdentityContributor(auditpg.Config{})
 	if err != nil {
 		return nil, nil, err
@@ -114,18 +114,11 @@ func (p *directoryGroupChild) coordinator() (*kernel.Coordinator, *kernel.Contri
 	if err != nil {
 		return nil, nil, err
 	}
-	registry, err := kernel.NewContributorRegistry([]kernel.Contributor{provider.directory, audits, outbox, p})
+	registry, err := kernel.NewContributorRegistry([]kernel.Contributor{service.directory, audits, outbox, p})
 	if err != nil {
 		return nil, nil, err
 	}
-	config := provider.config.Coordinator
-	query := *config.QueryPolicy
-	query.Authorization = p.service.config.Authorization
-	config.QueryPolicy = &query
-	admission := *config.AdmissionPolicy
-	admission.Authorization = p.service.config.Authorization
-	config.AdmissionPolicy = &admission
-	coordinator, err := kernel.NewCoordinator(provider.pool, registry, config)
+	coordinator, err := kernel.NewCoordinator(service.pool, registry, service.scope.Coordinator)
 	return coordinator, registry, err
 }
 
@@ -230,7 +223,7 @@ func (p *directoryGroupChild) CheckFeatureCommit(ctx context.Context, work kerne
 }
 
 func (p *directoryGroupChild) requireActorInWork(ctx context.Context, work kernel.Work) error {
-	maximum := p.service.generation.provider.config.MaximumDuration
+	maximum := p.service.scope.MaximumDuration
 	if err := authoritypg.RequireAuthority(ctx, work, p.admission.scope, p.admission.epoch, maximum); err != nil {
 		return identity.ForbiddenError{}
 	}
@@ -242,5 +235,5 @@ func (p *directoryGroupChild) requireActorInWork(ctx context.Context, work kerne
 }
 
 func (p *directoryGroupChild) organizations() *organizationpg.Repository {
-	return p.service.generation.provider.config.Organizations
+	return p.service.organizations
 }

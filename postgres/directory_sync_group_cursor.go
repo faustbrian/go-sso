@@ -134,22 +134,22 @@ func (p *directoryGroupChild) settleStopped(ctx context.Context) error {
 }
 
 func (p *directoryGroupChild) settleGeneration(ctx context.Context, query string, args []any, checkpoint [32]byte, replayStates ...DirectorySyncState) error {
-	provider := p.service.generation.provider
-	tx, err := provider.pool.Raw().Begin(ctx)
+	service := p.service
+	tx, err := service.pool.Raw().Begin(ctx)
 	if err != nil {
 		return sso.ErrDirectoryReconciliation
 	}
 	defer func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), provider.config.MaximumDuration)
+		cleanup, cancel := context.WithTimeout(context.Background(), service.scope.MaximumDuration)
 		defer cancel()
 		_ = tx.Rollback(cleanup)
 	}()
-	if err := authoritypg.RequireAuthority(ctx, tx, p.admission.scope, p.admission.epoch, provider.config.MaximumDuration); err != nil {
+	if err := authoritypg.RequireAuthority(ctx, tx, p.admission.scope, p.admission.epoch, service.scope.MaximumDuration); err != nil {
 		return sso.ErrDirectoryReconciliation
 	}
 	var lockedProvider string
 	if err := tx.QueryRow(ctx, directoryStartLockProviderSQL, p.providerLockArgs()...).Scan(&lockedProvider); err != nil ||
-		lockedProvider != string(p.batch.ProviderID) || !provider.config.Clock.Now().Before(p.admission.validUntil) {
+		lockedProvider != string(p.batch.ProviderID) || !service.scope.Clock.Now().Before(p.admission.validUntil) {
 		return sso.ErrDirectoryReconciliation
 	}
 	tag, err := tx.Exec(ctx, query, args...)

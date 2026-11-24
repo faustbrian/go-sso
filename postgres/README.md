@@ -51,7 +51,11 @@ Use `CancelExact` for a keyless retry of the same generation and expected
 version. That retry has a separate native key namespace and still requires
 current authorization. Neither selection publishes any HTTP routes.
 
-Select `WithGroupEdges` separately for the direct Group-to-User profile.
+For a direct Group-to-User worker, call `NewDirectoryGroupSyncService` with
+the primary pool, exact configured tenant, organization and SCIM connection,
+and the bounded command policy. It takes no human session and performs no
+startup I/O. `WithGroupEdges` selects the same executor from existing native
+administration and remains supported.
 Bind an explicit, versioned SCIM organization mapper, a configured native
 SCIM Group source, and the service account's synchronization authorization
 and retained epoch. Supply the synchronization policy's earliest absolute

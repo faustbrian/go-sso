@@ -14,6 +14,7 @@ import (
 	"github.com/faustbrian/go-identity/risk"
 	sessionpg "github.com/faustbrian/go-identity/session/postgres"
 	organizationpg "github.com/faustbrian/go-organization/postgres"
+	database "github.com/faustbrian/go-postgres"
 	"github.com/faustbrian/go-sso"
 	lifecyclepg "github.com/faustbrian/go-transactional-outbox/postgres/identity"
 	"github.com/jackc/pgx/v5"
@@ -250,7 +251,11 @@ const directoryGenerationReadSQL = `SELECT provider_id,generation::text,version:
 
 func (s *DirectorySyncService) readGeneration(ctx context.Context, id identity.CommandID) (storedDirectoryGeneration, error) {
 	p := s.provider
-	row := p.pool.Raw().QueryRow(ctx, directoryGenerationReadSQL, string(id), string(p.authentication.TenantID), p.updateOrganization, s.connection)
+	return readDirectoryGeneration(ctx, p.pool, id, p.authentication.TenantID, p.updateOrganization, s.connection)
+}
+
+func readDirectoryGeneration(ctx context.Context, pool *database.Pool, id identity.CommandID, tenant identity.TenantID, organization, connection string) (storedDirectoryGeneration, error) {
+	row := pool.Raw().QueryRow(ctx, directoryGenerationReadSQL, string(id), string(tenant), organization, connection)
 	return scanDirectoryGeneration(id, row.Scan)
 }
 

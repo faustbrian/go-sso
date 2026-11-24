@@ -6,15 +6,19 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strconv"
 	"time"
 
 	"github.com/faustbrian/go-authorization/v3"
 	authoritypg "github.com/faustbrian/go-authorization/v3/postgres"
+	"github.com/faustbrian/go-clock"
 	identity "github.com/faustbrian/go-identity"
+	kernel "github.com/faustbrian/go-identity/postgres"
 	organization "github.com/faustbrian/go-organization"
 	organizationpg "github.com/faustbrian/go-organization/postgres"
+	database "github.com/faustbrian/go-postgres"
 	scim "github.com/faustbrian/go-scim"
 	scimorganization "github.com/faustbrian/go-scim/organization"
 	scimpostgres "github.com/faustbrian/go-scim/postgres"
@@ -23,6 +27,20 @@ import (
 )
 
 const directoryApplyAction = "identity.sso.directory-sync-apply"
+
+// DirectoryGroupSyncConfig binds direct Group Apply to a trusted deployment
+// scope and the primary command policy. The scope selects an existing source;
+// it does not authorize that source, create a generation, or carry a session.
+type DirectoryGroupSyncConfig struct {
+	TenantID        identity.TenantID
+	OrganizationID  organization.ID
+	ConnectionID    string
+	Clock           clock.Clock
+	MaximumDuration time.Duration
+	PolicyID        string
+	PolicyVersion   uint64
+	Coordinator     kernel.CoordinatorConfig
+}
 
 // DirectorySyncGroupEdgesConfig opts the organization-bound native generation
 // into the direct Group-to-User profile. Source and Mapping are existing owner
@@ -48,19 +66,45 @@ type DirectorySyncGroupAuthorization interface {
 // DirectoryGroupSyncService applies mapped direct Group-to-User changes using
 // the original stable child command. It owns no asynchronous workers or routes.
 type DirectoryGroupSyncService struct {
-	generation *DirectorySyncService
-	config     DirectorySyncGroupEdgesConfig
-	authority  *authoritypg.AuthorityStore
+	pool          *database.Pool
+	scope         DirectoryGroupSyncConfig
+	directory     *kernel.Repository
+	organizations *organizationpg.Repository
+	config        DirectorySyncGroupEdgesConfig
+	authority     *authoritypg.AuthorityStore
 }
 
 // WithGroupEdges explicitly selects exact source-team contributions. It
 // borrows the source service and the primary; the caller retains both for the
 // service's lifetime. It performs no writes or authorization callbacks.
 func (s *DirectorySyncService) WithGroupEdges(c DirectorySyncGroupEdgesConfig) (*DirectoryGroupSyncService, error) {
-	if s == nil || s.provider == nil || c.Source == nil || c.Authorization == nil || c.ApplyAuthorization == nil || !providerID(c.AuthorityNamespace) {
+	if s == nil || s.provider == nil {
 		return nil, sso.ErrInvalidInput
 	}
-	for _, owner := range []any{c.Authorization, c.ApplyAuthorization} {
+	p := s.provider
+	return NewDirectoryGroupSyncService(p.pool, DirectoryGroupSyncConfig{
+		TenantID: p.authentication.TenantID, OrganizationID: organization.ID(p.updateOrganization), ConnectionID: s.connection,
+		Clock: p.config.Clock, MaximumDuration: p.config.MaximumDuration, PolicyID: p.config.PolicyID, PolicyVersion: p.config.PolicyVersion,
+		Coordinator: p.config.Coordinator,
+	}, c)
+}
+
+// NewDirectoryGroupSyncService selects direct Group Apply without a human
+// session. The configured SCIM source identifies its service-account actor
+// during Apply; both policy owners must authorize the original work. The
+// caller retains the primary, source and concurrent-safe policy owners.
+// Install the native generation, SCIM and organization team schemas before
+// use. Construction performs no I/O and starts no workers or routes.
+func NewDirectoryGroupSyncService(pool *database.Pool, scope DirectoryGroupSyncConfig, c DirectorySyncGroupEdgesConfig) (*DirectoryGroupSyncService, error) {
+	if pool == nil || pool.Raw() == nil || scope.MaximumDuration <= 0 || scope.MaximumDuration > 5*time.Second ||
+		!providerID(string(scope.TenantID)) || !providerID(string(scope.OrganizationID)) || !providerID(scope.ConnectionID) ||
+		!providerID(scope.PolicyID) || scope.PolicyVersion == 0 || c.Source == nil || !providerID(c.AuthorityNamespace) {
+		return nil, sso.ErrInvalidInput
+	}
+	for _, owner := range []any{scope.Clock, c.Authorization, c.ApplyAuthorization} {
+		if owner == nil {
+			return nil, sso.ErrInvalidInput
+		}
 		v := reflect.ValueOf(owner)
 		switch v.Kind() {
 		case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
@@ -69,11 +113,41 @@ func (s *DirectorySyncService) WithGroupEdges(c DirectorySyncGroupEdgesConfig) (
 			}
 		}
 	}
-	authority, err := authoritypg.NewAuthorityStore(s.provider.pool.Raw(), s.provider.config.MaximumDuration)
+	coordinator := &scope.Coordinator
+	if coordinator.QueryPolicy == nil || coordinator.AdmissionPolicy == nil ||
+		coordinator.QueryPolicy.PolicyVersion != scope.PolicyVersion || coordinator.AdmissionPolicy.PolicyVersion != scope.PolicyVersion {
+		return nil, sso.ErrInvalidInput
+	}
+	coordinator.RetainedFingerprintKeys = maps.Clone(coordinator.RetainedFingerprintKeys)
+	query, admission := *coordinator.QueryPolicy, *coordinator.AdmissionPolicy
+	query.Authorization, admission.Authorization = c.Authorization, c.Authorization
+	coordinator.QueryPolicy, coordinator.AdmissionPolicy = &query, &admission
+	if coordinator.FinalAuthentication != nil {
+		final := *coordinator.FinalAuthentication
+		coordinator.FinalAuthentication = &final
+	}
+	directory, err := kernel.NewRepository(pool, kernel.Config{MaximumDuration: scope.MaximumDuration})
 	if err != nil {
 		return nil, sso.ErrInvalidInput
 	}
-	return &DirectoryGroupSyncService{generation: s, config: c, authority: authority}, nil
+	organizations, err := organizationpg.NewRepository(pool, organizationpg.Config{MaximumDuration: scope.MaximumDuration})
+	if err != nil {
+		return nil, sso.ErrInvalidInput
+	}
+	authority, err := authoritypg.NewAuthorityStore(pool.Raw(), scope.MaximumDuration)
+	if err != nil {
+		return nil, sso.ErrInvalidInput
+	}
+	return &DirectoryGroupSyncService{pool: pool, scope: scope, directory: directory,
+		organizations: organizations, config: c, authority: authority}, nil
+}
+
+func (DirectoryGroupSyncConfig) Format(s fmt.State, _ rune) {
+	_, _ = fmt.Fprint(s, "sso.postgres.DirectoryGroupSyncConfig(redacted)")
+}
+
+func (DirectoryGroupSyncConfig) MarshalJSON() ([]byte, error) {
+	return nil, sso.ErrSensitiveSerialization
 }
 
 func (DirectorySyncGroupEdgesConfig) Format(s fmt.State, _ rune) {
@@ -102,13 +176,16 @@ func (s *DirectoryGroupSyncService) Apply(ctx context.Context, generation identi
 			out, err = sso.DirectoryApplyResult{}, sso.ErrUnavailable
 		}
 	}()
-	if s == nil || s.generation == nil || ctx == nil {
+	if s == nil || s.pool == nil || ctx == nil {
 		return out, sso.ErrInvalidInput
 	}
 	if _, err := identity.ParseCommandID(string(generation)); err != nil {
 		return out, sso.ErrInvalidInput
 	}
-	ctx, cancel := context.WithTimeout(ctx, s.generation.provider.config.MaximumDuration)
+	if batch.TenantID != s.scope.TenantID || batch.OrganizationID != s.scope.OrganizationID || batch.ConnectionID != s.scope.ConnectionID {
+		return out, sso.ErrForbidden
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.scope.MaximumDuration)
 	defer cancel()
 	executor := &nativeDirectoryEdgeExecutor{service: s, generation: generation}
 	reconciler, err := scimorganization.NewDirectoryReconciler(s.config.Mapping, executor)
@@ -153,7 +230,7 @@ func (p *directoryGroupChild) mayDisclose() bool {
 		return false
 	}
 	_, err := p.admission.source.Bindings()
-	return err == nil && p.service.generation.provider.config.Clock.Now().Before(p.admission.validUntil)
+	return err == nil && p.service.scope.Clock.Now().Before(p.admission.validUntil)
 }
 
 // Only the configured native executor can enlist the original Work and load
@@ -237,16 +314,11 @@ type directoryEdgeAdmission struct {
 }
 
 func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch) (*directoryGroupChild, error) {
-	provider := s.generation.provider
-	if batch.TenantID != provider.authentication.TenantID || string(batch.OrganizationID) != provider.updateOrganization ||
-		batch.ConnectionID != s.generation.connection {
-		return nil, sso.ErrForbidden
-	}
 	admitted, err := s.observe(ctx, id, batch)
 	if err != nil {
 		return nil, err
 	}
-	stored, err := s.generation.readGeneration(ctx, id)
+	stored, err := readDirectoryGeneration(ctx, s.pool, id, s.scope.TenantID, string(s.scope.OrganizationID), s.scope.ConnectionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, sso.ErrForbidden
 	}
@@ -276,7 +348,7 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 	child := &directoryGroupChild{service: s, generation: current, batch: batch, commitment: commitment, admission: admitted}
 	if current.State == DirectorySyncReconciling || current.State == DirectorySyncCanceling {
 		var pending bool
-		err := provider.pool.Raw().QueryRow(ctx, directoryPendingGroupBatchSQL, child.generationArgs()...).Scan(&pending)
+		err := s.pool.Raw().QueryRow(ctx, directoryPendingGroupBatchSQL, child.generationArgs()...).Scan(&pending)
 		if errors.Is(err, pgx.ErrNoRows) || err == nil && !pending {
 			return nil, sso.ErrForbidden
 		}
@@ -289,12 +361,11 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 
 func (p *directoryGroupChild) prepareChild(ctx context.Context, m scimorganization.DirectoryMembershipIntent) (*directoryGroupChild, error) {
 	batch, admitted := p.batch, p.admission
-	provider := p.service.generation.provider
 	grantScope := organizationpg.DirectoryTeamGrantScope{
 		TenantID: batch.TenantID, OrganizationID: batch.OrganizationID, ProviderID: organization.ID(batch.ProviderID),
 		ConnectionID: organization.ID(batch.ConnectionID), GroupID: organization.ID(m.GroupID), TeamID: m.TeamID, UserID: m.UserID,
 	}
-	target, err := provider.config.Organizations.ObserveDirectoryTeamMembership(ctx, grantScope)
+	target, err := p.service.organizations.ObserveDirectoryTeamMembership(ctx, grantScope)
 	if err != nil {
 		return nil, sso.ErrForbidden
 	}
@@ -311,7 +382,7 @@ func (p *directoryGroupChild) prepareChild(ctx context.Context, m scimorganizati
 	correlation := sha256.Sum256(append(append([]byte("sso/postgres/directory-child/v1\x00"), p.generation.ID...), p.commitment[:]...))
 	binding := identity.CommandBinding{
 		CommandID: m.CommandID, TenantID: batch.TenantID, UserID: m.UserID, ActorKind: authorization.SubjectServiceAccount, ActorID: admitted.bindings.ActorID,
-		OperationID: op.OperationID, SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion, PolicyID: provider.config.PolicyID, PolicyVersion: provider.config.PolicyVersion,
+		OperationID: op.OperationID, SchemaID: op.SchemaID, SchemaVersion: op.SchemaVersion, PolicyID: p.service.scope.PolicyID, PolicyVersion: p.service.scope.PolicyVersion,
 		CorrelationID: hex.EncodeToString(correlation[:]), RecordID: update.RecordID(),
 	}
 	child := *p
@@ -336,7 +407,7 @@ func (s *DirectoryGroupSyncService) observe(ctx context.Context, id identity.Com
 	if err != nil || epoch.Version == 0 {
 		return directoryEdgeAdmission{}, sso.ErrForbidden
 	}
-	now := s.generation.provider.config.Clock.Now().UTC()
+	now := s.scope.Clock.Now().UTC()
 	decision := s.applyDecision(now, id, batch, bindings.ActorID)
 	evidence, err := s.config.ApplyAuthorization.ObserveDirectoryGroupAuthorization(ctx, decision.Clone(), epoch.Version)
 	if err != nil {
@@ -348,14 +419,14 @@ func (s *DirectoryGroupSyncService) observe(ctx context.Context, id identity.Com
 	}
 	if !reflect.DeepEqual(evidence.Context, decision) || evidence.Decision.Outcome != authorization.Allow ||
 		evidence.Decision.Revision != decision.PolicyRevision || evidence.ActorAuthorizationVersion != epoch.Version ||
-		!s.generation.provider.config.Clock.Now().Before(expiry) {
+		!s.scope.Clock.Now().Before(expiry) {
 		return directoryEdgeAdmission{}, sso.ErrForbidden
 	}
 	return directoryEdgeAdmission{source: source, bindings: bindings, scope: scope, epoch: epoch.Version, validUntil: expiry}, nil
 }
 
 func (s *DirectoryGroupSyncService) applyDecision(now time.Time, id identity.CommandID, b sso.DirectoryDeltaBatch, actor identity.ActorID) authorization.DecisionContext {
-	return authorization.DecisionContext{PolicyRevision: authorization.Revision(s.generation.provider.config.PolicyVersion), Request: authorization.Request{
+	return authorization.DecisionContext{PolicyRevision: authorization.Revision(s.scope.PolicyVersion), Request: authorization.Request{
 		Tenant: authorization.TenantID(b.TenantID), Subject: authorization.Subject{Kind: authorization.SubjectServiceAccount, ID: authorization.SubjectID(actor)},
 		Action: directoryApplyAction, Resource: authorization.Resource{Type: "sso.directory-generation", ID: authorization.ResourceID(id), Attributes: authorization.Attributes{
 			"sso.organization": authorization.StringValue(string(b.OrganizationID)), "sso.provider": authorization.StringValue(string(b.ProviderID)),
