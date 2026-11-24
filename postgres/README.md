@@ -12,6 +12,24 @@ OIDC sign-in start and completion are separate opt-ins. Completion defaults
 to existing linked members. First-login provisioning requires a further
 selection; it never links an existing local account by email.
 
+### Optional directory generation administration
+
+Install `DirectorySyncGenerationMigrationSource` at an unused version after
+the provider registry and enablement history. It adds an initially empty
+generation table and indexes; leave them in place on code rollback.
+Select a connection on an organization-bound `ProviderService` using
+`DirectorySync` with the deployment's `DirectorySyncAuthorization` owner.
+This does not validate SCIM source authority or enable a background process.
+
+`Start` uses the current enabled provider and exact provider and mapping
+versions, a fresh authorized session, and the original idempotency key.
+It creates at most one active generation for that provider and connection.
+An exact retry returns the original creation projection; `Status` reads the
+current safe projection with `org:sso-read` permission for that connection.
+The stored checkpoint is a commitment; the zero request value selects a
+source-scoped initial commitment. Neither call applies external membership
+changes, cancels work, advances a source cursor, or enables an HTTP route.
+
 ### Optional SAML replay schema
 
 For IdP-initiated confirmation, apply `SAMLIDPConfirmationMigrationSource`

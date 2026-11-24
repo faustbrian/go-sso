@@ -574,6 +574,10 @@ func (p *ProviderContributor) admit(ctx context.Context, w kernel.Work, c identi
 	}
 	a := p.admission
 	config := p.service.config
+	return requireProviderAdminSession(ctx, w, p, c, config, a, p.binding, p.enable != nil || p.disable != nil)
+}
+
+func requireProviderAdminSession(ctx context.Context, w kernel.Work, owner kernel.FeatureExecutionContributor, c identity.Command, config ProviderServiceConfig, a providerAdmission, binding identity.CommandBinding, fresh bool) error {
 	spec, err := a.session.Session.Bindings()
 	if err != nil {
 		return identity.ForbiddenError{}
@@ -594,26 +598,26 @@ func (p *ProviderContributor) admit(ctx context.Context, w kernel.Work, c identi
 	if err != nil || digest.KeyVersion != spec.Lookup.KeyVersion || subtle.ConstantTimeCompare(digest.Sum[:], spec.Lookup.Sum[:]) != 1 {
 		return identity.ForbiddenError{}
 	}
-	directory, credential, policy, err := sessionpg.OriginalSessionAdmission(config.Profile, a.session.Session, p.binding)
+	directory, credential, policy, err := sessionpg.OriginalSessionAdmission(config.Profile, a.session.Session, binding)
 	if err != nil {
 		return identity.ForbiddenError{}
 	}
-	if err = w.RequireActiveDirectoryAuthority(ctx, p, directory); err != nil {
+	if err = w.RequireActiveDirectoryAuthority(ctx, owner, directory); err != nil {
 		return err
 	}
-	if _, err = w.RequireActiveActorCredential(ctx, p, credential); err != nil {
+	if _, err = w.RequireActiveActorCredential(ctx, owner, credential); err != nil {
 		return err
 	}
-	if err = w.RequireActiveUserStatus(ctx, p, a.status); err != nil {
+	if err = w.RequireActiveUserStatus(ctx, owner, a.status); err != nil {
 		return err
 	}
-	if err = w.RequireActiveActorAuthorization(ctx, p, policy); err != nil {
+	if err = w.RequireActiveActorAuthorization(ctx, owner, policy); err != nil {
 		return err
 	}
 	if err = sessionpg.RequireSession(ctx, w, config.Session, a.session.Session); err != nil {
 		return err
 	}
-	if err = config.Organizations.RequireCredentialAuthority(ctx, w, p, a.organization); err != nil {
+	if err = config.Organizations.RequireCredentialAuthority(ctx, w, owner, a.organization); err != nil {
 		return err
 	}
 	at, err := w.DatabaseTime(ctx)
@@ -623,7 +627,7 @@ func (p *ProviderContributor) admit(ctx context.Context, w kernel.Work, c identi
 	if a.session.ValidateAt(at) != nil || at.Before(a.verified) || !at.Before(a.until) {
 		return identity.ForbiddenError{}
 	}
-	if p.enable != nil || p.disable != nil {
+	if fresh {
 		lifetime, err := a.session.Session.Lifetime(at)
 		if err != nil || !lifetime.Fresh {
 			return identity.ForbiddenError{}

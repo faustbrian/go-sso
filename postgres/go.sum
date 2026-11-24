@@ -131,10 +131,14 @@ github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789 h
 github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789/go.mod h1:O/hmm6Lqqb8SknW6SGEhv+EornZU+sR8KVKCXK5h+uY=
 github.com/faustbrian/go-identity/risk v0.0.0-20261123053209-79b6d35cbf8f h1:fgEkCPOm3mdv54ZQeRNBijkvOAv3BkQx2Uy158ufD2g=
 github.com/faustbrian/go-identity/risk v0.0.0-20261123053209-79b6d35cbf8f/go.mod h1:zgNZ4X6AUlAWF12+6VIXijPginf0xGML8wBYVkv+FvY=
+github.com/faustbrian/go-identity/risk v0.0.0-20261124125401-3845f97fe8aa h1:QGY3EwOkmsNpVes40iD95PPPmluOVNy5oIq5dkb18v8=
+github.com/faustbrian/go-identity/risk v0.0.0-20261124125401-3845f97fe8aa/go.mod h1:zgNZ4X6AUlAWF12+6VIXijPginf0xGML8wBYVkv+FvY=
 github.com/faustbrian/go-identity/risk/hibp v0.0.0-20261018021354-75e10d9681e0 h1:CdkeHkuX+7SrhNC6rLBHMXc3vJ2dH9epaU+1L1f8p5o=
 github.com/faustbrian/go-identity/risk/hibp v0.0.0-20261018021354-75e10d9681e0/go.mod h1:hmFfP+7i0J5142s8cSWtkOG2tyv0jc6rnBMwX93UaAc=
 github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261122024644-105adde9ae64 h1:/xylgUx2LyOoKUy7aA7ZA+6w3hdOjAahT/56INyKRcg=
 github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261122024644-105adde9ae64/go.mod h1:GjUlc30EMvZXQ2oNSf4Q8FXwYd+0WDZWN9abV+nPlVA=
+github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261124125758-d8bd5f7b074a h1:sYXmOrbwrwpawoawkmd0C/k/YuZFZ6aHwI1gDNqI2pI=
+github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261124125758-d8bd5f7b074a/go.mod h1:xJ1QFi1fZfvfUHxOUWcul9jPDoAnjwOrWPTnlEMtF5I=
 github.com/faustbrian/go-identity/risk/valkey v0.0.0-20261015094324-5d5bf8236eb3 h1:aWdCQOSXOjSweD1EFfYE/Wz2VDUu/faLs1/EFDONJ10=
 github.com/faustbrian/go-identity/risk/valkey v0.0.0-20261015094324-5d5bf8236eb3/go.mod h1:Dr+TKiY24feF9p9vYuWnsDaRE+Bnxlx7earFFjKNOLE=
 github.com/faustbrian/go-identity/session v0.0.0-20261123125537-8d9afa5e1a45 h1:HBdim2AbHKMo8Xl091ReSVtrHbh7gdQfxqgBkvD9ufw=

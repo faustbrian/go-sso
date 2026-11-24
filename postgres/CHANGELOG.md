@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Start an opt-in directory generation against an enabled provider and
+  exact mapping. A fresh authorized caller retains one replayable creation
+  outcome; scoped status reads expose only the safe current projection.
+  Install the additive directory-generation migration before use. No
+  membership changes, cursor advancement or HTTP routes are enabled.
+
 - Replace a disabled SAML provider's IdP signing certificates through the
   dedicated credential rotation operation. Preserve the installed SP signer,
   IdP identity, endpoints, domains and mapping. Original retries recover the
