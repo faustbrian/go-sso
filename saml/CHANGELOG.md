@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preserve an installed URN IdP identifier in signed LogoutRequests. The
+  browser redirect destination still requires the same approved HTTPS URL.
+
 - Add the comparable local-session revocation projection with distinct
   committed, not-committed and unknown outcomes. Validation preserves the exact
   bounded session identity and does not establish authority or persistence.

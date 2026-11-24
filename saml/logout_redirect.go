@@ -35,7 +35,7 @@ type LogoutRedirectProfile struct {
 // Provider registration must already have approved them and the active signer.
 // Unsupported or malformed input returns the redacted ErrInvalidInput.
 func NewLogoutRedirectProfile(config LogoutRedirectConfig) (LogoutRedirectProfile, error) {
-	if !samlSPEntityID(config.SPEntityID) || !samlSPEntityID(config.IdentityProviderEntityID) {
+	if !samlSPEntityID(config.SPEntityID) || !samlLogoutRedirectIssuer(config.IdentityProviderEntityID) {
 		return LogoutRedirectProfile{}, ErrInvalidInput
 	}
 	endpoint, ok := samlHTTPSURL(config.IdentityProviderURL, maximumEndpointBytes, true)
@@ -43,6 +43,25 @@ func NewLogoutRedirectProfile(config LogoutRedirectConfig) (LogoutRedirectProfil
 		return LogoutRedirectProfile{}, ErrInvalidInput
 	}
 	return LogoutRedirectProfile{config: config, endpoint: endpoint}, nil
+}
+
+func samlLogoutRedirectIssuer(raw string) bool {
+	if samlSPEntityID(raw) {
+		return true
+	}
+	// The installed login issuer can be an opaque URN. It is only compared
+	// to NameQualifier; the separately validated redirect destination is
+	// always HTTPS. Retain the existing rejection of HTTP URL identifiers.
+	scheme, _, found := strings.Cut(raw, ":")
+	if !found || !strings.EqualFold(scheme, "urn") || !samlIdPEntityID(raw) {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	namespace, name, separated := strings.Cut(u.Opaque, ":")
+	return separated && namespace != "" && name != ""
 }
 
 // LogoutNameID preserves the signed, verified NameID and its optional qualifiers

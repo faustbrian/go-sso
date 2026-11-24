@@ -57,6 +57,23 @@ func TestLogoutRedirectPreservesOriginalCorrelatedRequest(t *testing.T) {
 	assertLogoutRedirectWire(t, result, config, request, &key.PublicKey)
 }
 
+func TestLogoutRedirectPreservesInstalledURNIdentityProvider(t *testing.T) {
+	config := logoutRedirectConfig()
+	config.IdentityProviderEntityID = "urn:example:enterprise-idp"
+	profile, err := saml.NewLogoutRedirectProfile(config)
+	if err != nil {
+		t.Fatal("a registered URN is an identifier, not the redirect destination", err)
+	}
+	key := spCredentialRSAKey(t, 2048)
+	request := logoutRedirectRequest()
+	request.NameID.NameQualifier = config.IdentityProviderEntityID
+	result, err := profile.Redirect(t.Context(), request, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLogoutRedirectWire(t, result, config, request, &key.PublicKey)
+}
+
 func TestLogoutRedirectRejectsInvalidConfiguration(t *testing.T) {
 	for _, tc := range []struct {
 		name string
