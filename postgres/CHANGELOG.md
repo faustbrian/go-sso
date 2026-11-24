@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add opt-in native local SAML logout using the original cookie, CSRF and
+  linked provider. A disabled provider does not prevent local revocation.
+  The exact keyed retry recovers the original outcome without revoking
+  again. Install the SAML session-revocation journal migration before enabling
+  this workflow. No provider operation or HTTP route is installed.
+
 - Optionally retain encrypted SAML logout correlation with the original issued
   session on either sign-in path. A failed correlation write rolls back
   issuance. Install the subject migration before selecting this custody.
