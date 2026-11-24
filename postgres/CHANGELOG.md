@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Echo optional opaque RelayState only with a fresh, signed IdP-initiated
+  logout response. A changed value cannot reopen the original request and
+  no-state requests retain their existing replay identity.
+
 - Add SAML logout constructors with an explicit request-key namespace
   independent of canonical sign-in. Existing constructors retain their
   replay namespace and configuration shapes.

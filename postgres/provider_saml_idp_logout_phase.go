@@ -31,6 +31,7 @@ type samlIDPLogoutPhase struct {
 	probe         samlIDPLogoutProbe
 	replayID      [32]byte
 	messageDigest [32]byte
+	relayDigest   *[32]byte
 	requestID     string
 	requestUntil  time.Time
 	prepared      samlIDPLogoutPreparation
@@ -102,13 +103,15 @@ func (p *samlIDPLogoutPhase) authorizeUser(ctx context.Context, user identity.Us
 
 func (p *samlIDPLogoutPhase) requestIntent() (identity.RequestIntent, error) {
 	// Configuration identity and exact enrolled response destination are part of
-	// the immutable intent, not part of the replay key. A changed configuration
-	// must not allocate a new command to one already authenticated signed ID.
+	// the immutable intent, not part of the replay key. The optional RelayState
+	// digest binds the exact echo without retaining raw state or assigning it
+	// authority. Omit it entirely to preserve deployed no-state fingerprints.
 	frame, err := json.Marshal(struct {
 		Configuration   string
 		Provider        ProviderSAMLIDPLogoutProfile
 		Request, Replay [32]byte
-	}{p.service.login.config.ConfigurationID, p.profile.config, p.messageDigest, p.replayID})
+		RelayDigest     *[32]byte `json:",omitempty"`
+	}{p.service.login.config.ConfigurationID, p.profile.config, p.messageDigest, p.replayID, p.relayDigest})
 	if err != nil {
 		return identity.RequestIntent{}, identity.UnavailableError{}
 	}

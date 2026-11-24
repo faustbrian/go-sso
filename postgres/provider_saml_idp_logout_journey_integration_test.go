@@ -39,6 +39,8 @@ import (
 // Core §§3.7.1, 3.7.3.1; Profiles §§4.4.3.4, 4.4.4.1; Bindings
 // §§3.5.4, 3.5.5.2: only an installed IdP's authenticated original request
 // selects retained local sessions, and replay cannot issue another response.
+// Bindings §3.5.3: optional RelayState is echoed unchanged only with a fresh,
+// signed POST response and is part of the original message's replay intent.
 func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T) {
 	spKey, spCertificate := nativeSAMLLogoutTestCertificate(t)
 	private, err := x509.MarshalPKCS8PrivateKey(spKey)
@@ -154,6 +156,7 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 		}}
 	}
 	request := wire("_native-idp-logout-request", nativeSAMLCallbackSubject, index, idpKey, issuedAt)
+	relayState := strings.Repeat("Az09_-", 13) + "Az"
 	wrongKey, _ := nativeSAMLLogoutTestCertificate(t)
 	decoded, err := base64.StdEncoding.DecodeString(request.SAMLRequest[0])
 	if err != nil {
@@ -161,6 +164,29 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 	}
 	tampered := base64.StdEncoding.EncodeToString([]byte(strings.Replace(string(decoded), nativeSAMLCallbackSubject, "substituted-subject", 1)))
 	before := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID)
+	for name, invalidRelay := range map[string][]string{
+		"empty value":          {""},
+		"duplicate values":     {relayState, relayState},
+		"over 80 wire bytes":   {relayState + "A"},
+		"non-ASCII value":      {"opaque_é"},
+		"URL application data": {"https://application.example.test/logout"},
+		"padding":              {"opaque="},
+		"space":                {"opaque handle"},
+		"control character":    {"opaque\nhandle"},
+	} {
+		t.Run("invalid RelayState/"+name, func(t *testing.T) {
+			got, err := service.HandleRequestWithRelayState(ctx, request, invalidRelay)
+			_, responseExposed := got.Response()
+			echo, relayExposed := got.RelayState()
+			if !errors.Is(err, sso.ErrInvalidInput) || responseExposed || relayExposed || echo != "" ||
+				len(got.LocalRevocations) != 0 || got.Completion.Outcome == identity.CommitOutcomeCommitted {
+				t.Fatal("invalid RelayState fabricated revocation authority or disclosed response fields", err)
+			}
+			if after := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID); after != before {
+				t.Fatal("invalid RelayState changed the session or durable logout effects")
+			}
+		})
+	}
 	for name, invalid := range map[string]ssopg.ProviderSAMLIDPLogoutRequest{
 		"different signed subject": wire("_other-subject", "other-member", index, idpKey, issuedAt),
 		"different signed index":   wire("_other-index", nativeSAMLCallbackSubject, "unrelated-index", idpKey, issuedAt),
@@ -169,7 +195,10 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 		"duplicate form members":   {ProviderID: profile.ProviderID, SAMLRequest: []string{request.SAMLRequest[0], request.SAMLRequest[0]}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := service.HandleRequest(ctx, invalid)
+			got, err := service.HandleRequestWithRelayState(ctx, invalid, []string{relayState})
+			if echo, exposed := got.RelayState(); exposed || echo != "" {
+				t.Fatal("unmatched or unauthenticated request echoed untrusted RelayState", err)
+			}
 			if len(got.LocalRevocations) != 0 || got.Completion.Outcome == identity.CommitOutcomeCommitted {
 				t.Fatal("unmatched or unauthenticated request fabricated local revocation authority", err)
 			}
@@ -201,13 +230,16 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 		return nil
 	}
 	staleRequest := wire("_native-idp-logout-stale-correlation", nativeSAMLCallbackSubject, index, idpKey, issuedAt)
-	stale, staleErr := service.HandleRequest(ctx, staleRequest)
+	stale, staleErr := service.HandleRequestWithRelayState(ctx, staleRequest, []string{relayState})
 	if tag, err := f.pool.Raw().Exec(ctx, `UPDATE sso_providers.saml_logout_subjects SET expires_at=$3 WHERE tenant_id=$1 AND session_id=$2`,
 		record.TenantID, record.SessionID, originalExpiry); err != nil || tag.RowsAffected() != 1 {
 		t.Fatal("restore exact original fixture correlation after the bounded recheck probe", err)
 	}
 	if _, exposed := stale.Response(); hookCalls != 1 || staleErr == nil || exposed || stale.Completion.Outcome == identity.CommitOutcomeCommitted {
 		t.Fatal("changed retained correlation committed or disclosed a response after target preparation", staleErr)
+	}
+	if echo, exposed := stale.RelayState(); exposed || echo != "" {
+		t.Fatal("rolled-back target recheck disclosed RelayState", staleErr)
 	}
 	for _, revocation := range stale.LocalRevocations {
 		if revocation.Committed {
@@ -224,7 +256,7 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 	before = afterStale
 
 	operationStarted := time.Now()
-	got, err := service.HandleRequest(ctx, request)
+	got, err := service.HandleRequestWithRelayState(ctx, request, []string{relayState})
 	t.Logf("signed IdP logout HandleRequest elapsed: %s", time.Since(operationStarted))
 	if err != nil || got.Completion.Outcome != identity.CommitOutcomeCommitted || len(got.LocalRevocations) != 1 {
 		t.Fatal("signed installed-provider request did not commit its real retained session", err)
@@ -239,6 +271,9 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 	fields, exposed := got.Response()
 	if !exposed || fields.Destination != responseEndpoint || fields.SAMLResponse == "" {
 		t.Fatal("committed request did not return a POST response to the configured IdP endpoint")
+	}
+	if echo, exposed := got.RelayState(); !exposed || echo != relayState {
+		t.Fatal("fresh committed response did not echo the exact admitted 80-byte RelayState")
 	}
 	// LogoutResponse carries no audience; the reverse verifier still requires
 	// a valid HTTPS entity for its local receiver configuration.
@@ -260,18 +295,41 @@ func TestNativeSAMLIDPLogoutSignedRequestRevokesRetainedSessionOnce(t *testing.T
 		committed.commands != before.commands+1 || committed.audits != before.audits+1 || committed.events != before.events+1 {
 		t.Fatal("logout did not retain one native session transition, command, audit and lifecycle effect")
 	}
-	replay, err := service.HandleRequest(ctx, request)
+	replay, err := service.HandleRequestWithRelayState(ctx, request, []string{relayState})
 	if _, exposed := replay.Response(); err != nil || exposed || !reflect.DeepEqual(replay.LocalRevocations, got.LocalRevocations) ||
 		!reflect.DeepEqual(replay.Completion, got.Completion) {
 		t.Fatal("exact replay regenerated a response or changed the committed local projection", err)
 	}
+	if echo, exposed := replay.RelayState(); exposed || echo != "" {
+		t.Fatal("exact replay re-exposed the original RelayState", err)
+	}
 	if after := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID); after != committed {
 		t.Fatal("same-key retry changed the session or created another audit/outbox effect")
 	}
+	for name, changedRelay := range map[string][]string{
+		"changed":       {"different_opaque_handle"},
+		"omitted nil":   nil,
+		"omitted empty": {},
+	} {
+		t.Run("same message with RelayState "+name, func(t *testing.T) {
+			conflict, err := service.HandleRequestWithRelayState(ctx, request, changedRelay)
+			_, responseExposed := conflict.Response()
+			echo, relayExposed := conflict.RelayState()
+			if !errors.Is(err, sso.ErrConflict) || responseExposed || relayExposed || echo != "" {
+				t.Fatal("changed or omitted RelayState reused the original message intent or exposed wire fields", err)
+			}
+			if after := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID); after != committed {
+				t.Fatal("changed or omitted RelayState changed the original committed session or effects")
+			}
+		})
+	}
 	changed := wire("_native-idp-logout-request", nativeSAMLCallbackSubject, index, idpKey, issuedAt.Add(-time.Second))
-	conflict, err := service.HandleRequest(ctx, changed)
-	if _, exposed := conflict.Response(); err == nil || exposed {
+	conflict, err := service.HandleRequestWithRelayState(ctx, changed, []string{relayState})
+	if _, exposed := conflict.Response(); !errors.Is(err, sso.ErrConflict) || exposed {
 		t.Fatal("different signed bytes reused the original message ID", err)
+	}
+	if echo, exposed := conflict.RelayState(); exposed || echo != "" {
+		t.Fatal("changed-message replay disclosed the original RelayState", err)
 	}
 	if after := nativeSAMLIDPLogoutSnapshot(t, f, record.SessionID); after != committed {
 		t.Fatal("changed-message replay changed the original committed session or effects")

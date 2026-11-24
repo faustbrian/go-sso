@@ -75,6 +75,28 @@ func (r ProviderSAMLIDPLogoutResult) Response() (saml.LogoutPOSTResponseFields, 
 	return fields, err == nil
 }
 
+// ProviderSAMLIDPLogoutRelayResult carries the original opaque RelayState
+// alongside a freshly signed reply. The embedded result retains the local
+// projection even when no protocol response can safely be delivered.
+type ProviderSAMLIDPLogoutRelayResult struct {
+	ProviderSAMLIDPLogoutResult
+	relayState string
+}
+
+// RelayState returns the exact admitted value only with a freshly signed reply.
+// No value is returned for an absent input, an error, or exact replay.
+func (r ProviderSAMLIDPLogoutRelayResult) RelayState() (string, bool) {
+	return r.relayState, r.relayState != ""
+}
+
+func (ProviderSAMLIDPLogoutRelayResult) Format(f fmt.State, _ rune) {
+	_, _ = fmt.Fprint(f, "sso.postgres.ProviderSAMLIDPLogoutRelayResult(redacted)")
+}
+
+func (ProviderSAMLIDPLogoutRelayResult) LogValue() slog.Value {
+	return slog.StringValue("sso.postgres.ProviderSAMLIDPLogoutRelayResult(redacted)")
+}
+
 type samlIDPLogoutProvider struct {
 	config ProviderSAMLIDPLogoutProfile
 	wire   saml.LogoutPOSTResponseProfile
@@ -150,6 +172,26 @@ func newProviderSAMLIDPLogoutService(login *ProviderLoginService, cfg ProviderSA
 
 const samlIDPLogoutClockSkew = 30 * time.Second
 
+// SAML Bindings §3.5.3 limits the opaque POST value, not its form encoding.
+const samlIDPLogoutMaxRelayBytes = 80
+
+func parseSAMLIDPLogoutRelayState(values []string) (string, error) {
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) != 1 || len(values[0]) == 0 || len(values[0]) > samlIDPLogoutMaxRelayBytes {
+		return "", sso.ErrInvalidInput
+	}
+	value := values[0]
+	for i := range len(value) {
+		b := value[i]
+		if !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '-' || b == '_') {
+			return "", sso.ErrInvalidInput
+		}
+	}
+	return value, nil
+}
+
 func samlIDPLogoutDestination(p StaticSAMLLoginProfile) string {
 	return p.TrustedOrigin + "/saml2/" + string(p.ProviderID) + "/slo"
 }
@@ -158,7 +200,35 @@ func samlIDPLogoutDestination(p StaticSAMLLoginProfile) string {
 // selecting local sessions. One coordinator request key retains the immutable
 // signed-message intent and target snapshot; exact retries cannot repeat the
 // mutation, and changed bytes under its signed ID do not open that snapshot.
-func (s *ProviderSAMLIDPLogoutService) HandleRequest(ctx context.Context, input ProviderSAMLIDPLogoutRequest) (out ProviderSAMLIDPLogoutResult, err error) {
+func (s *ProviderSAMLIDPLogoutService) HandleRequest(ctx context.Context, input ProviderSAMLIDPLogoutRequest) (ProviderSAMLIDPLogoutResult, error) {
+	return s.handleRequest(ctx, input, nil)
+}
+
+// HandleRequestWithRelayState selects the optional opaque POST echo. Pass all
+// parsed values to reject duplicates. A single supplied value must contain 1–80
+// ASCII letters, digits, hyphens or underscores. The value is not signed XML,
+// authorizes nothing and must not be read as a redirect or session identifier.
+// It only binds the original request intent and accompanies a fresh reply.
+func (s *ProviderSAMLIDPLogoutService) HandleRequestWithRelayState(ctx context.Context, input ProviderSAMLIDPLogoutRequest, relayState []string) (out ProviderSAMLIDPLogoutRelayResult, err error) {
+	value, err := parseSAMLIDPLogoutRelayState(relayState)
+	if err != nil {
+		return out, err
+	}
+	var digest *[32]byte
+	if value != "" {
+		hash := sha256.Sum256([]byte(value))
+		digest = &hash
+	}
+	out.ProviderSAMLIDPLogoutResult, err = s.handleRequest(ctx, input, digest)
+	if err == nil && value != "" {
+		if _, signed := out.Response(); signed {
+			out.relayState = value
+		}
+	}
+	return out, err
+}
+
+func (s *ProviderSAMLIDPLogoutService) handleRequest(ctx context.Context, input ProviderSAMLIDPLogoutRequest, relayDigest *[32]byte) (out ProviderSAMLIDPLogoutResult, err error) {
 	if s == nil || s.login == nil || ctx == nil || len(input.SAMLRequest) != 1 || input.SAMLRequest[0] == "" {
 		return out, sso.ErrInvalidInput
 	}
@@ -172,6 +242,7 @@ func (s *ProviderSAMLIDPLogoutService) HandleRequest(ctx context.Context, input 
 	if err != nil {
 		return out, providerError(ctx, err)
 	}
+	p.relayDigest = relayDigest
 	coordinator, registry, err := p.coordinator()
 	if err != nil {
 		return out, providerError(ctx, err)
