@@ -64,6 +64,7 @@ type DirectoryGroupMembership struct {
 // from a valid value.
 type DirectoryDelta struct {
 	membership DirectoryGroupMembership
+	user       DirectoryUserDeprovision
 }
 
 // NewDirectoryGroupMembershipDelta binds a selected group edge to its original
@@ -86,6 +87,17 @@ func (d DirectoryDelta) GroupMembership() (DirectoryGroupMembership, error) {
 		return DirectoryGroupMembership{}, ErrInvalidInput
 	}
 	return d.membership, nil
+}
+
+func (d DirectoryDelta) child() (identity.CommandID, identity.FeatureOperation) {
+	switch {
+	case d.membership.Action != 0 && d.user.State == 0:
+		return d.membership.CommandID, DirectoryTeamMembershipOperation()
+	case d.membership.Action == 0 && d.user.State != 0:
+		return d.user.CommandID, DirectoryUserDeprovisionOperation()
+	default:
+		return "", identity.FeatureOperation{}
+	}
 }
 
 // DirectoryDeltaBatch identifies one ordered batch in an SSO generation.
@@ -112,14 +124,14 @@ func (b DirectoryDeltaBatch) Validate() error {
 	}
 	seen := make(map[identity.CommandID]struct{}, len(b.Deltas))
 	for _, d := range b.Deltas {
-		member, err := d.GroupMembership()
-		if err != nil {
+		id, _ := d.child()
+		if id == "" {
 			return ErrInvalidInput
 		}
-		if _, exists := seen[member.CommandID]; exists {
+		if _, exists := seen[id]; exists {
 			return ErrInvalidInput
 		}
-		seen[member.CommandID] = struct{}{}
+		seen[id] = struct{}{}
 	}
 	return nil
 }
@@ -243,7 +255,14 @@ func directorySourceID(raw string) bool {
 
 func directoryBatchBinding(batch DirectoryDeltaBatch) [32]byte {
 	h := sha256.New()
-	_, _ = h.Write([]byte("golib/sso/directory-batch/v1"))
+	hasUser := slices.ContainsFunc(batch.Deltas, func(d DirectoryDelta) bool { return d.user.State != 0 })
+	// Existing Group generations may still retain their original on-disk
+	// commitment. Use typed framing only for batches containing a User delta.
+	if hasUser {
+		_, _ = h.Write([]byte("golib/sso/directory-batch/v2"))
+	} else {
+		_, _ = h.Write([]byte("golib/sso/directory-batch/v1"))
+	}
 	directoryHashText(h, string(batch.TenantID))
 	directoryHashText(h, string(batch.ProviderID))
 	directoryHashText(h, batch.ConnectionID)
@@ -253,6 +272,17 @@ func directoryBatchBinding(batch DirectoryDeltaBatch) [32]byte {
 	_, _ = h.Write(batch.PredecessorCheckpoint[:])
 	directoryHashNumber(h, uint64(len(batch.Deltas)))
 	for _, delta := range batch.Deltas {
+		if delta.user.State != 0 {
+			_, _ = h.Write([]byte{2})
+			directoryHashText(h, string(delta.user.CommandID))
+			directoryHashText(h, delta.user.ResourceID)
+			directoryHashText(h, delta.user.SourceRevision)
+			_, _ = h.Write([]byte{byte(delta.user.State)})
+			continue
+		}
+		if hasUser {
+			_, _ = h.Write([]byte{1})
+		}
 		m := delta.membership
 		directoryHashText(h, string(m.CommandID))
 		directoryHashText(h, m.GroupID)
@@ -271,10 +301,10 @@ func directorySuccessor(batch DirectoryDeltaBatch, binding [32]byte, outcomes []
 	_, _ = h.Write([]byte("golib/sso/directory-checkpoint/v1"))
 	_, _ = h.Write(binding[:])
 	settled := len(outcomes) == len(batch.Deltas)
-	operation := DirectoryTeamMembershipOperation()
 	for i, receipt := range outcomes {
 		b := receipt.Binding
-		if b.CommandID != batch.Deltas[i].membership.CommandID || b.TenantID != batch.TenantID ||
+		id, operation := batch.Deltas[i].child()
+		if b.CommandID != id || b.TenantID != batch.TenantID ||
 			b.ActorKind != authorization.SubjectServiceAccount || receipt.Feature == nil ||
 			receipt.Feature.Operation != operation || receipt.Validate() != nil {
 			return zero, ErrInvalidInput

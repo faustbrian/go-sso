@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bind directory User deprovisioning to the exact source revision and
+  its own child receipt. Existing Group-only batch commitments and
+  checkpoints stay unchanged.
+
 - Retain the observed prefix of an interrupted directory batch without
   assigning a checkpoint or treating an unobserved child as rolled back.
   The complete-result constructor still requires every original receipt.

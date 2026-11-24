@@ -278,6 +278,14 @@ command ID and exact SCIM resource IDs. Neither display names nor
 `externalId` are accepted as identity authority. Group-to-Group membership
 and role inference are not part of this contract.
 
+For a User deprovisioning child, construct a
+`NewDirectoryUserDeprovisionDelta` from the exact source User resource,
+revision, inactive or deleted condition, and original command ID. The input
+does not choose a local disposition or grant permission to suspend a global
+identity. Only executors opting into this profile may interpret User deltas.
+The receipt must match `DirectoryUserDeprovisionOperation`; a Group receipt
+cannot settle it. Group-only batch commitments and checkpoints remain stable.
+
 Use the validated batch's `Commitment` to retain exact in-flight identity
 in the scoped native generation. It binds the predecessor and ordered
 changes; it is neither authorization nor a completion receipt.
