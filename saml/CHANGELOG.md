@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Expose the authenticated Assertion IssueInstant and support opt-in, exact
+  boolean role observations. The protocol adapter does not assign roles or
+  infer trust from those observations.
+
 - Implement the SSO protocol adapter for a single original SP SAML
   transaction. Sign its retained Redirect request and complete a bounded
   POST with mapped observations and optional detached replay evidence.

@@ -15,6 +15,10 @@ const (
 	samlXMLSchemaNS        = "http://www.w3.org/2001/XMLSchema"
 	samlXMLSchemaInstance  = "http://www.w3.org/2001/XMLSchema-instance"
 	maximumSAMLScalarBytes = 512 // sso.VerifiedAttributeSpec scalar string limit.
+	// Match the native custom-role mapping's 100-role budget. Together with
+	// NameID and the three identity claims this stays below ProtocolAssertion's
+	// 256-observation bound, without accepting an unbounded projection selector.
+	maximumSAMLRoleClaims = 100
 )
 
 type postAssertionMapping struct {
@@ -22,6 +26,7 @@ type postAssertionMapping struct {
 	mappingVersion uint64
 	provenance     sso.AttributeProvenance
 	claims         []samlScalarClaim
+	mappedCount    int
 }
 
 type samlScalarClaim struct {
@@ -52,11 +57,57 @@ func (p POSTResponseProfile) WithAssertionMapping(provider sso.Provider, mapping
 		selected = append(selected, claim)
 	}
 	p.mapping = &postAssertionMapping{
-		organizationID: organization.ID(provider.OrganizationID), mappingVersion: spec.Version, claims: selected,
+		organizationID: organization.ID(provider.OrganizationID), mappingVersion: spec.Version, claims: selected, mappedCount: len(selected),
 		provenance: sso.AttributeProvenance{ProviderID: sso.ProviderID(provider.ID), ProviderProfileVersion: provider.Version,
 			Issuer: p.idp, Source: sso.AttributeSourceSAMLAssertion},
 	}
 	return p, nil
+}
+
+// WithRoleClaims returns an immutable copy of an already mapped profile with
+// exactly these additional boolean observations, in input order. It replaces
+// any prior role selection; an empty list clears it. Up to 100 distinct names
+// of 1..128 printable ASCII bytes are accepted byte-for-byte, including literal
+// URI/URN names. NameID, original mapped names and protocol-secret names are
+// reserved. Invalid selection returns ErrInvalidInput and no usable profile.
+//
+// The input is borrowed only during this call. Signed values preserve absent,
+// null, true and false; no privilege, Verified or Authoritative flag is inferred.
+// The caller must select names from its approved policy, not response XML.
+func (p POSTResponseProfile) WithRoleClaims(names []string) (POSTResponseProfile, error) {
+	if p.mapping == nil || len(names) > maximumSAMLRoleClaims {
+		return POSTResponseProfile{}, ErrInvalidInput
+	}
+	mapping := *p.mapping
+	claims := make([]samlScalarClaim, mapping.mappedCount, mapping.mappedCount+len(names))
+	copy(claims, mapping.claims[:mapping.mappedCount])
+	for _, name := range names {
+		if !validSAMLRoleClaimName(name) || slices.ContainsFunc(claims, func(claim samlScalarClaim) bool { return claim.name == name }) {
+			return POSTResponseProfile{}, ErrInvalidInput
+		}
+		claims = append(claims, samlScalarClaim{name: name, boolean: true})
+	}
+	mapping.claims = claims
+	p.mapping = &mapping
+	return p, nil
+}
+
+func validSAMLRoleClaimName(name string) bool {
+	// Preserve the root VerifiedAttributeSpec name grammar; XML names are
+	// literal observations, not paths. Secret names are never role evidence.
+	if len(name) == 0 || len(name) > 128 {
+		return false
+	}
+	switch name {
+	case samlNameIDClaim, "nonce", "at_hash", "c_hash", "access_token", "refresh_token", "id_token":
+		return false
+	}
+	for i := range len(name) {
+		if name[i] < '!' || name[i] > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 func validSAMLMappingScope(provider sso.Provider) bool {
@@ -141,7 +192,7 @@ func (m postAssertionMapping) project(subject string, statements []*xdm.Node) (s
 }
 
 func (m postAssertionMapping) appendSelected(out []sso.VerifiedAttribute, statements []*xdm.Node) ([]sso.VerifiedAttribute, error) {
-	var matches [3]*xdm.Node
+	var matches [3 + maximumSAMLRoleClaims]*xdm.Node
 	for _, statement := range statements {
 		children, ok := samlElementChildren(statement, maximumSAMLXMLNodes)
 		if !ok || len(children) == 0 || statement.NumAttrs() != 0 {

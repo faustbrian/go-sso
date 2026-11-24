@@ -38,7 +38,8 @@ func successfulSAMLStatus(status *xdm.Node) bool {
 
 func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResponseBinding) (verifiedPOSTResponseData, bool) {
 	localCutoff, ok := p.issueCutoff(assertion, binding)
-	if assertion.NumAttrs() != 3 || samlAttr(assertion, "Version") != "2.0" || !ok {
+	assertionIssuedAt, issueTimeOK := parseSAMLTime(samlAttr(assertion, "IssueInstant"))
+	if assertion.NumAttrs() != 3 || samlAttr(assertion, "Version") != "2.0" || !ok || !issueTimeOK {
 		return verifiedPOSTResponseData{}, false
 	}
 	parts, ok := samlElementChildren(assertion, maximumSAMLXMLNodes)
@@ -77,7 +78,7 @@ func (p POSTResponseProfile) bindAssertion(assertion *xdm.Node, binding postResp
 			AssertionID: samlAttr(assertion, "ID"), ProviderSubject: subject.value, SubjectFormat: subject.format,
 			SessionIndex: remoteSessionIndex, AssertionExpiresAt: assertionExpiry, ValidUntil: validUntil,
 		},
-		nameQualifier: subject.nameQualifier, spNameQualifier: subject.spNameQualifier,
+		assertionIssuedAt: assertionIssuedAt, nameQualifier: subject.nameQualifier, spNameQualifier: subject.spNameQualifier,
 	}
 	if p.mapping != nil {
 		mapped, err := p.mapping.project(subject.value, parts[5:])

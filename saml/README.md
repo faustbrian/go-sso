@@ -111,6 +111,13 @@ does not by itself verify email or confer authority; the SSO owner applies
 current policy and owns replay and session effects. See [SAML Core §§2.3.3,
 2.7.3](https://docs.oasis-open.org/security/saml/v2.0/saml-core-2.0-os.pdf).
 
+An SP verifier with an installed mapping can additionally select exact
+boolean observations with `WithRoleClaims`. The verifier rejects names that
+overlap identity mappings or reserved names. Absent, null, true and false
+stay distinct; the caller's versioned role policy decides what they mean.
+`AssertionIssuedAt` on either verified result returns the signed Assertion
+timestamp, not the enclosing Response time or the local read clock.
+
 For a coordinator using `sso.ProtocolAdapter`, construct `NewSPProtocolAdapter`
 with the original bound `LoginTransaction`, AuthnRequest, capability deadline,
 signer, and matching Redirect and mapped POST profiles. After admitting the

@@ -137,6 +137,7 @@ type VerifiedPOSTResponse struct{ verified verifiedPOSTResponseData }
 
 type verifiedPOSTResponseData struct {
 	evidence                       POSTResponseEvidence
+	assertionIssuedAt              time.Time
 	nameQualifier, spNameQualifier string
 	assertion                      *sso.ProtocolAssertion
 }
@@ -148,6 +149,28 @@ func (v VerifiedPOSTResponse) Evidence() (POSTResponseEvidence, error) {
 		return POSTResponseEvidence{}, ErrInvalidInput
 	}
 	return v.verified.evidence, nil
+}
+
+// AssertionIssuedAt returns the exact IssueInstant of the authenticated
+// Assertion, not the outer Response, AuthnInstant, local clock or expiry.
+// A zero or denied result returns ErrInvalidInput and no timestamp. This
+// observation establishes neither replay reservation nor login authority.
+func (v VerifiedPOSTResponse) AssertionIssuedAt() (time.Time, error) {
+	return v.verified.signedAssertionIssuedAt()
+}
+
+// AssertionIssuedAt returns the exact IssueInstant of the authenticated
+// unsolicited Assertion without inventing request or browser correlation.
+// A zero or denied result returns ErrInvalidInput and no timestamp.
+func (v VerifiedIDPInitiatedPOSTResponse) AssertionIssuedAt() (time.Time, error) {
+	return v.verified.signedAssertionIssuedAt()
+}
+
+func (v verifiedPOSTResponseData) signedAssertionIssuedAt() (time.Time, error) {
+	if v.evidence.AssertionID == "" || !validSAMLTime(v.assertionIssuedAt) {
+		return time.Time{}, ErrInvalidInput
+	}
+	return v.assertionIssuedAt, nil
 }
 
 // Validate authenticates the exact Response and its one Assertion from the
