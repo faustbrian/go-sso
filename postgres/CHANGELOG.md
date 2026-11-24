@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add an opt-in signed SAML provider redirect after exact local revocation.
+  Reserve one encrypted request before disclosure and reuse its exact wire
+  on authorized retries. No provider route or storage failure erases a
+  committed local revocation. Install the request migration before opting in.
+
 - Add opt-in native local SAML logout using the original cookie, CSRF and
   linked provider. A disabled provider does not prevent local revocation.
   The exact keyed retry recovers the original outcome without revoking

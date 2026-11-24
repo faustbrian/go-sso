@@ -106,7 +106,12 @@ func NewProviderSAMLLogoutService(login *ProviderLoginService, cfg ProviderSAMLL
 // Start revokes the selected original cookie session without a provider
 // round trip. An individually revoked cookie can recover only the retained
 // result of its exact request; it cannot start another command.
-func (s *ProviderSAMLLogoutService) Start(ctx context.Context, request ProviderLogoutStartRequest, browser ProviderLogoutBrowser) (out ProviderSAMLLogoutStartResult, err error) {
+func (s *ProviderSAMLLogoutService) Start(ctx context.Context, request ProviderLogoutStartRequest, browser ProviderLogoutBrowser) (ProviderSAMLLogoutStartResult, error) {
+	return s.start(ctx, request, browser, nil)
+}
+
+func (s *ProviderSAMLLogoutService) start(ctx context.Context, request ProviderLogoutStartRequest, browser ProviderLogoutBrowser,
+	afterCommit func(context.Context, *providerSAMLLogoutStartPhase, ProviderSAMLLogoutStartResult) error) (out ProviderSAMLLogoutStartResult, err error) {
 	if s == nil || s.login == nil || ctx == nil || !providerID(request.ProviderID) || request.IdempotencyKey == (identity.IdempotencyKey{}) {
 		return out, sso.ErrInvalidInput
 	}
@@ -166,7 +171,11 @@ func (s *ProviderSAMLLogoutService) Start(ctx context.Context, request ProviderL
 	} else {
 		out.Completion, err = p.execute(ctx, coordinator, registry)
 	}
-	return p.finish(ctx, out, err)
+	out, err = p.finish(ctx, out, err)
+	if err != nil || !out.LocalRevocation.Committed || afterCommit == nil {
+		return out, err
+	}
+	return out, afterCommit(ctx, p, out)
 }
 
 func (p *providerSAMLLogoutStartPhase) localRevocation() saml.LocalRevocation {

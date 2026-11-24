@@ -31,7 +31,7 @@ require (
 	github.com/faustbrian/go-sso v0.0.0-20261123063952-429e9c073ff2
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734
 	github.com/faustbrian/go-sso/oidc v0.0.0-20261123000546-023dd34bb0c7
-	github.com/faustbrian/go-sso/saml v0.0.0-20261124044005-703f5396ba5c
+	github.com/faustbrian/go-sso/saml v0.0.0-20261124050240-ba56864140ba
 	github.com/faustbrian/go-transactional-outbox/postgres/identity v0.0.0-20261020135213-493107bf82af
 	github.com/faustbrian/go-transactional-outbox/v2 v2.0.2-0.20261015062550-37ea15436ae9
 	github.com/jackc/pgx/v5 v5.11.0

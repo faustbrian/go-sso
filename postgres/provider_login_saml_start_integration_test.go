@@ -64,9 +64,14 @@ type samlStartFixture struct {
 
 func newSAMLStartFixture(t *testing.T) *samlStartFixture {
 	t.Helper()
+	return newSAMLStartFixtureWithBundle(t, nil)
+}
+
+func newSAMLStartFixtureWithBundle(t *testing.T, signingBundle []byte) *samlStartFixture {
+	t.Helper()
 	// The canonical risk audit accepts opaque tenant IDs, not the legacy
 	// human-readable tenant label used in the activation-only fixture.
-	x := newProviderSAMLActivationFixtureForTenant(t, discoveryFixtureTenant)
+	x := newProviderSAMLActivationFixtureWithBundle(t, discoveryFixtureTenant, signingBundle)
 	installSAMLStartHistory(t, x.f)
 	enabled, err := x.service.ProviderEnable(x.f.ctx, x.request)
 	if err != nil || enabled.Completion.Outcome != identity.CommitOutcomeCommitted || !enabled.Provider.Enabled {
@@ -178,7 +183,10 @@ func newSAMLStartFixture(t *testing.T) *samlStartFixture {
 		profiles: []ssopg.StaticSAMLLoginProfile{{ProviderID: sso.ProviderID(enabled.Provider.ID), OrganizationID: x.proof.OrganizationID,
 			Domain: x.proof.Domain, TrustedOrigin: origin, ProviderVersion: enabled.Provider.Version, CredentialGeneration: 1, MappingVersion: enabled.Provider.MappingVersion}},
 	}
-	expectedBundle := bytes.Repeat([]byte("fixture-activation-SP-signing/"), 2)
+	expectedBundle := bytes.Clone(signingBundle)
+	if expectedBundle == nil {
+		expectedBundle = bytes.Repeat([]byte("fixture-activation-SP-signing/"), 2)
+	}
 	t.Cleanup(func() { clear(expectedBundle) })
 	cutoff := time.Now().UTC().Add(30 * time.Minute).Truncate(time.Microsecond)
 	router, err := newProviderRouter(t, x, 4).WithProtocolRegistry()

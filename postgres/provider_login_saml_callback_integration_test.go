@@ -67,7 +67,11 @@ type nativeSAMLCallbackFixture struct {
 
 func newNativeSAMLCallbackFixture(t *testing.T) *nativeSAMLCallbackFixture {
 	t.Helper()
-	x := newSAMLStartFixture(t)
+	return newNativeSAMLCallbackFixtureWithStart(t, newSAMLStartFixture(t))
+}
+
+func newNativeSAMLCallbackFixtureWithStart(t *testing.T, x *samlStartFixture) *nativeSAMLCallbackFixture {
+	t.Helper()
 	installNativeSAMLCallbackHistory(t, x.start.enable.f)
 	profile := x.profiles[0]
 	provider, err := ssopg.SSOSAMLAccountProviderNamespace(profile.OrganizationID, profile.ProviderID)

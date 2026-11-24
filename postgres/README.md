@@ -172,6 +172,31 @@ returns session and CSRF credentials. `RecoverConfirmation` can recover the
 authorized receipt, never the credentials. This native composition does not
 expose an HTTP endpoint, create a pre-auth flow or support SLO.
 
+### Native SAML logout start
+
+Install the session adapter's `SSOSAMLLogoutStartMigrationSource` after its
+single-session revocation history. Compose `NewProviderSAMLLogoutService`
+with the exact trusted origin, linked SAML session admission, retained CSRF
+keys and allowed final targets. Call `Start` using the original cookie and CSRF
+proof and retain the original idempotency key for recovery. Local revocation
+does not require a live provider.
+
+For a signed provider redirect, first install `SAMLLogoutSubjectMigrationSource`
+and `SAMLLogoutRequestMigrationSource` on the same primary. The latter adds only
+an empty, indexed table; no existing provider or command rows are rewritten.
+Apply the migrations before selecting outbound support. Select the same
+subject custody on sign-in and pass it and each exact approved HTTPS IdP
+Redirect endpoint to `WithProviderRedirect`. Existing local-only deployments
+do not access the request table, and removing outbound selection leaves
+existing custody intact.
+
+Inspect `LocalRevocation` even when `Start` returns a provider or storage error.
+Only an acknowledged local revocation and a current, durably reserved signed
+request produce `ProviderRedirect()`. Exact retries retain the original signed
+bytes and expiry. Sessions without an original signed SessionIndex stay
+local. This profile does not send RelayState or install an HTTP route; the
+stored request ID is the correlation key for later signed `InResponseTo`.
+
 ### Static OIDC login custody schema
 
 `LoginTransactionMigrationSource` is an additive schema prerequisite. Install

@@ -28,6 +28,11 @@ func newProviderSAMLActivationFixture(t *testing.T) providerEnableFixture {
 
 func newProviderSAMLActivationFixtureForTenant(t *testing.T, tenant identity.TenantID) providerEnableFixture {
 	t.Helper()
+	return newProviderSAMLActivationFixtureWithBundle(t, tenant, nil)
+}
+
+func newProviderSAMLActivationFixtureWithBundle(t *testing.T, tenant identity.TenantID, signingBundle []byte) providerEnableFixture {
+	t.Helper()
 	f, base, config := newProviderFixtureForTenant(t, tenant, false,
 		organizationpg.DomainClaimMigrationSource{Version: 316},
 		organizationpg.DomainEvidenceMigrationSource{Version: 317})
@@ -48,7 +53,10 @@ func newProviderSAMLActivationFixtureForTenant(t *testing.T, tenant identity.Ten
 	if err != nil || registered.Completion.Outcome != identity.CommitOutcomeCommitted || registered.Provider.Enabled || registered.Provider.Version != 1 || registered.Provider.Protocol != "saml" {
 		t.Fatal("register exact disabled SAML predecessor", err)
 	}
-	bundle := bytes.Repeat([]byte("fixture-activation-SP-signing/"), 2)
+	bundle := bytes.Clone(signingBundle)
+	if bundle == nil {
+		bundle = bytes.Repeat([]byte("fixture-activation-SP-signing/"), 2)
+	}
 	t.Cleanup(func() { clear(bundle) })
 	certificateExpiry := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	base, err = base.WithSAMLSigningCredentialValidator(func(ctx context.Context, actual []byte, at time.Time) (time.Time, error) {
