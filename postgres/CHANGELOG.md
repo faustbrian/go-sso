@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Opt in to one exact SCIM Group/User edge through native SSO. Apply and
+  withdraw the matching team source grant in original identity Work;
+  retain the predecessor until the original child receipt is known.
+  An original retry reconciles a lost acknowledgment without duplicating
+  audit, event, grant or successor.
+
 - Start an opt-in directory generation against an enabled provider and
   exact mapping. A fresh authorized caller retains one replayable creation
   outcome; scoped status reads expose only the safe current projection.

@@ -30,6 +30,22 @@ The stored checkpoint is a commitment; the zero request value selects a
 source-scoped initial commitment. Neither call applies external membership
 changes, cancels work, advances a source cursor, or enables an HTTP route.
 
+Select `WithGroupEdges` separately for the direct Group-to-User profile.
+Bind an explicit, versioned SCIM organization mapper, a configured native
+SCIM Group source, and the service account's synchronization authorization
+and retained epoch. Supply the synchronization policy's earliest absolute
+expiry; it remains bounded by the original source observation, including
+at final commit and cursor settlement. Install the actual SCIM source/Group, organization
+team/source-grant, identity Work, audit and outbox schemas first.
+`Apply` takes the exact generation ID and a one-edge batch with its
+original child command and predecessor. It verifies the Group/User
+projection and writes only the corresponding team source grant. Any
+unresolved child leaves the predecessor in place. Retry with the same
+exact input to reconcile a lost acknowledgment; do not allocate a new
+child ID. Directory withdrawal does not remove local or other-source
+grants. Dry-run, nested groups, role sync, cancellation, multi-edge
+execution and HTTP/Reference composition are not selected by this adapter.
+
 ### Optional SAML replay schema
 
 For IdP-initiated confirmation, apply `SAMLIDPConfirmationMigrationSource`
