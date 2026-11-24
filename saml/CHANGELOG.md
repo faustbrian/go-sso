@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add the comparable local-session revocation projection with distinct
+  committed, not-committed and unknown outcomes. Validation preserves the exact
+  bounded session identity and does not establish authority or persistence.
+
 - Sign outbound HTTP-POST LogoutResponse messages for the approved IdP
   response destination. Preserve the original request correlation and selected
   Success or PartialLogout status without exposing signing material.
