@@ -287,6 +287,9 @@ connection, generation and mapping and enlist its `DirectorySyncContributor`.
 The contributor loads each original, service-account-owned
 `DirectoryTeamMembershipOperation` outcome and uses
 `NewDirectoryApplyResult` to bind those outcomes to the admitted batch.
+When processing stops before a later outcome is observed, use
+`NewDirectoryReconciliationResult` to retain only the exact observed prefix,
+with no successor or assertion about the unobserved suffix.
 `NextCheckpoint` checks that exact batch again, returning
 `ErrDirectoryReconciliation` with no successor when any child is unknown,
 conflicted or still running. Recover the original child commands rather than

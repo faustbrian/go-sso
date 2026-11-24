@@ -58,6 +58,57 @@ func TestDirectorySyncCheckpointRequiresEveryExactChildOutcome(t *testing.T) {
 	}
 }
 
+func TestDirectorySyncReconciliationPreservesOnlyObservedPrefix(t *testing.T) {
+	batch := directoryBatch(t)
+	committed := directoryReceipt("AQEBAQEBAQEBAQEBAQEBAQ", identity.CommitOutcomeCommitted)
+	second := directoryReceipt("AgICAgICAgICAgICAgICAg", identity.CommitOutcomeNotCommitted)
+	observed := []sso.Completion{committed}
+	result, err := sso.NewDirectoryReconciliationResult(batch, observed)
+	if err != nil || result.Generation != batch.Generation || len(result.ChildOutcomes) != 1 ||
+		result.ChildOutcomes[0].Binding != committed.Binding || result.Checkpoint != ([32]byte{}) {
+		t.Fatal("reconciliation failed to retain exactly the original observed prefix", err)
+	}
+	retained := *result.ChildOutcomes[0].Feature
+	observed[0].Feature.AfterVersion++
+	observed[0] = sso.Completion{}
+	if *result.ChildOutcomes[0].Feature != retained {
+		t.Fatal("reconciliation receipt aliases the source slice")
+	}
+	if checkpoint, err := result.NextCheckpoint(batch); checkpoint != ([32]byte{}) || !errors.Is(err, sso.ErrDirectoryReconciliation) {
+		t.Fatal("an unobserved child must hold the original checkpoint", err)
+	}
+	changed := directoryBatch(t)
+	changed.PredecessorCheckpoint[0]++
+	if _, err := result.NextCheckpoint(changed); !errors.Is(err, sso.ErrInvalidInput) {
+		t.Fatal("a prefix moved between admissions", err)
+	}
+	closed, err := sso.NewDirectoryApplyResult(batch, []sso.Completion{result.ChildOutcomes[0], second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.ChildOutcomes, result.Checkpoint = closed.ChildOutcomes, closed.Checkpoint
+	if checkpoint, err := result.NextCheckpoint(batch); checkpoint != ([32]byte{}) || !errors.Is(err, sso.ErrInvalidInput) {
+		t.Fatal("mutating public prefix fields turned observation into settlement", err)
+	}
+}
+
+func TestDirectorySyncReconciliationRejectsUnboundOrCompleteEvidence(t *testing.T) {
+	batch := directoryBatch(t)
+	first := directoryReceipt("AQEBAQEBAQEBAQEBAQEBAQ", identity.CommitOutcomeCommitted)
+	second := directoryReceipt("AgICAgICAgICAgICAgICAg", identity.CommitOutcomeNotCommitted)
+	for label, evidence := range map[string][]sso.Completion{
+		"empty": nil, "missing predecessor": {second}, "complete": {first, second},
+		"foreign": {withDirectoryTenant(first, "foreign")}, "wrong operation": {unrelatedDirectoryReceipt(first)},
+	} {
+		t.Run(label, func(t *testing.T) {
+			result, err := sso.NewDirectoryReconciliationResult(batch, evidence)
+			if !errors.Is(err, sso.ErrInvalidInput) || result.Checkpoint != ([32]byte{}) || len(result.ChildOutcomes) != 0 {
+				t.Fatal("invalid prefix retained a receipt or checkpoint", err)
+			}
+		})
+	}
+}
+
 func TestDirectorySyncCheckpointCannotMoveBetweenAdmissions(t *testing.T) {
 	batch := directoryBatch(t)
 	children := []sso.Completion{

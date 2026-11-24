@@ -144,7 +144,8 @@ func (b DirectoryDeltaBatch) Commitment() ([32]byte, error) {
 	return directoryBatchBinding(b), nil
 }
 
-// DirectoryApplyResult retains an exact ordered outcome per admitted child.
+// DirectoryApplyResult retains exact ordered outcomes for the admitted batch,
+// or only the observed prefix while reconciliation is required.
 // Treat ChildOutcomes and their receipt internals as read-only. A zero
 // Checkpoint is required during reconciliation. Before any use for cursor
 // movement, check NextCheckpoint against the original admitted batch.
@@ -153,7 +154,8 @@ type DirectoryApplyResult struct {
 	ChildOutcomes []Completion
 	Checkpoint    [32]byte
 
-	batch [32]byte
+	batch          [32]byte
+	observedPrefix int
 }
 
 // NewDirectoryApplyResult attributes the ordered, structurally valid child
@@ -162,6 +164,30 @@ type DirectoryApplyResult struct {
 // are detached. The adapter must load authoritative results from the original
 // coordinator; this function checks bindings, not persistence.
 func NewDirectoryApplyResult(batch DirectoryDeltaBatch, outcomes []Completion) (DirectoryApplyResult, error) {
+	if len(outcomes) != len(batch.Deltas) {
+		return DirectoryApplyResult{}, ErrInvalidInput
+	}
+	return newDirectoryResult(batch, outcomes)
+}
+
+// NewDirectoryReconciliationResult preserves a nonempty, strictly incomplete
+// prefix of the original batch's authoritative child receipts. The caller
+// must retry the same batch to resolve the rest. An absent receipt does not
+// prove rollback. The returned result never authorizes cursor movement, even
+// if its exported fields are later replaced with complete evidence.
+func NewDirectoryReconciliationResult(batch DirectoryDeltaBatch, observed []Completion) (DirectoryApplyResult, error) {
+	if len(observed) == 0 || len(observed) >= len(batch.Deltas) {
+		return DirectoryApplyResult{}, ErrInvalidInput
+	}
+	result, err := newDirectoryResult(batch, observed)
+	if err != nil {
+		return DirectoryApplyResult{}, err
+	}
+	result.observedPrefix = len(observed)
+	return result, nil
+}
+
+func newDirectoryResult(batch DirectoryDeltaBatch, outcomes []Completion) (DirectoryApplyResult, error) {
 	binding, err := batch.Commitment()
 	if err != nil {
 		return DirectoryApplyResult{}, err
@@ -190,6 +216,13 @@ func (r DirectoryApplyResult) NextCheckpoint(batch DirectoryDeltaBatch) ([32]byt
 		return zero, err
 	}
 	if r.Generation != batch.Generation || r.batch != binding {
+		return zero, ErrInvalidInput
+	}
+	expected := len(batch.Deltas)
+	if r.observedPrefix != 0 {
+		expected = r.observedPrefix
+	}
+	if len(r.ChildOutcomes) != expected {
 		return zero, ErrInvalidInput
 	}
 	next, err := directorySuccessor(batch, r.batch, r.ChildOutcomes)
@@ -231,13 +264,13 @@ func directoryBatchBinding(batch DirectoryDeltaBatch) [32]byte {
 
 func directorySuccessor(batch DirectoryDeltaBatch, binding [32]byte, outcomes []Completion) ([32]byte, error) {
 	var zero [32]byte
-	if len(outcomes) != len(batch.Deltas) {
+	if len(outcomes) == 0 || len(outcomes) > len(batch.Deltas) {
 		return zero, ErrInvalidInput
 	}
 	h := sha256.New()
 	_, _ = h.Write([]byte("golib/sso/directory-checkpoint/v1"))
 	_, _ = h.Write(binding[:])
-	settled := true
+	settled := len(outcomes) == len(batch.Deltas)
 	operation := DirectoryTeamMembershipOperation()
 	for i, receipt := range outcomes {
 		b := receipt.Binding

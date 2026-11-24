@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Retain the observed prefix of an interrupted directory batch without
+  assigning a checkpoint or treating an unobserved child as rolled back.
+  The complete-result constructor still requires every original receipt.
+
 - Expose the validated directory batch commitment used by checkpoint
   settlement so native storage can retain exact in-flight batch identity.
   A commitment alone is not authority to write or move a cursor.
