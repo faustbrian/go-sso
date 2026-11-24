@@ -52,13 +52,14 @@ type ProviderSAMLLogoutStartResult struct {
 // uses the actual SAML cookie and the original linked account. It does not
 // discover provider capabilities, contact the provider or install HTTP routes.
 type ProviderSAMLLogoutService struct {
-	login         *ProviderLoginService
-	sessions      *session.SessionService
-	retained      *sessionpg.Repository
-	effect        *sessionpg.SSOSAMLLogoutStartEffect
-	lookupKeys    []session.DigestKey
-	csrfKeys      []session.CSRFKey
-	finalRedirect map[string]struct{}
+	login                  *ProviderLoginService
+	signinRequestNamespace string
+	sessions               *session.SessionService
+	retained               *sessionpg.Repository
+	effect                 *sessionpg.SSOSAMLLogoutStartEffect
+	lookupKeys             []session.DigestKey
+	csrfKeys               []session.CSRFKey
+	finalRedirect          map[string]struct{}
 }
 
 // NewProviderSAMLLogoutService snapshots the selected session authority,
@@ -84,6 +85,7 @@ func newProviderSAMLLogoutService(login *ProviderLoginService, cfg ProviderSAMLL
 		len(cfg.FinalRedirectAllowlist) == 0 || len(cfg.FinalRedirectAllowlist) > 64 {
 		return nil, sso.ErrInvalidInput
 	}
+	signinRequestNamespace := login.config.RequestKeys.Namespace
 	login, err := withSAMLLogoutRequestKeys(login, keys)
 	if err != nil {
 		return nil, err
@@ -116,7 +118,7 @@ func newProviderSAMLLogoutService(login *ProviderLoginService, cfg ProviderSAMLL
 	if err != nil {
 		return nil, sso.ErrInvalidInput
 	}
-	return &ProviderSAMLLogoutService{login: login, sessions: reader, retained: retained, effect: effect,
+	return &ProviderSAMLLogoutService{login: login, signinRequestNamespace: signinRequestNamespace, sessions: reader, retained: retained, effect: effect,
 		lookupKeys: slices.Clone(cfg.Session.LookupKeys), csrfKeys: slices.Clone(cfg.CSRFKeys), finalRedirect: allowed}, nil
 }
 

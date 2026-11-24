@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Opt into SP-generated SAML logout RelayState with `WithRelayState`.
+  Acknowledged local logout survives remote failure. The signed request and
+  one-use grant commit together; only the original handle and signed response
+  can settle it. An exact replay does not reveal the continuation again.
+
 - Echo optional opaque RelayState only with a fresh, signed IdP-initiated
   logout response. A changed value cannot reopen the original request and
   no-state requests retain their existing replay identity.

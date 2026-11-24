@@ -25,6 +25,8 @@ type samlLogoutRequestRow struct {
 	Command                identity.CommandID
 	Organization, Provider string
 	IssuedAt, ExpiresAt    time.Time
+	// In-memory observation only; not a new field in persisted row AAD.
+	envelopeDigest [32]byte
 }
 
 // Only signed InResponseTo will select this custody. The issuer, original
@@ -35,6 +37,7 @@ type samlLogoutRequestBinding struct {
 	Subject                                               samlStoredLogoutSubject
 	Issuer, Endpoint, FinalRedirect, Redirect             string
 	SessionVersion, ProviderVersion, CredentialGeneration uint64
+	Relay                                                 *samlLogoutRelayIssueCustody `json:",omitempty"`
 }
 
 func (r samlLogoutRequestRow) requestID() string {
@@ -108,6 +111,7 @@ func (s *ProviderLoginService) readSAMLLogoutRequest(ctx context.Context, tenant
 	if err != nil || !bytes.Equal(encoded, plain) {
 		return samlLogoutRequestRow{}, samlLogoutRequestBinding{}, false, identity.ForbiddenError{}
 	}
+	row.envelopeDigest = sha256.Sum256(wire)
 	return row, payload, true, nil
 }
 

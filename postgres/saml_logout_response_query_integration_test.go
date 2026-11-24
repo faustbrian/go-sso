@@ -21,8 +21,10 @@ import (
 )
 
 // Named risks: retained-row scan amplification, stale provider/credential
-// fencing, and duplicate-receipt fallback cost. These exact raw-pool statements
-// use inferred pgx bindings on one isolated primary connection. All writes roll
+// fencing, relay request-envelope replacement, and duplicate-receipt fallback
+// cost. Existing raw-pool statements use inferred pgx bindings; relay statements
+// and their matched baselines use Work's fixed binary ExecParams bindings.
+// Measurements share one isolated primary connection. All writes roll
 // back; this does not measure signature checks, contention, commit or the full
 // logout operation, and does not introduce a session or response-state owner.
 func TestNativeSAMLLogoutResponseQueryScale(t *testing.T) {
@@ -152,13 +154,32 @@ func TestNativeSAMLLogoutResponseQueryScale(t *testing.T) {
 	const success = "urn:oasis:names:tc:SAML:2.0:status:Success"
 	args := []any{tenant, requestID(20001), organization, "response-cost-provider-16000", expires, "1", "1", expires, id[:], digest[:], success, ""}
 	first := measureSAMLLogoutResponseStatement(t, ctx, tx, "insert/first-hot", insertSAMLLogoutResponseSQL, args, samlLogoutResponseQueryWant{eligible: true, written: true})
+	envelopeDigest := sha256.Sum256(bytes.Repeat([]byte("r"), 2048))
+	relayArgs := append(slices.Clone(args), envelopeDigest[:])
+	baseline := measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/baseline-first-hot", insertSAMLLogoutResponseSQL, args, samlLogoutResponseQueryWant{eligible: true, written: true, nativeWork: true})
+	relayFirst := measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/first-hot", insertSAMLLogoutRelayResponseSQL, relayArgs, samlLogoutResponseQueryWant{eligible: true, written: true})
 	duplicate := slices.Clone(args)
 	duplicate[1] = requestID(16000)
 	replay := measureSAMLLogoutResponseStatement(t, ctx, tx, "insert/duplicate-hot", insertSAMLLogoutResponseSQL, duplicate, samlLogoutResponseQueryWant{eligible: true})
+	baselineReplay := measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/baseline-duplicate-hot", insertSAMLLogoutResponseSQL, duplicate, samlLogoutResponseQueryWant{eligible: true, nativeWork: true})
+	relayReplay := measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/duplicate-hot", insertSAMLLogoutRelayResponseSQL, append(slices.Clone(duplicate), envelopeDigest[:]), samlLogoutResponseQueryWant{eligible: true})
+	if _, err := tx.Exec(ctx, "SAVEPOINT relay_query_changed_envelope"); err != nil {
+		t.Fatal(err)
+	}
+	if tag, err := tx.Exec(ctx, `UPDATE sso_providers.saml_logout_requests
+ SET request_envelope=convert_to(repeat('x',2048),'UTF8') WHERE tenant_id=$1 AND request_id=$2`, args[:2]...); err != nil || tag.RowsAffected() != 1 {
+		t.Fatal("replace exact relay request envelope", err)
+	}
+	measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/baseline-changed-envelope", insertSAMLLogoutResponseSQL, args, samlLogoutResponseQueryWant{eligible: true, written: true, nativeWork: true})
+	measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/changed-envelope", insertSAMLLogoutRelayResponseSQL, relayArgs, samlLogoutResponseQueryWant{})
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT relay_query_changed_envelope; RELEASE SAVEPOINT relay_query_changed_envelope"); err != nil {
+		t.Fatal(err)
+	}
 	reusedID := sha256.Sum256([]byte("response-cost-id-" + requestID(16000)))
 	conflict := slices.Clone(args)
 	conflict[8] = reusedID[:]
 	measureSAMLLogoutResponseStatement(t, ctx, tx, "insert/reused-response-id", insertSAMLLogoutResponseSQL, conflict, samlLogoutResponseQueryWant{eligible: true})
+	measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/reused-response-id", insertSAMLLogoutRelayResponseSQL, append(slices.Clone(conflict), envelopeDigest[:]), samlLogoutResponseQueryWant{eligible: true})
 	for _, fence := range []struct {
 		name  string
 		index int
@@ -172,6 +193,7 @@ func TestNativeSAMLLogoutResponseQueryScale(t *testing.T) {
 		fenced := slices.Clone(args)
 		fenced[fence.index] = fence.value
 		measureSAMLLogoutResponseStatement(t, ctx, tx, "insert/"+fence.name, insertSAMLLogoutResponseSQL, fenced, samlLogoutResponseQueryWant{})
+		measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/"+fence.name, insertSAMLLogoutRelayResponseSQL, append(slices.Clone(fenced), envelopeDigest[:]), samlLogoutResponseQueryWant{})
 	}
 	for _, fence := range []struct{ name, sql string }{
 		{"rotated-credential", `UPDATE sso_providers.credentials SET generation=2 WHERE tenant_id=$1 AND organization_id=$2 AND provider_id=$3`},
@@ -185,6 +207,7 @@ func TestNativeSAMLLogoutResponseQueryScale(t *testing.T) {
 			t.Fatal("set exact response query fence", fence.name, err)
 		}
 		measureSAMLLogoutResponseStatement(t, ctx, tx, "insert/"+fence.name, insertSAMLLogoutResponseSQL, args, samlLogoutResponseQueryWant{})
+		measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/"+fence.name, insertSAMLLogoutRelayResponseSQL, relayArgs, samlLogoutResponseQueryWant{})
 		if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT response_query_fence; RELEASE SAVEPOINT response_query_fence"); err != nil {
 			t.Fatal(err)
 		}
@@ -213,7 +236,9 @@ func TestNativeSAMLLogoutResponseQueryScale(t *testing.T) {
 	cold := slices.Clone(args)
 	cold[0], cold[1], cold[3] = "response-cost-cold-2", requestID(19901), "response-cost-provider-19901"
 	measureSAMLLogoutResponseStatement(t, ctx, tx, "insert/duplicate-cold", insertSAMLLogoutResponseSQL, cold, samlLogoutResponseQueryWant{eligible: true})
+	measureSAMLLogoutResponseStatement(t, ctx, tx, "relay/duplicate-cold", insertSAMLLogoutRelayResponseSQL, append(slices.Clone(cold), envelopeDigest[:]), samlLogoutResponseQueryWant{eligible: true})
 	t.Logf("incremental response-settlement SQL only: first=1 insert, median=%s; duplicate=1 insert+1 receipt read, sum of isolated statement medians=%s; not an end-to-end transaction measurement; earlier profile/request reads, signature validation, pool acquisition, waits and commit excluded", first, replay+receiptHit)
+	t.Logf("relay envelope fence compared with the same statement without sha256(r.request_envelope)=$13, same binary Work bindings and fixture: first-hot baseline=%s relay=%s; duplicate-hot baseline=%s relay=%s; isolated statement medians, not full Work or transaction latency", baseline, relayFirst, baselineReplay, relayReplay)
 	if err := tx.QueryRow(ctx, "SELECT count(*) FROM sso_providers.saml_logout_responses").Scan(&receipts); err != nil || receipts != 20000 {
 		t.Fatal("measurements retained a new response receipt", receipts, err)
 	}
@@ -222,13 +247,31 @@ func TestNativeSAMLLogoutResponseQueryScale(t *testing.T) {
 type samlLogoutResponseQueryWant struct {
 	eligible, written bool
 	digest            []byte
+	nativeWork        bool
 }
 
 func measureSAMLLogoutResponseStatement(t *testing.T, ctx context.Context, tx pgx.Tx, name, sql string, args []any, want samlLogoutResponseQueryWant) time.Duration {
 	t.Helper()
-	description, err := tx.Conn().Prepare(ctx, "", sql)
-	if err != nil {
-		t.Fatal("describe exact raw-pool response statement", name, err)
+	native := sql == insertSAMLLogoutRelayResponseSQL || want.nativeWork
+	var oids []uint32
+	var formats []int16
+	bindingMode := "inferred pgx"
+	if !native {
+		description, err := tx.Conn().Prepare(ctx, "", sql)
+		if err != nil {
+			t.Fatal("describe exact raw-pool response statement", name, err)
+		}
+		oids = description.ParamOIDs
+	} else {
+		bindingMode = "Work fixed binary ExecParams"
+	}
+	query := func(statement string) (pgx.Rows, error) {
+		if native {
+			var rows pgx.Rows
+			rows, oids, formats = samlLogoutRelayQueryRows(t, ctx, tx, statement, args)
+			return rows, nil
+		}
+		return tx.Query(ctx, statement, args...)
 	}
 	types := make([]string, len(args))
 	for i, arg := range args {
@@ -240,9 +283,13 @@ func measureSAMLLogoutResponseStatement(t *testing.T, ctx context.Context, tx pg
 		if _, err := tx.Exec(ctx, "SAVEPOINT saml_response_query_sample"); err != nil {
 			t.Fatal(err)
 		}
-		var wire []byte
-		if err := tx.QueryRow(ctx, "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "+sql, args...).Scan(&wire); err != nil {
-			t.Fatal("explain exact inferred-binding response statement", name, err)
+		rows, err := query("EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) " + sql)
+		if err != nil {
+			t.Fatal("execute exact response query plan", name, err)
+		}
+		wire, err := pgx.CollectExactlyOneRow(rows, pgx.RowTo[[]byte])
+		if err != nil {
+			t.Fatal("explain exact response statement", name, err)
 		}
 		var plans []struct {
 			Plan      samlLogoutAccountQueryPlan `json:"Plan"`
@@ -254,7 +301,7 @@ func measureSAMLLogoutResponseStatement(t *testing.T, ctx context.Context, tx pg
 				Calls      int     `json:"Calls"`
 			} `json:"Triggers,omitempty"`
 		}
-		err := json.Unmarshal(wire, &plans)
+		err = json.Unmarshal(wire, &plans)
 		clear(wire)
 		if err != nil || len(plans) != 1 {
 			t.Fatal("decode structural response query plan", name, err)
@@ -283,10 +330,18 @@ func measureSAMLLogoutResponseStatement(t *testing.T, ctx context.Context, tx pg
 			t.Fatal(err)
 		}
 		started := time.Now()
-		if sql == insertSAMLLogoutResponseSQL {
-			var eligible, written bool
-			if err := tx.QueryRow(ctx, sql, args...).Scan(&eligible, &written); err != nil || eligible != want.eligible || written != want.written {
-				t.Fatal("response statement returned wrong eligibility/write outcome", name, eligible, written, err)
+		if sql == insertSAMLLogoutResponseSQL || sql == insertSAMLLogoutRelayResponseSQL {
+			rows, err := query(sql)
+			if err != nil {
+				t.Fatal("execute exact response statement", name, err)
+			}
+			result, err := pgx.CollectExactlyOneRow(rows, func(row pgx.CollectableRow) ([2]bool, error) {
+				var result [2]bool
+				err := row.Scan(&result[0], &result[1])
+				return result, err
+			})
+			if err != nil || result[0] != want.eligible || result[1] != want.written {
+				t.Fatal("response statement returned wrong eligibility/write outcome", name, result, err)
 			}
 		} else {
 			var digest []byte
@@ -312,6 +367,6 @@ func measureSAMLLogoutResponseStatement(t *testing.T, ctx context.Context, tx pg
 	}
 	slices.Sort(elapsed)
 	slices.Sort(server)
-	t.Logf("query=%s SQL=%s Go-types=%v inferred-parameter-OIDs=%v eligible=%t written=%t receipt-hit=%t; 5 warm executions after one warmup: client min=%s median=%s max=%s; EXPLAIN server execution milliseconds min=%.3f median=%.3f max=%.3f; timeout=1s; excludes setup, rollback, pool acquisition, signature validation and commit; EXPLAIN timing is separate from client timing", name, sql, types, description.ParamOIDs, want.eligible, want.written, want.digest != nil, elapsed[0], elapsed[2], elapsed[4], server[0], server[2], server[4])
+	t.Logf("query=%s SQL=%s Go-types=%v binding-mode=%s parameter-OIDs=%v parameter-formats=%v eligible=%t written=%t receipt-hit=%t; 5 warm executions after one warmup: client min=%s median=%s max=%s; EXPLAIN server execution milliseconds min=%.3f median=%.3f max=%.3f; timeout=1s; excludes setup, rollback, pool acquisition, signature validation and commit; EXPLAIN timing is separate from client timing", name, sql, types, bindingMode, oids, formats, want.eligible, want.written, want.digest != nil, elapsed[0], elapsed[2], elapsed[4], server[0], server[2], server[4])
 	return elapsed[2]
 }

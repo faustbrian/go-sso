@@ -55,6 +55,8 @@ github.com/faustbrian/go-cache/v2 v2.0.0 h1:I/e1YaZzs4DMFmqyvOs/kG8U/env6/5ZH+5H
 github.com/faustbrian/go-cache/v2 v2.0.0/go.mod h1:dB+6KBmhLYDO7UqjNiqdl/G8q8dlDrzwNjeYSzKHrVo=
 github.com/faustbrian/go-capability/postgres/identity v0.0.0-20261123132835-255e841addb2 h1:qzYetNdhjkIoP5ZXoTLWUPep979DBKFrcAsOrOCaMgU=
 github.com/faustbrian/go-capability/postgres/identity v0.0.0-20261123132835-255e841addb2/go.mod h1:VN89oNXV7+cU4gSbfq6OqpOztYoM3/YKfYITD8vT8qs=
+github.com/faustbrian/go-capability/postgres/identity v0.0.0-20261124084308-14a0a4a45bb1 h1:V2hiXfHatzD76No9JQfzNFyN2MqbM9FaMN+3oMMcpwA=
+github.com/faustbrian/go-capability/postgres/identity v0.0.0-20261124084308-14a0a4a45bb1/go.mod h1:VN89oNXV7+cU4gSbfq6OqpOztYoM3/YKfYITD8vT8qs=
 github.com/faustbrian/go-capability/v2 v2.0.2-0.20261015044219-caab644d2fec h1:zsKeLj0VkOz+wRjKvvACtVF4MO229KsUXIw9CR0jywY=
 github.com/faustbrian/go-capability/v2 v2.0.2-0.20261015044219-caab644d2fec/go.mod h1:ssUHOHCArf/XQ+xfzVOmiDsV3eTPJeS2hyFH5uhqIJE=
 github.com/faustbrian/go-circuit-breaker v1.0.1 h1:lClA7sa8CItC6KRAlQxR3nuqaq8dx+2yt5HfJmXefPc=
@@ -121,6 +123,8 @@ github.com/faustbrian/go-identity/postgres v0.0.0-20261123152600-03589e2c798e h1
 github.com/faustbrian/go-identity/postgres v0.0.0-20261123152600-03589e2c798e/go.mod h1:2se0pU/UH8LwiF7kP2TWfBCYFYuJq1TXPb47soXnwRM=
 github.com/faustbrian/go-identity/postgres v0.0.0-20261124054825-ca63dbb32ac8 h1:tWHD8mhpGZ2/WEUCSTFvTc2pkVG37pa2UDmZMJFkz+4=
 github.com/faustbrian/go-identity/postgres v0.0.0-20261124054825-ca63dbb32ac8/go.mod h1:2se0pU/UH8LwiF7kP2TWfBCYFYuJq1TXPb47soXnwRM=
+github.com/faustbrian/go-identity/postgres v0.0.0-20261124090626-7761e9a7ee0f h1:JJlrqZmwvnc8RzfmYQJH042gsow1SmrEI7DYkmnsqfM=
+github.com/faustbrian/go-identity/postgres v0.0.0-20261124090626-7761e9a7ee0f/go.mod h1:2se0pU/UH8LwiF7kP2TWfBCYFYuJq1TXPb47soXnwRM=
 github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789 h1:AcnrkJ3z7oITrIUc6nSJX3OwLitJek2bRJDRu+eE7SQ=
 github.com/faustbrian/go-identity/reference v0.0.0-20261018031204-02c6195bd789/go.mod h1:O/hmm6Lqqb8SknW6SGEhv+EornZU+sR8KVKCXK5h+uY=
 github.com/faustbrian/go-identity/risk v0.0.0-20261123053209-79b6d35cbf8f h1:fgEkCPOm3mdv54ZQeRNBijkvOAv3BkQx2Uy158ufD2g=

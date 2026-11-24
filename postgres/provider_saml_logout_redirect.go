@@ -7,6 +7,7 @@ import (
 	"time"
 
 	identity "github.com/faustbrian/go-identity"
+	kernel "github.com/faustbrian/go-identity/postgres"
 	organization "github.com/faustbrian/go-organization"
 	"github.com/faustbrian/go-sso"
 	"github.com/faustbrian/go-sso/saml"
@@ -25,9 +26,10 @@ type ProviderSAMLLogoutRedirectProfile struct {
 // to the protected native local service. It does not contact the provider or
 // install HTTP routes.
 type ProviderSAMLLogoutRedirectService struct {
-	local    *ProviderSAMLLogoutService
-	custody  *SAMLLogoutSubjectCustody
-	profiles map[sso.ProviderID]samlLogoutSelectedProfile
+	local     *ProviderSAMLLogoutService
+	custody   *SAMLLogoutSubjectCustody
+	profiles  map[sso.ProviderID]samlLogoutSelectedProfile
+	relayKeys *kernel.RequestKeyConfig
 }
 
 // ProviderSAMLLogoutRedirectResult always retains the local result, including
@@ -157,6 +159,9 @@ func (s *ProviderSAMLLogoutRedirectService) reserveProviderRedirect(ctx context.
 		Anchor: anchor, Issuer: issuer.issuer, Subject: subject, Endpoint: profile.config.Endpoint,
 		FinalRedirect: p.request.FinalRedirect, SessionVersion: out.LocalRevocation.Version,
 		ProviderVersion: current.ProviderVersion, CredentialGeneration: current.CredentialGeneration,
+	}
+	if s.relayKeys != nil {
+		return s.reserveProviderRelayRedirect(ctx, p, out, current, profile, expected, deadline)
 	}
 	row, stored, exists, err := login.readSAMLLogoutRequest(ctx, binding.TenantID, binding.CommandID)
 	if err != nil {

@@ -222,6 +222,22 @@ failures settle without redirect. Exact re-entry within the original window
 can recover a lost provider acknowledgement as `Replayed`, without another
 write or another redirect. A different response cannot replace the receipt.
 
+For SP-generated one-use RelayState, append the kernel's
+`SSOSAMLLogoutRelayIssuePreparationErasureMigrationSource` after its SAML IdP
+confirmation erasure history, with the existing request preparation and
+capability-issuance migrations installed. Select `WithRelayState` with a
+stable request-key namespace distinct from local logout and sign-in. Permit the
+original user to issue the remote request after local logout and the configured
+service actor to settle the matching signed response. This does not install an
+HTTP route or enable another provider.
+
+Pass every decoded form value for RelayState to `SettleResponseWithRelayState`.
+The original signed `InResponseTo` chooses the retained request. The handle
+must match that request and cannot substitute for a signed response or grant.
+The ordinary `SettleResponse` method still serves original no-state requests
+and rejects requests that selected RelayState. An exact replay returns the
+original status without issuing a new continuation.
+
 ### Native SAML IdP-initiated logout request
 
 Select `NewProviderSAMLIDPLogoutService` with the same SAML sign-in subject

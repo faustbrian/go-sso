@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -84,6 +85,22 @@ func (r ProviderSAMLLogoutResponseResult) FinalRedirect() (url.URL, bool) {
 // one immutable receipt. It never reads a session credential or mutates a
 // session. Install SAMLLogoutResponseMigrationSource before using this method.
 func (s *ProviderSAMLLogoutRedirectService) SettleResponse(ctx context.Context, input ProviderSAMLLogoutResponseRequest) (ProviderSAMLLogoutResponseResult, error) {
+	return s.settleResponse(ctx, input, "")
+}
+
+// SettleResponseWithRelayState settles one signed POST response for the
+// explicitly enabled original RelayState request. Pass all values so
+// duplicates cannot be normalized into a valid handle. The handle cannot
+// select request custody, a session or a continuation. Do not mutate input
+// slices during the call.
+func (s *ProviderSAMLLogoutRedirectService) SettleResponseWithRelayState(ctx context.Context, input ProviderSAMLLogoutResponseRequest, relayState []string) (ProviderSAMLLogoutResponseResult, error) {
+	if s == nil || s.relayKeys == nil || len(relayState) != 1 || len(relayState[0]) != 43 {
+		return ProviderSAMLLogoutResponseResult{}, sso.ErrInvalidInput
+	}
+	return s.settleResponse(ctx, input, relayState[0])
+}
+
+func (s *ProviderSAMLLogoutRedirectService) settleResponse(ctx context.Context, input ProviderSAMLLogoutResponseRequest, relayState string) (ProviderSAMLLogoutResponseResult, error) {
 	var out ProviderSAMLLogoutResponseResult
 	if s == nil || s.local == nil || ctx == nil || len(input.SAMLResponse) != 1 {
 		return out, sso.ErrInvalidInput
@@ -134,9 +151,20 @@ func (s *ProviderSAMLLogoutRedirectService) SettleResponse(ctx context.Context, 
 		response.IssuedAt.Before(row.IssuedAt.Truncate(time.Second)) {
 		return out, sso.ErrInvalidInput
 	}
+	if retained.Relay != nil {
+		defer clear(retained.Relay.Proof)
+		if relayState == "" || subtle.ConstantTimeCompare([]byte(relayState), []byte(retained.Relay.Handle)) != 1 || !validSAMLLogoutRelayCustody(row, retained) {
+			return out, sso.ErrInvalidInput
+		}
+	} else if relayState != "" {
+		return out, sso.ErrInvalidInput
+	}
 	out.LocalRevocation = saml.LocalRevocation{SessionID: retained.Anchor.Session, Version: retained.SessionVersion, Committed: true}
 	if out.LocalRevocation.Validate() != nil {
 		return ProviderSAMLLogoutResponseResult{}, sso.ErrUnavailable
+	}
+	if retained.Relay != nil {
+		return s.settleVerifiedSAMLLogoutRelayResponse(ctx, row, retained, route, response, input.SAMLResponse[0], out)
 	}
 	return s.settleVerifiedSAMLLogoutResponse(ctx, row, retained, route, response, input.SAMLResponse[0], out)
 }
@@ -187,13 +215,15 @@ func (s *ProviderSAMLLogoutRedirectService) settleVerifiedSAMLLogoutResponse(ctx
 	return out, nil
 }
 
-const insertSAMLLogoutResponseSQL = `WITH eligible AS MATERIALIZED (
+const insertSAMLLogoutResponsePrefixSQL = `WITH eligible AS MATERIALIZED (
  SELECT r.tenant_id,r.request_id FROM sso_providers.saml_logout_requests r
  JOIN sso_providers.providers p USING(tenant_id,organization_id,provider_id)
  JOIN sso_providers.credentials c USING(tenant_id,organization_id,provider_id)
  WHERE r.tenant_id=$1 AND r.request_id=$2 AND p.organization_id=$3 AND p.provider_id=$4
  AND r.expires_at=$5 AND p.protocol='saml' AND p.enabled AND p.metadata_version=$6::numeric
- AND p.enablement_credential_generation=$7::numeric AND c.generation=$7::numeric
+ AND p.enablement_credential_generation=$7::numeric AND c.generation=$7::numeric`
+
+const insertSAMLLogoutResponseSuffixSQL = `
  FOR NO KEY UPDATE OF r FOR SHARE OF p
 ), current_request AS MATERIALIZED (
  SELECT tenant_id,request_id FROM eligible WHERE clock_timestamp() < $8::timestamptz
@@ -204,6 +234,11 @@ const insertSAMLLogoutResponseSQL = `WITH eligible AS MATERIALIZED (
  ON CONFLICT DO NOTHING RETURNING 1
 )
 SELECT EXISTS(SELECT FROM current_request), EXISTS(SELECT FROM written)`
+
+const insertSAMLLogoutResponseSQL = insertSAMLLogoutResponsePrefixSQL + insertSAMLLogoutResponseSuffixSQL
+
+const insertSAMLLogoutRelayResponseSQL = insertSAMLLogoutResponsePrefixSQL + `
+ AND sha256(r.request_envelope)=$13` + insertSAMLLogoutResponseSuffixSQL
 
 const readSAMLLogoutResponseSQL = `SELECT response_digest,status_code,status_subcode
  FROM sso_providers.saml_logout_responses WHERE tenant_id=$1 AND request_id=$2`
