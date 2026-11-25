@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Bind directory User admission to its exact source revision and distinct
+  child receipt without selecting policy or changing existing Group-only
+  and deprovisioning batch commitments. Unknown admission outcomes retain
+  the original checkpoint until reconciliation.
+
 - Bind directory User deprovisioning to the exact source revision and
   its own child receipt. Existing Group-only batch commitments and
   checkpoints stay unchanged.

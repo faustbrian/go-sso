@@ -286,14 +286,24 @@ identity. Only executors opting into this profile may interpret User deltas.
 The receipt must match `DirectoryUserDeprovisionOperation`; a Group receipt
 cannot settle it. Group-only batch commitments and checkpoints remain stable.
 
+For a User admission child, construct a `NewDirectoryUserAdmissionDelta`
+from the original child command ID and exact source User resource and
+revision. `UserAdmission` returns a detached, redacted selection; it does
+not choose a local user, role, or admission policy. The executor must opt
+into this profile and return the exact `DirectoryUserAdmissionOperation`
+receipt. Neither Group nor deprovisioning receipts can settle admission,
+and admission receipts cannot settle either of those profiles. Admission
+uses a distinct typed tag in the existing v2 framing; Group-only v1 and
+Group plus deprovisioning v2 commitments remain unchanged.
+
 Use the validated batch's `Commitment` to retain exact in-flight identity
 in the scoped native generation. It binds the predecessor and ordered
 changes; it is neither authorization nor a completion receipt.
 
 Before any write, native composition must independently admit the provider,
 connection, generation and mapping and enlist its `DirectorySyncContributor`.
-The contributor loads each original, service-account-owned
-`DirectoryTeamMembershipOperation` outcome and uses
+The contributor loads each original, service-account-owned outcome for
+the selected Group, User admission, or deprovisioning operation and uses
 `NewDirectoryApplyResult` to bind those outcomes to the admitted batch.
 When processing stops before a later outcome is observed, use
 `NewDirectoryReconciliationResult` to retain only the exact observed prefix,

@@ -65,6 +65,7 @@ type DirectoryGroupMembership struct {
 type DirectoryDelta struct {
 	membership DirectoryGroupMembership
 	user       DirectoryUserDeprovision
+	admission  DirectoryUserAdmission
 }
 
 // NewDirectoryGroupMembershipDelta binds a selected group edge to its original
@@ -91,10 +92,12 @@ func (d DirectoryDelta) GroupMembership() (DirectoryGroupMembership, error) {
 
 func (d DirectoryDelta) child() (identity.CommandID, identity.FeatureOperation) {
 	switch {
-	case d.membership.Action != 0 && d.user.State == 0:
+	case d.membership.Action != 0 && d.user.State == 0 && d.admission.CommandID == "":
 		return d.membership.CommandID, DirectoryTeamMembershipOperation()
-	case d.membership.Action == 0 && d.user.State != 0:
+	case d.membership.Action == 0 && d.user.State != 0 && d.admission.CommandID == "":
 		return d.user.CommandID, DirectoryUserDeprovisionOperation()
+	case d.membership.Action == 0 && d.user.State == 0 && d.admission.CommandID != "":
+		return d.admission.CommandID, DirectoryUserAdmissionOperation()
 	default:
 		return "", identity.FeatureOperation{}
 	}
@@ -255,7 +258,9 @@ func directorySourceID(raw string) bool {
 
 func directoryBatchBinding(batch DirectoryDeltaBatch) [32]byte {
 	h := sha256.New()
-	hasUser := slices.ContainsFunc(batch.Deltas, func(d DirectoryDelta) bool { return d.user.State != 0 })
+	hasUser := slices.ContainsFunc(batch.Deltas, func(d DirectoryDelta) bool {
+		return d.user.State != 0 || d.admission.CommandID != ""
+	})
 	// Existing Group generations may still retain their original on-disk
 	// commitment. Use typed framing only for batches containing a User delta.
 	if hasUser {
@@ -272,6 +277,13 @@ func directoryBatchBinding(batch DirectoryDeltaBatch) [32]byte {
 	_, _ = h.Write(batch.PredecessorCheckpoint[:])
 	directoryHashNumber(h, uint64(len(batch.Deltas)))
 	for _, delta := range batch.Deltas {
+		if delta.admission.CommandID != "" {
+			_, _ = h.Write([]byte{3})
+			directoryHashText(h, string(delta.admission.CommandID))
+			directoryHashText(h, delta.admission.ResourceID)
+			directoryHashText(h, delta.admission.SourceRevision)
+			continue
+		}
 		if delta.user.State != 0 {
 			_, _ = h.Write([]byte{2})
 			directoryHashText(h, string(delta.user.CommandID))
