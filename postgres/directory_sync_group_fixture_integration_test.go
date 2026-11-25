@@ -14,6 +14,7 @@ import (
 	"github.com/faustbrian/go-clock"
 	identity "github.com/faustbrian/go-identity"
 	kernel "github.com/faustbrian/go-identity/postgres"
+	migrations "github.com/faustbrian/go-migrations/v3"
 	organization "github.com/faustbrian/go-organization"
 	organizationpg "github.com/faustbrian/go-organization/postgres"
 	scim "github.com/faustbrian/go-scim"
@@ -34,13 +35,14 @@ type directoryGroupApplyFixture struct {
 	providerVersion uint64
 	sync            *ssopg.DirectorySyncService
 	groups          *scimpostgres.GroupsService
+	native          *scimpostgres.Service
 	scope           scim.Scope
 	bearer          authentication.BearerCredential
 	groupID, userID string
 	groupETag       scim.Version
 }
 
-func newDirectoryGroupApplyFixture(t *testing.T) directoryGroupApplyFixture {
+func newDirectoryGroupApplyFixture(t *testing.T, additional ...migrations.Source) directoryGroupApplyFixture {
 	t.Helper()
 	x := newProviderEnableFixture(t)
 	f := x.f
@@ -52,12 +54,13 @@ func newDirectoryGroupApplyFixture(t *testing.T) directoryGroupApplyFixture {
 	if err != nil {
 		t.Fatal("load canonical SCIM request prerequisites", err)
 	}
-	installNativeDirectoryGeneration(t, f,
+	prerequisites := []migrations.Source{
 		ssopg.ProviderCredentialsMigrationSource{Version: 322}, ssopg.ProviderEnableMigrationSource{Version: 323},
 		migrationList(canonical[len(canonical)-1:]), groupHistory,
 		organizationpg.TeamMigrationSource{Version: 684}, organizationpg.TeamLifecycleMigrationSource{Version: 685},
 		organizationpg.DirectoryTeamGrantMigrationSource{Version: 686},
-	)
+	}
+	installNativeDirectoryGeneration(t, f, append(prerequisites, additional...)...)
 	enabled, err := x.service.ProviderEnable(f.ctx, x.request)
 	if err != nil || !enabled.Provider.Enabled {
 		t.Fatal("enable source provider", err)
@@ -85,7 +88,7 @@ func newDirectoryGroupApplyFixture(t *testing.T) directoryGroupApplyFixture {
 	if err != nil {
 		t.Fatal("select actual native generation", err)
 	}
-	return directoryGroupApplyFixture{provider: x, providerVersion: enabled.Provider.Version, sync: sync, groups: groups, scope: scope,
+	return directoryGroupApplyFixture{provider: x, providerVersion: enabled.Provider.Version, sync: sync, groups: groups, native: native, scope: scope,
 		bearer: bearer, groupID: groupID, userID: userID, groupETag: group.ETag}
 }
 

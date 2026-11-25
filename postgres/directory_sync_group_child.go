@@ -17,7 +17,7 @@ import (
 	lifecyclepg "github.com/faustbrian/go-transactional-outbox/postgres/identity"
 )
 
-type directoryGroupChild struct {
+type directorySyncChild struct {
 	service    *DirectoryGroupSyncService
 	generation DirectorySyncGeneration
 	batch      sso.DirectoryDeltaBatch
@@ -25,27 +25,45 @@ type directoryGroupChild struct {
 	admission  directoryEdgeAdmission
 	edge       scimpostgres.DirectoryGroupEdge
 	update     organizationpg.DirectoryTeamGrantUpdate
+	user       *directorySyncUserChild
 	binding    identity.CommandBinding
 	command    identity.Command
 }
 
-func (*directoryGroupChild) Descriptor() kernel.ContributorDescriptor {
-	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: "sso.directory-team-membership", Version: 1}
+func (p *directorySyncChild) Descriptor() kernel.ContributorDescriptor {
+	return kernel.ContributorDescriptor{Owner: "sso/postgres", ContractID: p.operation().SchemaID, Version: 1}
 }
 
-func (*directoryGroupChild) FeatureOperations() []identity.FeatureOperation {
-	return []identity.FeatureOperation{sso.DirectoryTeamMembershipOperation()}
+func (p *directorySyncChild) FeatureOperations() []identity.FeatureOperation {
+	return []identity.FeatureOperation{p.operation()}
 }
 
-func (p *directoryGroupChild) registration() kernel.FeatureRegistration {
-	return kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: sso.DirectoryTeamMembershipOperation()}
+func (p *directorySyncChild) operation() identity.FeatureOperation {
+	if p.user != nil {
+		return p.user.operation
+	}
+	return sso.DirectoryTeamMembershipOperation()
 }
 
-func (p *directoryGroupChild) lifecycle() kernel.LifecyclePlan {
+func (p *directorySyncChild) registration() kernel.FeatureRegistration {
+	return kernel.FeatureRegistration{Contributor: p.Descriptor(), Operation: p.operation()}
+}
+
+func (p *directorySyncChild) subjectType() string {
+	if p.user != nil {
+		return "directory_membership"
+	}
+	return "team_membership"
+}
+
+func (p *directorySyncChild) lifecycle() kernel.LifecyclePlan {
+	if p.user != nil {
+		return kernel.LifecyclePlan{EventType: "sso.directory_sync.membership_changed.v1", BeforeVersion: p.user.update.BeforeVersion(), AfterVersion: p.user.update.AfterVersion()}
+	}
 	return kernel.LifecyclePlan{EventType: "sso.directory_sync.team_membership_changed.v1", BeforeVersion: p.update.BeforeVersion(), AfterVersion: p.update.AfterVersion()}
 }
 
-func (p *directoryGroupChild) executeOriginal(ctx context.Context) (receipt sso.Completion, absent bool, err error) {
+func (p *directorySyncChild) executeOriginal(ctx context.Context) (receipt sso.Completion, absent bool, err error) {
 	coordinator, registry, err := p.coordinator()
 	if err != nil {
 		return receipt, false, providerError(ctx, err)
@@ -75,6 +93,10 @@ func (p *directoryGroupChild) executeOriginal(ctx context.Context) (receipt sso.
 		if observed.Record.Binding != p.binding {
 			return receipt, false, sso.ErrForbidden
 		}
+		if p.user != nil && p.generation.State == DirectorySyncCanceled && observed.Record.Outcome != identity.CommitOutcomeCommitted {
+			// A closed User generation has no outstanding child to reconcile.
+			return receipt, false, sso.ErrForbidden
+		}
 		receipt, err = coordinator.RecoverFeatureCommand(ctx, query, caller)
 	}
 	if err != nil && receipt.Binding.CommandID == "" {
@@ -96,7 +118,7 @@ func (p *directoryGroupChild) executeOriginal(ctx context.Context) (receipt sso.
 	}
 }
 
-func (p *directoryGroupChild) receiptCaller() authorization.DecisionContext {
+func (p *directorySyncChild) receiptCaller() authorization.DecisionContext {
 	b := p.binding
 	return authorization.DecisionContext{PolicyRevision: authorization.Revision(b.PolicyVersion), Request: authorization.Request{
 		Tenant: authorization.TenantID(b.TenantID), Subject: authorization.Subject{Kind: authorization.SubjectServiceAccount, ID: authorization.SubjectID(b.ActorID)},
@@ -104,7 +126,7 @@ func (p *directoryGroupChild) receiptCaller() authorization.DecisionContext {
 	}}
 }
 
-func (p *directoryGroupChild) coordinator() (*kernel.Coordinator, *kernel.ContributorRegistry, error) {
+func (p *directorySyncChild) coordinator() (*kernel.Coordinator, *kernel.ContributorRegistry, error) {
 	service := p.service
 	audits, err := auditpg.NewIdentityContributor(auditpg.Config{})
 	if err != nil {
@@ -122,16 +144,25 @@ func (p *directoryGroupChild) coordinator() (*kernel.Coordinator, *kernel.Contri
 	return coordinator, registry, err
 }
 
-func (p *directoryGroupChild) execute(ctx context.Context, coordinator *kernel.Coordinator, registry *kernel.ContributorRegistry) (identity.CommandResult, bool, error) {
+func (p *directorySyncChild) execute(ctx context.Context, coordinator *kernel.Coordinator, registry *kernel.ContributorRegistry) (identity.CommandResult, bool, error) {
 	fields := []identity.FeatureField{{Name: "sso.directory-batch", Value: identity.FeatureValue{Kind: identity.FeatureBytes, Bytes: bytes.Clone(p.commitment[:])}}}
-	for _, field := range []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field} {
+	evidence := []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field}
+	if p.user != nil {
+		// Only an authoritative absent admission permits preparing a new
+		// update. Recovery must still work after the last grant disappeared.
+		if err := p.prepareUserUpdate(ctx); err != nil {
+			return identity.CommandResult{}, false, err
+		}
+		evidence = []func() (identity.FeatureField, error){p.admission.source.Field, p.user.evidence.Field, p.user.update.Field}
+	}
+	for _, field := range evidence {
 		value, err := field()
 		if err != nil {
 			return identity.CommandResult{}, false, err
 		}
 		fields = append(fields, value)
 	}
-	op := sso.DirectoryTeamMembershipOperation()
+	op := p.operation()
 	cmd, err := identity.NewFeatureCommand(identity.FeatureCommandSpec{Operation: op, Binding: p.binding, Fields: fields})
 	if err != nil {
 		return identity.CommandResult{}, false, err
@@ -144,8 +175,8 @@ func (p *directoryGroupChild) execute(ctx context.Context, coordinator *kernel.C
 	return executeProviderFeatureCommand(ctx, coordinator, p.binding, cmd, plan)
 }
 
-func (p *directoryGroupChild) plan(registry *kernel.ContributorRegistry) (kernel.CommandPlan, error) {
-	const subject = "team_membership"
+func (p *directorySyncChild) plan(registry *kernel.ContributorRegistry) (kernel.CommandPlan, error) {
+	subject := p.subjectType()
 	b, lifecycle := p.binding, p.lifecycle()
 	builder, err := audit.NewBuilder(audit.BuilderConfig{})
 	if err != nil {
@@ -175,21 +206,28 @@ func (p *directoryGroupChild) plan(registry *kernel.ContributorRegistry) (kernel
 			RequiredRecordCount: 1, MaxRecordBytes: 16384, MaxAggregateBytes: 16384, RetentionClass: "protected", Required: true}}}, nil
 }
 
-func (p *directoryGroupChild) ValidateFeatureCommand(command identity.Command, plan kernel.CommandPlan) error {
+func (p *directorySyncChild) ValidateFeatureCommand(command identity.Command, plan kernel.CommandPlan) error {
 	input, ok := command.Feature()
-	if !ok || command != p.command || input.Binding != p.binding || input.Operation != sso.DirectoryTeamMembershipOperation() ||
+	if !ok || command != p.command || input.Binding != p.binding || input.Operation != p.operation() ||
 		plan.Feature == nil || *plan.Feature != p.registration() || plan.Lifecycle == nil || *plan.Lifecycle != p.lifecycle() ||
-		plan.SubjectType != "team_membership" || len(plan.Audits) != 1 || !plan.Audits[0].Required {
+		plan.SubjectType != p.subjectType() || len(plan.Audits) != 1 || !plan.Audits[0].Required {
 		return identity.ForbiddenError{}
 	}
 	return nil
 }
 
-func (p *directoryGroupChild) ApplyFeature(ctx context.Context, work kernel.Work, command identity.Command) (identity.FeatureReceipt, error) {
+func (p *directorySyncChild) ApplyFeature(ctx context.Context, work kernel.Work, command identity.Command) (identity.FeatureReceipt, error) {
 	if err := work.RequireFeatureCommand(ctx, p, command); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	if err := p.service.config.Source.RequireDirectoryGroupEdge(ctx, work, p, command, p.admission.source, p.edge); err != nil {
+	var lock organizationpg.DirectoryMembershipLock
+	if p.user != nil {
+		var err error
+		lock, err = p.service.config.Source.LockDirectoryUserMembership(ctx, work, p, command, p.admission.source, p.user.evidence, p.user.update)
+		if err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+	} else if err := p.service.config.Source.RequireDirectoryGroupEdge(ctx, work, p, command, p.admission.source, p.edge); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
 	if err := p.requireActorInWork(ctx, work); err != nil {
@@ -198,20 +236,35 @@ func (p *directoryGroupChild) ApplyFeature(ctx context.Context, work kernel.Work
 	if err := p.holdGeneration(ctx, work); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	if err := p.organizations().ApplyDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {
+	if p.user != nil {
+		effect, err := p.organizations().ApplyDirectoryMembershipUpdate(ctx, work, p, command, p.user.update, lock)
+		if err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+		p.user.effect = effect
+	} else if err := p.organizations().ApplyDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	return identity.FeatureReceipt{Operation: sso.DirectoryTeamMembershipOperation(),
-		BeforeVersion: p.update.BeforeVersion(), AfterVersion: p.update.AfterVersion()}, nil
+	versions := p.lifecycle()
+	return identity.FeatureReceipt{Operation: p.operation(), BeforeVersion: versions.BeforeVersion, AfterVersion: versions.AfterVersion}, nil
 }
 
-func (p *directoryGroupChild) CheckFeatureCommit(ctx context.Context, work kernel.Work, command identity.Command) error {
+func (p *directorySyncChild) CheckFeatureCommit(ctx context.Context, work kernel.Work, command identity.Command) error {
 	b, feature, _, err := work.FeatureScope(p)
 	if err != nil || command != p.command || b != p.binding || feature != p.registration() {
 		return identity.ForbiddenError{}
 	}
 	if err := p.requirePendingGeneration(ctx, work); err != nil {
 		return err
+	}
+	if p.user != nil {
+		if err := p.organizations().RequireDirectoryMembershipEffect(ctx, work, p, command, p.user.update, p.user.effect); err != nil {
+			return err
+		}
+		if err := p.service.config.Source.RequireDirectoryUserMembershipAtCommit(ctx, work, p, command, p.admission.source, p.user.evidence, p.user.effect); err != nil {
+			return err
+		}
+		return p.requireActorInWork(ctx, work)
 	}
 	if err := p.organizations().RequireDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {
 		return err
@@ -222,7 +275,7 @@ func (p *directoryGroupChild) CheckFeatureCommit(ctx context.Context, work kerne
 	return p.requireActorInWork(ctx, work)
 }
 
-func (p *directoryGroupChild) requireActorInWork(ctx context.Context, work kernel.Work) error {
+func (p *directorySyncChild) requireActorInWork(ctx context.Context, work kernel.Work) error {
 	maximum := p.service.scope.MaximumDuration
 	if err := authoritypg.RequireAuthority(ctx, work, p.admission.scope, p.admission.epoch, maximum); err != nil {
 		return identity.ForbiddenError{}
@@ -234,6 +287,6 @@ func (p *directoryGroupChild) requireActorInWork(ctx context.Context, work kerne
 	return nil
 }
 
-func (p *directoryGroupChild) organizations() *organizationpg.Repository {
+func (p *directorySyncChild) organizations() *organizationpg.Repository {
 	return p.service.organizations
 }

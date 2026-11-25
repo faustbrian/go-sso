@@ -41,19 +41,19 @@ const directoryStopGroupBatchSQL = `UPDATE sso_providers.directory_sync_generati
  WHERE ` + directoryGroupGenerationKey + ` AND checkpoint=$9 AND pending_batch=$10 AND state='canceling'
  AND clock_timestamp()<$11 AND version<18446744073709551615`
 
-func (p *directoryGroupChild) generationArgs() []any {
+func (p *directorySyncChild) generationArgs() []any {
 	b := p.batch
 	return []any{string(p.generation.ID), string(b.TenantID), string(b.OrganizationID), string(b.ProviderID), b.ConnectionID,
 		strconv.FormatUint(b.Generation, 10), strconv.FormatUint(b.MappingVersion, 10), strconv.FormatUint(p.generation.ProviderVersion, 10),
 		b.PredecessorCheckpoint[:], p.commitment[:]}
 }
 
-func (p *directoryGroupChild) providerLockArgs() []any {
+func (p *directorySyncChild) providerLockArgs() []any {
 	return []any{string(p.batch.TenantID), string(p.batch.OrganizationID), string(p.batch.ProviderID),
 		strconv.FormatUint(p.generation.ProviderVersion, 10), strconv.FormatUint(p.batch.MappingVersion, 10)}
 }
 
-func (p *directoryGroupChild) holdGeneration(ctx context.Context, work kernel.Work) error {
+func (p *directorySyncChild) holdGeneration(ctx context.Context, work kernel.Work) error {
 	rows, err := work.Query(ctx, directoryStartLockProviderSQL, p.providerLockArgs()...)
 	if err != nil {
 		return err
@@ -83,11 +83,11 @@ type directoryWorkQuery interface {
 	Query(context.Context, string, ...any) (*kernel.WorkRows, error)
 }
 
-func (p *directoryGroupChild) requirePendingGeneration(ctx context.Context, work directoryWorkQuery) error {
+func (p *directorySyncChild) requirePendingGeneration(ctx context.Context, work directoryWorkQuery) error {
 	return p.requireGroupBatch(ctx, work, directoryPendingGroupBatchSQL)
 }
 
-func (p *directoryGroupChild) requireGroupBatch(ctx context.Context, work directoryWorkQuery, query string) error {
+func (p *directorySyncChild) requireGroupBatch(ctx context.Context, work directoryWorkQuery, query string) error {
 	rows, err := work.Query(ctx, query, p.generationArgs()...)
 	if err != nil {
 		return err
@@ -100,7 +100,7 @@ func (p *directoryGroupChild) requireGroupBatch(ctx context.Context, work direct
 	return nil
 }
 
-func (p *directoryGroupChild) RecoverParticipant(_ context.Context, work kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
+func (p *directorySyncChild) RecoverParticipant(_ context.Context, work kernel.RecoveryWork) (kernel.RecoveryStatus, error) {
 	b, registration, _, err := work.FeatureScope(p)
 	if err != nil || b != p.binding || registration != p.registration() {
 		return kernel.RecoveryUnknown, identity.ForbiddenError{}
@@ -111,7 +111,7 @@ func (p *directoryGroupChild) RecoverParticipant(_ context.Context, work kernel.
 	return kernel.RecoveryNotCommitted, nil
 }
 
-func (p *directoryGroupChild) settle(ctx context.Context, result sso.DirectoryApplyResult) error {
+func (p *directorySyncChild) settle(ctx context.Context, result sso.DirectoryApplyResult) error {
 	next, err := result.NextCheckpoint(p.batch)
 	if err != nil {
 		return sso.ErrDirectoryReconciliation
@@ -128,12 +128,12 @@ func (p *directoryGroupChild) settle(ctx context.Context, result sso.DirectoryAp
 	return p.settleGeneration(ctx, directoryAdvanceGroupBatchSQL, args, next, DirectorySyncRunning, DirectorySyncCanceled)
 }
 
-func (p *directoryGroupChild) settleStopped(ctx context.Context) error {
+func (p *directorySyncChild) settleStopped(ctx context.Context) error {
 	args := append(p.generationArgs(), p.admission.validUntil)
 	return p.settleGeneration(ctx, directoryStopGroupBatchSQL, args, p.batch.PredecessorCheckpoint, DirectorySyncCanceled)
 }
 
-func (p *directoryGroupChild) settleGeneration(ctx context.Context, query string, args []any, checkpoint [32]byte, replayStates ...DirectorySyncState) error {
+func (p *directorySyncChild) settleGeneration(ctx context.Context, query string, args []any, checkpoint [32]byte, replayStates ...DirectorySyncState) error {
 	service := p.service
 	tx, err := service.pool.Raw().Begin(ctx)
 	if err != nil {

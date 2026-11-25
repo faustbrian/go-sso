@@ -75,6 +75,28 @@ Directory withdrawal does not remove local or other-source grants. Dry-run
 execution, nested groups, role sync and HTTP/Reference composition are not
 selected by this adapter.
 
+### Optional directory User membership
+
+Use `NewDirectoryUserSyncService` for a direct source worker, or
+`WithUserMembership` on the native administration service. Install the
+same generation, SCIM, identity Work, audit and outbox histories as above,
+and the organization PostgreSQL `DirectoryMembershipMigrationSource`.
+Configure the exact source account and its authorization, a User mapper
+with admission and withdrawal selected independently, and the new-member
+limits. No HTTP route or background job is installed.
+
+`ApplyGeneration` accepts one typed User delta and the opaque generation ID
+from Start. An exact active SCIM revision can grant ordinary membership;
+an exact inactive revision or retained delete tombstone can withdraw only
+its own contribution. This does not disable the global identity or remove
+independent membership. Mixed, multi-User and role batches are not selected.
+If a write's outcome is unknown, retry the same request: the original
+receipt is recovered before preparing a new update, including when the
+withdrawal already removed the last membership. Until the outcome is
+proved, the generation retains the predecessor checkpoint. After
+cancellation settles that exact successor, retry remains read-only; a
+canceled generation does not admit a new User command.
+
 ### Optional SAML replay schema
 
 For IdP-initiated confirmation, apply `SAMLIDPConfirmationMigrationSource`

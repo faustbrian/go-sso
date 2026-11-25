@@ -24,14 +24,14 @@ require (
 	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261124104504-c56933838be6
 	github.com/faustbrian/go-migrations/v3 v3.1.1-0.20261015110643-ca105f265cfc
 	github.com/faustbrian/go-organization v0.0.0-20261122135635-30af6abd1547
-	github.com/faustbrian/go-organization/postgres v0.0.0-20261124122904-1c45d408f2d3
+	github.com/faustbrian/go-organization/postgres v0.0.0-20261125022625-41b03bbed738
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
 	github.com/faustbrian/go-scim v0.0.0-20261113195101-e97918aba312
-	github.com/faustbrian/go-scim/organization v0.0.0-20261124142207-32943a04df43
-	github.com/faustbrian/go-scim/postgres v0.0.0-20261124132804-3a7e6a61e856
+	github.com/faustbrian/go-scim/organization v0.0.0-20261125022625-c47b22e75c7e
+	github.com/faustbrian/go-scim/postgres v0.0.0-20261125021123-8ced90f23034
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
-	github.com/faustbrian/go-sso v0.0.0-20261124141854-d9579eed5ba7
+	github.com/faustbrian/go-sso v0.0.0-20261125020955-e0d8d216cf33
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734
 	github.com/faustbrian/go-sso/oidc v0.0.0-20261123000546-023dd34bb0c7
 	github.com/faustbrian/go-sso/saml v0.0.0-20261124105739-9ee486c62479

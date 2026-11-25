@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Select an exact directory User grant or withdrawal in a native SSO
+  generation. Settle from the original Work receipt and recover it after
+  a lost acknowledgment, even when the last membership was removed.
+
 - Apply a mapped Group batch using the opaque generation ID returned by
   Start. The executor resolves the stored sequence number on the same
   primary while retaining the original provider, mapping and predecessor.
