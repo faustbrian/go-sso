@@ -97,6 +97,31 @@ proved, the generation retains the predecessor checkpoint. After
 cancellation settles that exact successor, retry remains read-only; a
 canceled generation does not admit a new User command.
 
+### Optional directory team roles
+
+Use `WithGroupRoles` on native generation administration or
+`NewDirectoryGroupRoleSyncService` for a direct worker. In addition to the
+Group histories above, install the organization PostgreSQL dynamic-role,
+team-role binding and directory team-role migrations. Supply an explicit
+SCIM `DirectoryRoleMapper` for existing custom roles and teams. No source
+label or group name creates or selects a role by itself.
+
+Authorize the configured SCIM service account for
+`identity.sso.directory-sync-apply-role` on the exact generation. Child-command
+admission and receipt recovery still require their own authorization. Apply
+one mapped edge with `DirectoryGroupRoleApplyRequest`; retry with the same
+generation, predecessor and original child command. Ordinary Group receipts
+cannot advance a role batch, and recovering a committed role change does not
+readmit it or recreate a missing binding. Mixed and multi-edge role batches
+are not selected. This adds no HTTP route.
+
+Opt the organization repository into permission reads with
+`WithDirectoryTeamRoles(roles.CurrentRoleSources)`. This checks the retained
+exact mapping, current provider and live direct SCIM membership against the
+primary inside the read's original deadline. Unavailable or ambiguous
+evidence denies these reads. Withdrawal affects only the selected directory
+contribution; local and independent sources remain managed by their owners.
+
 ### Optional SAML replay schema
 
 For IdP-initiated confirmation, apply `SAMLIDPConfirmationMigrationSource`

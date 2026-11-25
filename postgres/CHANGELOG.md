@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Opt into a role-bearing directory Group edge on a native SSO generation.
+  Recover the exact receipt independently of ordinary Group Apply and
+  authorize organization permissions only from a current explicit mapping,
+  provider and direct SCIM edge.
+
 - Select an exact directory User grant or withdrawal in a native SSO
   generation. Settle from the original Work receipt and recover it after
   a lost acknowledgment, even when the last membership was removed.

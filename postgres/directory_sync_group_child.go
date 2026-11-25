@@ -26,6 +26,7 @@ type directorySyncChild struct {
 	edge       scimpostgres.DirectoryGroupEdge
 	update     organizationpg.DirectoryTeamGrantUpdate
 	user       *directorySyncUserChild
+	role       *directorySyncRoleChild
 	binding    identity.CommandBinding
 	command    identity.Command
 }
@@ -60,7 +61,11 @@ func (p *directorySyncChild) lifecycle() kernel.LifecyclePlan {
 	if p.user != nil {
 		return kernel.LifecyclePlan{EventType: "sso.directory_sync.membership_changed.v1", BeforeVersion: p.user.update.BeforeVersion(), AfterVersion: p.user.update.AfterVersion()}
 	}
-	return kernel.LifecyclePlan{EventType: "sso.directory_sync.team_membership_changed.v1", BeforeVersion: p.update.BeforeVersion(), AfterVersion: p.update.AfterVersion()}
+	event := "sso.directory_sync.team_membership_changed.v1"
+	if p.role != nil {
+		event = "sso.directory_sync.team_role_changed.v1"
+	}
+	return kernel.LifecyclePlan{EventType: event, BeforeVersion: p.update.BeforeVersion(), AfterVersion: p.update.AfterVersion()}
 }
 
 func (p *directorySyncChild) executeOriginal(ctx context.Context) (receipt sso.Completion, absent bool, err error) {
@@ -93,8 +98,8 @@ func (p *directorySyncChild) executeOriginal(ctx context.Context) (receipt sso.C
 		if observed.Record.Binding != p.binding {
 			return receipt, false, sso.ErrForbidden
 		}
-		if p.user != nil && p.generation.State == DirectorySyncCanceled && observed.Record.Outcome != identity.CommitOutcomeCommitted {
-			// A closed User generation has no outstanding child to reconcile.
+		if (p.user != nil || p.role != nil) && p.generation.State == DirectorySyncCanceled && observed.Record.Outcome != identity.CommitOutcomeCommitted {
+			// A closed single-receipt profile has no outstanding child to reconcile.
 			return receipt, false, sso.ErrForbidden
 		}
 		receipt, err = coordinator.RecoverFeatureCommand(ctx, query, caller)
@@ -146,14 +151,24 @@ func (p *directorySyncChild) coordinator() (*kernel.Coordinator, *kernel.Contrib
 
 func (p *directorySyncChild) execute(ctx context.Context, coordinator *kernel.Coordinator, registry *kernel.ContributorRegistry) (identity.CommandResult, bool, error) {
 	fields := []identity.FeatureField{{Name: "sso.directory-batch", Value: identity.FeatureValue{Kind: identity.FeatureBytes, Bytes: bytes.Clone(p.commitment[:])}}}
-	evidence := []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field}
-	if p.user != nil {
+	var evidence []func() (identity.FeatureField, error)
+	switch {
+	case p.user != nil:
 		// Only an authoritative absent admission permits preparing a new
 		// update. Recovery must still work after the last grant disappeared.
 		if err := p.prepareUserUpdate(ctx); err != nil {
 			return identity.CommandResult{}, false, err
 		}
 		evidence = []func() (identity.FeatureField, error){p.admission.source.Field, p.user.evidence.Field, p.user.update.Field}
+	case p.role != nil:
+		// Journal lookup uses stable scope identity. Only a new command needs
+		// live target versions; historical replay cannot readmit the grant.
+		if err := p.prepareRoleUpdate(ctx); err != nil {
+			return identity.CommandResult{}, false, err
+		}
+		evidence = []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field, p.role.update.Field}
+	default:
+		evidence = []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field}
 	}
 	for _, field := range evidence {
 		value, err := field()
@@ -221,14 +236,23 @@ func (p *directorySyncChild) ApplyFeature(ctx context.Context, work kernel.Work,
 		return identity.FeatureReceipt{}, err
 	}
 	var lock organizationpg.DirectoryMembershipLock
-	if p.user != nil {
+	switch {
+	case p.user != nil:
 		var err error
 		lock, err = p.service.config.Source.LockDirectoryUserMembership(ctx, work, p, command, p.admission.source, p.user.evidence, p.user.update)
 		if err != nil {
 			return identity.FeatureReceipt{}, err
 		}
-	} else if err := p.service.config.Source.RequireDirectoryGroupEdge(ctx, work, p, command, p.admission.source, p.edge); err != nil {
-		return identity.FeatureReceipt{}, err
+	case p.role != nil:
+		var err error
+		p.role.lock, err = p.service.config.Source.LockDirectoryGroupRole(ctx, work, p, command, p.admission.source, p.edge, p.role.source, p.role.update)
+		if err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+	default:
+		if err := p.service.config.Source.RequireDirectoryGroupEdge(ctx, work, p, command, p.admission.source, p.edge); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
 	}
 	if err := p.requireActorInWork(ctx, work); err != nil {
 		return identity.FeatureReceipt{}, err
@@ -236,14 +260,21 @@ func (p *directorySyncChild) ApplyFeature(ctx context.Context, work kernel.Work,
 	if err := p.holdGeneration(ctx, work); err != nil {
 		return identity.FeatureReceipt{}, err
 	}
-	if p.user != nil {
+	switch {
+	case p.user != nil:
 		effect, err := p.organizations().ApplyDirectoryMembershipUpdate(ctx, work, p, command, p.user.update, lock)
 		if err != nil {
 			return identity.FeatureReceipt{}, err
 		}
 		p.user.effect = effect
-	} else if err := p.organizations().ApplyDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {
-		return identity.FeatureReceipt{}, err
+	case p.role != nil:
+		if err := p.organizations().ApplyDirectoryTeamRoleUpdate(ctx, work, p, command, p.role.update, p.role.lock); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
+	default:
+		if err := p.organizations().ApplyDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {
+			return identity.FeatureReceipt{}, err
+		}
 	}
 	versions := p.lifecycle()
 	return identity.FeatureReceipt{Operation: p.operation(), BeforeVersion: versions.BeforeVersion, AfterVersion: versions.AfterVersion}, nil
@@ -257,20 +288,28 @@ func (p *directorySyncChild) CheckFeatureCommit(ctx context.Context, work kernel
 	if err := p.requirePendingGeneration(ctx, work); err != nil {
 		return err
 	}
-	if p.user != nil {
+	switch {
+	case p.user != nil:
 		if err := p.organizations().RequireDirectoryMembershipEffect(ctx, work, p, command, p.user.update, p.user.effect); err != nil {
 			return err
 		}
 		if err := p.service.config.Source.RequireDirectoryUserMembershipAtCommit(ctx, work, p, command, p.admission.source, p.user.evidence, p.user.effect); err != nil {
 			return err
 		}
-		return p.requireActorInWork(ctx, work)
-	}
-	if err := p.organizations().RequireDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {
-		return err
-	}
-	if err := p.service.config.Source.RequireDirectoryGroupEdgeAtCommit(ctx, work, p, command, p.admission.source, p.edge); err != nil {
-		return err
+	case p.role != nil:
+		if err := p.organizations().RequireDirectoryTeamRoleUpdate(ctx, work, p, command, p.role.update, p.role.lock); err != nil {
+			return err
+		}
+		if err := p.service.config.Source.RequireDirectoryGroupRoleAtCommit(ctx, work, p, command, p.admission.source, p.edge, p.role.source, p.role.lock); err != nil {
+			return err
+		}
+	default:
+		if err := p.organizations().RequireDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {
+			return err
+		}
+		if err := p.service.config.Source.RequireDirectoryGroupEdgeAtCommit(ctx, work, p, command, p.admission.source, p.edge); err != nil {
+			return err
+		}
 	}
 	return p.requireActorInWork(ctx, work)
 }

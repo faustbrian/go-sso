@@ -72,6 +72,7 @@ type DirectoryGroupSyncService struct {
 	organizations *organizationpg.Repository
 	config        DirectorySyncGroupEdgesConfig
 	authority     *authoritypg.AuthorityStore
+	applyAction   authorization.Action
 }
 
 // WithGroupEdges explicitly selects exact source-team contributions. It
@@ -317,7 +318,7 @@ func (e *nativeDirectoryEdgeExecutor) ExecuteMappedDirectoryMemberships(ctx cont
 	if len(mapped.Memberships) == 0 || len(mapped.Memberships) != len(mapped.Source.Deltas) {
 		return nil, sso.ErrInvalidInput
 	}
-	batch, err := e.service.prepareBatch(ctx, e.generation, mapped.Source, e.resolved, false)
+	batch, err := e.service.prepareBatch(ctx, e.generation, mapped.Source, e.resolved, false, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +405,7 @@ func (s *DirectoryGroupSyncService) resolveBatch(ctx context.Context, id identit
 	return directoryGroupResolution{stored: stored, admission: admitted}, nil
 }
 
-func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch, resolved *directoryGroupResolution, singleUser bool) (*directorySyncChild, error) {
+func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch, resolved *directoryGroupResolution, singleReceipt bool, role *scimorganization.DirectoryRoleIntent) (*directorySyncChild, error) {
 	if resolved == nil {
 		current, err := s.resolveBatch(ctx, id, batch)
 		if err != nil {
@@ -420,9 +421,9 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 	switch current.State {
 	case DirectorySyncRunning, DirectorySyncReconciling, DirectorySyncCanceling:
 	case DirectorySyncCanceled:
-		// Groups may recover a stopped prefix; a single User may recover
+		// Group batches may recover a stopped prefix; a single receipt may recover
 		// only a committed successor. Neither can start another child.
-		if singleUser && current.Checkpoint == batch.PredecessorCheckpoint || !singleUser && len(batch.Deltas) < 2 {
+		if singleReceipt && current.Checkpoint == batch.PredecessorCheckpoint || !singleReceipt && len(batch.Deltas) < 2 {
 			return nil, sso.ErrForbidden
 		}
 	default:
@@ -431,6 +432,9 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 	commitment, err := batch.Commitment()
 	if err != nil {
 		return nil, err
+	}
+	if role != nil {
+		commitment = directoryRoleCommitment(commitment, *role)
 	}
 	child := &directorySyncChild{service: s, generation: current, batch: batch, commitment: commitment, admission: resolved.admission}
 	if current.State == DirectorySyncReconciling || current.State == DirectorySyncCanceling {
@@ -447,21 +451,13 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 }
 
 func (p *directorySyncChild) prepareChild(ctx context.Context, m scimorganization.DirectoryMembershipIntent) (*directorySyncChild, error) {
-	batch, admitted := p.batch, p.admission
+	batch := p.batch
 	grantScope := organizationpg.DirectoryTeamGrantScope{
 		TenantID: batch.TenantID, OrganizationID: batch.OrganizationID, ProviderID: organization.ID(batch.ProviderID),
 		ConnectionID: organization.ID(batch.ConnectionID), GroupID: organization.ID(m.GroupID), TeamID: m.TeamID, UserID: m.UserID,
 	}
-	target, err := p.service.organizations.ObserveDirectoryTeamMembership(ctx, grantScope)
-	if err != nil {
-		return nil, sso.ErrForbidden
-	}
 	edge := scimpostgres.DirectoryGroupEdge{GroupID: m.GroupID, UserID: m.MemberID, Present: m.Action == sso.DirectoryMembershipAdd}
-	update, err := organizationpg.NewDirectoryTeamGrantUpdate(organizationpg.DirectoryTeamGrantInput{
-		Scope: grantScope, ActorID: admitted.bindings.ActorID, User: identity.User{ID: m.UserID, TenantID: batch.TenantID, Status: identity.StatusActive, Version: target.UserVersion},
-		OrganizationVersion: target.OrganizationVersion, CredentialVersion: target.CredentialVersion, MemberVersion: target.MemberVersion,
-		MemberAuthorizationVersion: target.MemberAuthorizationVersion, TeamVersion: target.TeamVersion, ExpectedVersion: target.Version, Active: edge.Present,
-	})
+	update, err := p.observeTeamGrant(ctx, grantScope, edge.Present)
 	if err != nil {
 		return nil, sso.ErrForbidden
 	}
@@ -469,6 +465,18 @@ func (p *directorySyncChild) prepareChild(ctx context.Context, m scimorganizatio
 	child.edge, child.update = edge, update
 	child.binding = p.childBinding(m.CommandID, m.UserID, sso.DirectoryTeamMembershipOperation(), update.RecordID())
 	return &child, nil
+}
+
+func (p *directorySyncChild) observeTeamGrant(ctx context.Context, scope organizationpg.DirectoryTeamGrantScope, active bool) (organizationpg.DirectoryTeamGrantUpdate, error) {
+	target, err := p.organizations().ObserveDirectoryTeamMembership(ctx, scope)
+	if err != nil {
+		return organizationpg.DirectoryTeamGrantUpdate{}, err
+	}
+	return organizationpg.NewDirectoryTeamGrantUpdate(organizationpg.DirectoryTeamGrantInput{
+		Scope: scope, ActorID: p.admission.bindings.ActorID, User: identity.User{ID: scope.UserID, TenantID: scope.TenantID, Status: identity.StatusActive, Version: target.UserVersion},
+		OrganizationVersion: target.OrganizationVersion, CredentialVersion: target.CredentialVersion, MemberVersion: target.MemberVersion,
+		MemberAuthorizationVersion: target.MemberAuthorizationVersion, TeamVersion: target.TeamVersion, ExpectedVersion: target.Version, Active: active,
+	})
 }
 
 func (p *directorySyncChild) childBinding(command identity.CommandID, user identity.UserID, op identity.FeatureOperation, record string) identity.CommandBinding {
@@ -516,9 +524,13 @@ func (s *DirectoryGroupSyncService) observe(ctx context.Context, id identity.Com
 }
 
 func (s *DirectoryGroupSyncService) applyDecision(now time.Time, id identity.CommandID, b sso.DirectoryDeltaBatch, actor identity.ActorID) authorization.DecisionContext {
+	action := s.applyAction
+	if action == "" {
+		action = directoryApplyAction
+	}
 	return authorization.DecisionContext{PolicyRevision: authorization.Revision(s.scope.PolicyVersion), Request: authorization.Request{
 		Tenant: authorization.TenantID(b.TenantID), Subject: authorization.Subject{Kind: authorization.SubjectServiceAccount, ID: authorization.SubjectID(actor)},
-		Action: directoryApplyAction, Resource: authorization.Resource{Type: "sso.directory-generation", ID: authorization.ResourceID(id), Attributes: authorization.Attributes{
+		Action: action, Resource: authorization.Resource{Type: "sso.directory-generation", ID: authorization.ResourceID(id), Attributes: authorization.Attributes{
 			"sso.organization": authorization.StringValue(string(b.OrganizationID)), "sso.provider": authorization.StringValue(string(b.ProviderID)),
 			"sso.connection": authorization.StringValue(b.ConnectionID), "sso.mapping-version": authorization.StringValue(strconv.FormatUint(b.MappingVersion, 10)),
 		}}, Environment: authorization.Environment{Time: now},

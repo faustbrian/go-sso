@@ -63,7 +63,7 @@ func (a directoryUserApplyAuthorization) ObserveDirectoryGroupAuthorization(ctx 
 // histories first. Construction performs no I/O; the caller retains the
 // primary, source and concurrent-safe policy owners for the service lifetime.
 func NewDirectoryUserSyncService(pool *database.Pool, scope DirectoryUserSyncConfig, c DirectorySyncUsersConfig) (*DirectoryUserSyncService, error) {
-	if c.MaximumMembers == 0 || c.MaximumPerUser == 0 || !directoryUserPolicyPresent(c.ApplyAuthorization) {
+	if c.MaximumMembers == 0 || c.MaximumPerUser == 0 || !directorySyncPolicyPresent(c.ApplyAuthorization) {
 		return nil, sso.ErrInvalidInput
 	}
 	core, err := NewDirectoryGroupSyncService(pool, DirectoryGroupSyncConfig(scope), DirectorySyncGroupEdgesConfig{
@@ -75,7 +75,7 @@ func NewDirectoryUserSyncService(pool *database.Pool, scope DirectoryUserSyncCon
 	return &DirectoryUserSyncService{core: core, mapping: c.Mapping, limits: directoryUserCapacity{members: c.MaximumMembers, perUser: c.MaximumPerUser}}, nil
 }
 
-func directoryUserPolicyPresent(owner DirectorySyncUserAuthorization) bool {
+func directorySyncPolicyPresent(owner any) bool {
 	if owner == nil {
 		return false
 	}
@@ -144,7 +144,7 @@ func (s *DirectoryUserSyncService) ApplyGeneration(ctx context.Context, r Direct
 		return out, sso.ErrForbidden
 	}
 	batch = mapped.Source
-	base, err := core.prepareBatch(ctx, r.GenerationID, batch, &selected, true)
+	base, err := core.prepareBatch(ctx, r.GenerationID, batch, &selected, true, nil)
 	if err != nil {
 		return out, err
 	}
@@ -152,6 +152,10 @@ func (s *DirectoryUserSyncService) ApplyGeneration(ctx context.Context, r Direct
 	if err != nil {
 		return out, err
 	}
+	return child.finishSingle(ctx)
+}
+
+func (child *directorySyncChild) finishSingle(ctx context.Context) (out sso.DirectoryApplyResult, err error) {
 	receipt, absent, err := child.executeOriginal(ctx)
 	if absent {
 		return out, sso.ErrForbidden
@@ -159,7 +163,7 @@ func (s *DirectoryUserSyncService) ApplyGeneration(ctx context.Context, r Direct
 	if err != nil && receipt.Feature == nil {
 		return out, err
 	}
-	result, bindErr := sso.NewDirectoryApplyResult(batch, []sso.Completion{receipt})
+	result, bindErr := sso.NewDirectoryApplyResult(child.batch, []sso.Completion{receipt})
 	if bindErr != nil || receipt.Binding != child.binding {
 		return out, sso.ErrDirectoryReconciliation
 	}
