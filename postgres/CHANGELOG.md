@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Execute explicitly selected User, Group membership, and Group role
+  children in their original order. Preserve source freshness across User
+  successors and recover the exact committed prefix before a new suffix.
+
 - Recover the original committed Group child even after its target membership
   is removed. New Group commands still require a current eligible member.
 

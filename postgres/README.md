@@ -132,6 +132,26 @@ primary inside the read's original deadline. Unavailable or ambiguous
 evidence denies these reads. Withdrawal affects only the selected directory
 contribution; local and independent sources remain managed by their owners.
 
+### Optional mixed directory execution
+
+Use `NewDirectoryMixedSyncService` or `WithMixedChildren` with the same
+configured SCIM source and an explicit `DirectoryMixedMapper`. Install the
+selected native User, Group, and role histories plus the organization
+`DirectoryMembershipSuccessorMigrationSource` before enabling it. Authorize
+`identity.sso.directory-sync-apply-mixed` on the exact generation, separately
+from child admission and original receipt recovery.
+
+Pass `DirectoryMixedApplyRequest` to `ApplyGeneration` with the original
+typed order, mapping version, predecessor and child command IDs. The native
+commitment binds selected local User, team, and role targets, so a different
+selection cannot resume the same hold. After each new committed User child,
+the next Work uses only the exact owner version successor and retains the
+original deadline. An exact restart recovers the committed prefix first and
+verifies its User transitions before admitting any new suffix. A gap or an
+unrelated organization change leaves reconciliation pending. Cancellation
+can settle receipts but starts no new child. This does not add HTTP routes,
+automatic provisioning, a scheduler, or a second replay store.
+
 ### Optional SAML replay schema
 
 For IdP-initiated confirmation, apply `SAMLIDPConfirmationMigrationSource`

@@ -18,18 +18,19 @@ import (
 )
 
 type directorySyncChild struct {
-	service    *DirectoryGroupSyncService
-	generation DirectorySyncGeneration
-	batch      sso.DirectoryDeltaBatch
-	commitment [32]byte
-	admission  directoryEdgeAdmission
-	edge       scimpostgres.DirectoryGroupEdge
-	teamScope  organizationpg.DirectoryTeamGrantScope
-	update     organizationpg.DirectoryTeamGrantUpdate
-	user       *directorySyncUserChild
-	role       *directorySyncRoleChild
-	binding    identity.CommandBinding
-	command    identity.Command
+	service             *DirectoryGroupSyncService
+	generation          DirectorySyncGeneration
+	batch               sso.DirectoryDeltaBatch
+	commitment          [32]byte
+	admission           directoryEdgeAdmission
+	edge                scimpostgres.DirectoryGroupEdge
+	teamScope           organizationpg.DirectoryTeamGrantScope
+	update              organizationpg.DirectoryTeamGrantUpdate
+	user                *directorySyncUserChild
+	role                *directorySyncRoleChild
+	binding             identity.CommandBinding
+	command             identity.Command
+	recordUserSuccessor bool
 }
 
 func (p *directorySyncChild) Descriptor() kernel.ContributorDescriptor {
@@ -70,6 +71,12 @@ func (p *directorySyncChild) lifecycle() kernel.LifecyclePlan {
 }
 
 func (p *directorySyncChild) executeOriginal(ctx context.Context) (receipt sso.Completion, absent bool, err error) {
+	return p.executeOriginalAfter(ctx, nil)
+}
+
+// beforeNew runs only after authoritative, scoped absence, never on recovery
+// or a canceled/settled generation. A failed preliminary check admits no Work.
+func (p *directorySyncChild) executeOriginalAfter(ctx context.Context, beforeNew func() error) (receipt sso.Completion, absent bool, err error) {
 	coordinator, registry, err := p.coordinator()
 	if err != nil {
 		return receipt, false, providerError(ctx, err)
@@ -87,6 +94,11 @@ func (p *directorySyncChild) executeOriginal(ctx context.Context) (receipt sso.C
 			(p.generation.State != DirectorySyncRunning && p.generation.State != DirectorySyncReconciling) {
 			return receipt, true, nil
 		}
+		if beforeNew != nil {
+			if err := beforeNew(); err != nil {
+				return receipt, false, err
+			}
+		}
 		var owned bool
 		receipt, owned, err = p.execute(ctx, coordinator, registry)
 		if !owned && receipt.Binding.CommandID != "" {
@@ -99,7 +111,7 @@ func (p *directorySyncChild) executeOriginal(ctx context.Context) (receipt sso.C
 		if observed.Record.Binding != p.binding {
 			return receipt, false, sso.ErrForbidden
 		}
-		if (p.user != nil || p.role != nil) && p.generation.State == DirectorySyncCanceled && observed.Record.Outcome != identity.CommitOutcomeCommitted {
+		if len(p.batch.Deltas) == 1 && (p.user != nil || p.role != nil) && p.generation.State == DirectorySyncCanceled && observed.Record.Outcome != identity.CommitOutcomeCommitted {
 			// A closed single-receipt profile has no outstanding child to reconcile.
 			return receipt, false, sso.ErrForbidden
 		}
@@ -275,6 +287,11 @@ func (p *directorySyncChild) ApplyFeature(ctx context.Context, work kernel.Work,
 			return identity.FeatureReceipt{}, err
 		}
 		p.user.effect = effect
+		if p.recordUserSuccessor {
+			if err := p.organizations().RecordDirectoryMembershipSuccessor(ctx, work, p, command, effect); err != nil {
+				return identity.FeatureReceipt{}, err
+			}
+		}
 	case p.role != nil:
 		if err := p.organizations().ApplyDirectoryTeamRoleUpdate(ctx, work, p, command, p.role.update, p.role.lock); err != nil {
 			return identity.FeatureReceipt{}, err

@@ -324,23 +324,33 @@ func (e *nativeDirectoryEdgeExecutor) ExecuteMappedDirectoryMemberships(ctx cont
 		return nil, err
 	}
 	e.child = batch
+	receipts, stopped, err := executeDirectoryChildSequence(batch, len(mapped.Memberships), func(i int) (sso.Completion, bool, error) {
+		child, err := batch.prepareChild(mapped.Memberships[i])
+		if err != nil {
+			return sso.Completion{}, false, err
+		}
+		return child.executeOriginal(ctx)
+	})
+	e.stoppedPrefix = stopped
+	return receipts, err
+}
+
+// The admitted profile supplies each original child; absence, terminality,
+// cancellation and prefix disclosure have the same rules for all batches.
+func executeDirectoryChildSequence(batch *directorySyncChild, size int, run func(int) (sso.Completion, bool, error)) ([]sso.Completion, bool, error) {
 	stopped := batch.generation.State == DirectorySyncCanceling || batch.generation.State == DirectorySyncCanceled
-	stoppedAtPredecessor := batch.generation.State == DirectorySyncCanceled && batch.generation.Checkpoint == mapped.Source.PredecessorCheckpoint
+	stoppedAtPredecessor := batch.generation.State == DirectorySyncCanceled && batch.generation.Checkpoint == batch.batch.PredecessorCheckpoint
 	var unstartedSuffix bool
 	var lastCommitted int
-	receipts := make([]sso.Completion, 0, len(mapped.Memberships))
-	for _, member := range mapped.Memberships {
-		child, err := batch.prepareChild(member)
-		if err != nil {
-			return receipts, err
-		}
-		receipt, absent, err := child.executeOriginal(ctx)
+	receipts := make([]sso.Completion, 0, size)
+	for i := range size {
+		receipt, absent, err := run(i)
 		if absent && stopped {
 			unstartedSuffix = true
 			continue
 		}
 		if absent {
-			return receipts, sso.ErrForbidden
+			return receipts, false, sso.ErrForbidden
 		}
 		if receipt.Feature != nil && receipt.Validate() == nil && !unstartedSuffix {
 			receipts = append(receipts, receipt)
@@ -350,32 +360,31 @@ func (e *nativeDirectoryEdgeExecutor) ExecuteMappedDirectoryMemberships(ctx cont
 		}
 		if err != nil {
 			if stoppedAtPredecessor && lastCommitted != 0 {
-				return receipts[:lastCommitted], sso.ErrDirectoryReconciliation
+				return receipts[:lastCommitted], false, sso.ErrDirectoryReconciliation
 			}
-			return receipts, err
+			return receipts, false, err
 		}
 		if unstartedSuffix {
 			// A completed tail after a genuinely unstarted child is not an
 			// ordered prefix. Do not close the generation on that evidence.
-			return receipts, sso.ErrDirectoryReconciliation
+			return receipts, false, sso.ErrDirectoryReconciliation
 		}
 	}
 	if stoppedAtPredecessor {
 		// A stale worker may get an abort receipt after cancellation closed.
 		// It cannot extend the applied prefix or turn it into settlement.
-		if lastCommitted == 0 || lastCommitted == len(mapped.Memberships) {
-			return nil, sso.ErrDirectoryReconciliation
+		if lastCommitted == 0 || lastCommitted == size {
+			return nil, false, sso.ErrDirectoryReconciliation
 		}
-		return receipts[:lastCommitted], sso.ErrDirectoryReconciliation
+		return receipts[:lastCommitted], false, sso.ErrDirectoryReconciliation
 	}
 	if batch.generation.State == DirectorySyncCanceling && unstartedSuffix && lastCommitted != 0 {
-		e.stoppedPrefix = true
-		return receipts[:lastCommitted], sso.ErrDirectoryReconciliation
+		return receipts[:lastCommitted], true, sso.ErrDirectoryReconciliation
 	}
-	if len(receipts) != len(mapped.Memberships) {
-		return receipts, sso.ErrDirectoryReconciliation
+	if len(receipts) != size {
+		return receipts, false, sso.ErrDirectoryReconciliation
 	}
-	return receipts, nil
+	return receipts, false, nil
 }
 
 type directoryEdgeAdmission struct {
@@ -407,6 +416,14 @@ func (s *DirectoryGroupSyncService) resolveBatch(ctx context.Context, id identit
 }
 
 func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch, resolved *directoryGroupResolution, singleReceipt bool, role *scimorganization.DirectoryRoleIntent) (*directorySyncChild, error) {
+	var bind func([32]byte) [32]byte
+	if role != nil {
+		bind = func(commitment [32]byte) [32]byte { return directoryRoleCommitment(commitment, *role) }
+	}
+	return s.prepareProfileBatch(ctx, id, batch, resolved, singleReceipt, bind)
+}
+
+func (s *DirectoryGroupSyncService) prepareProfileBatch(ctx context.Context, id identity.CommandID, batch sso.DirectoryDeltaBatch, resolved *directoryGroupResolution, singleReceipt bool, bind func([32]byte) [32]byte) (*directorySyncChild, error) {
 	if resolved == nil {
 		current, err := s.resolveBatch(ctx, id, batch)
 		if err != nil {
@@ -434,8 +451,8 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 	if err != nil {
 		return nil, err
 	}
-	if role != nil {
-		commitment = directoryRoleCommitment(commitment, *role)
+	if bind != nil {
+		commitment = bind(commitment)
 	}
 	child := &directorySyncChild{service: s, generation: current, batch: batch, commitment: commitment, admission: resolved.admission}
 	if current.State == DirectorySyncReconciling || current.State == DirectorySyncCanceling {
