@@ -24,6 +24,7 @@ type directorySyncChild struct {
 	commitment [32]byte
 	admission  directoryEdgeAdmission
 	edge       scimpostgres.DirectoryGroupEdge
+	teamScope  organizationpg.DirectoryTeamGrantScope
 	update     organizationpg.DirectoryTeamGrantUpdate
 	user       *directorySyncUserChild
 	role       *directorySyncRoleChild
@@ -168,6 +169,13 @@ func (p *directorySyncChild) execute(ctx context.Context, coordinator *kernel.Co
 		}
 		evidence = []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field, p.role.update.Field}
 	default:
+		// Recovery uses the original binding even when the target is no longer
+		// a member. Only a new command may observe the current grant state.
+		grant, err := p.observeTeamGrant(ctx, p.teamScope, p.edge.Present)
+		if err != nil || grant.RecordID() != p.binding.RecordID {
+			return identity.CommandResult{}, false, sso.ErrForbidden
+		}
+		p.update = grant
 		evidence = []func() (identity.FeatureField, error){p.admission.source.Field, p.edge.Field, p.update.Field}
 	}
 	for _, field := range evidence {

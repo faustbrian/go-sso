@@ -330,7 +330,7 @@ func (e *nativeDirectoryEdgeExecutor) ExecuteMappedDirectoryMemberships(ctx cont
 	var lastCommitted int
 	receipts := make([]sso.Completion, 0, len(mapped.Memberships))
 	for _, member := range mapped.Memberships {
-		child, err := batch.prepareChild(ctx, member)
+		child, err := batch.prepareChild(member)
 		if err != nil {
 			return receipts, err
 		}
@@ -451,20 +451,20 @@ func (s *DirectoryGroupSyncService) prepareBatch(ctx context.Context, id identit
 	return child, nil
 }
 
-func (p *directorySyncChild) prepareChild(ctx context.Context, m scimorganization.DirectoryMembershipIntent) (*directorySyncChild, error) {
+func (p *directorySyncChild) prepareChild(m scimorganization.DirectoryMembershipIntent) (*directorySyncChild, error) {
 	batch := p.batch
 	grantScope := organizationpg.DirectoryTeamGrantScope{
 		TenantID: batch.TenantID, OrganizationID: batch.OrganizationID, ProviderID: organization.ID(batch.ProviderID),
 		ConnectionID: organization.ID(batch.ConnectionID), GroupID: organization.ID(m.GroupID), TeamID: m.TeamID, UserID: m.UserID,
 	}
-	edge := scimpostgres.DirectoryGroupEdge{GroupID: m.GroupID, UserID: m.MemberID, Present: m.Action == sso.DirectoryMembershipAdd}
-	update, err := p.observeTeamGrant(ctx, grantScope, edge.Present)
+	recordID, err := grantScope.RecordID()
 	if err != nil {
 		return nil, sso.ErrForbidden
 	}
 	child := *p
-	child.edge, child.update = edge, update
-	child.binding = p.childBinding(m.CommandID, m.UserID, sso.DirectoryTeamMembershipOperation(), update.RecordID())
+	child.edge = scimpostgres.DirectoryGroupEdge{GroupID: m.GroupID, UserID: m.MemberID, Present: m.Action == sso.DirectoryMembershipAdd}
+	child.teamScope = grantScope
+	child.binding = p.childBinding(m.CommandID, m.UserID, sso.DirectoryTeamMembershipOperation(), recordID)
 	return &child, nil
 }
 

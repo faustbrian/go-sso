@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Recover the original committed Group child even after its target membership
+  is removed. New Group commands still require a current eligible member.
+
 - Inspect one exact Group source grant at the current generation checkpoint
   under separate read authorization. Report local grants and unproven links
   without writing a repair, receipt or successor.
