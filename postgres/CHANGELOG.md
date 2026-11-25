@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Continue a mixed generation after an effective role change, including a
+  restart recovering that original role receipt. Stale source authority
+  cannot admit a suffix.
+
 - Execute explicitly selected User, Group membership, and Group role
   children in their original order. Preserve source freshness across User
   successors and recover the exact committed prefix before a new suffix.

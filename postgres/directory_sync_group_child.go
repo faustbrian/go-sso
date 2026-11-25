@@ -18,19 +18,19 @@ import (
 )
 
 type directorySyncChild struct {
-	service             *DirectoryGroupSyncService
-	generation          DirectorySyncGeneration
-	batch               sso.DirectoryDeltaBatch
-	commitment          [32]byte
-	admission           directoryEdgeAdmission
-	edge                scimpostgres.DirectoryGroupEdge
-	teamScope           organizationpg.DirectoryTeamGrantScope
-	update              organizationpg.DirectoryTeamGrantUpdate
-	user                *directorySyncUserChild
-	role                *directorySyncRoleChild
-	binding             identity.CommandBinding
-	command             identity.Command
-	recordUserSuccessor bool
+	service              *DirectoryGroupSyncService
+	generation           DirectorySyncGeneration
+	batch                sso.DirectoryDeltaBatch
+	commitment           [32]byte
+	admission            directoryEdgeAdmission
+	edge                 scimpostgres.DirectoryGroupEdge
+	teamScope            organizationpg.DirectoryTeamGrantScope
+	update               organizationpg.DirectoryTeamGrantUpdate
+	user                 *directorySyncUserChild
+	role                 *directorySyncRoleChild
+	binding              identity.CommandBinding
+	command              identity.Command
+	recordOwnerSuccessor bool
 }
 
 func (p *directorySyncChild) Descriptor() kernel.ContributorDescriptor {
@@ -287,7 +287,7 @@ func (p *directorySyncChild) ApplyFeature(ctx context.Context, work kernel.Work,
 			return identity.FeatureReceipt{}, err
 		}
 		p.user.effect = effect
-		if p.recordUserSuccessor {
+		if p.recordOwnerSuccessor {
 			if err := p.organizations().RecordDirectoryMembershipSuccessor(ctx, work, p, command, effect); err != nil {
 				return identity.FeatureReceipt{}, err
 			}
@@ -295,6 +295,11 @@ func (p *directorySyncChild) ApplyFeature(ctx context.Context, work kernel.Work,
 	case p.role != nil:
 		if err := p.organizations().ApplyDirectoryTeamRoleUpdate(ctx, work, p, command, p.role.update, p.role.lock); err != nil {
 			return identity.FeatureReceipt{}, err
+		}
+		if p.recordOwnerSuccessor {
+			if err := p.organizations().RecordDirectoryTeamRoleSuccessor(ctx, work, p, command, p.role.update, p.role.lock); err != nil {
+				return identity.FeatureReceipt{}, err
+			}
 		}
 	default:
 		if err := p.organizations().ApplyDirectoryTeamGrantUpdate(ctx, work, p, command, p.update); err != nil {

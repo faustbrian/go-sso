@@ -137,19 +137,22 @@ contribution; local and independent sources remain managed by their owners.
 Use `NewDirectoryMixedSyncService` or `WithMixedChildren` with the same
 configured SCIM source and an explicit `DirectoryMixedMapper`. Install the
 selected native User, Group, and role histories plus the organization
-`DirectoryMembershipSuccessorMigrationSource` before enabling it. Authorize
+`DirectoryMembershipSuccessorMigrationSource` before enabling it. Install
+`DirectoryTeamRoleSuccessorMigrationSource` when a role can precede another
+child; terminal roles retain the previous schema requirements. Authorize
 `identity.sso.directory-sync-apply-mixed` on the exact generation, separately
 from child admission and original receipt recovery.
 
 Pass `DirectoryMixedApplyRequest` to `ApplyGeneration` with the original
 typed order, mapping version, predecessor and child command IDs. The native
 commitment binds selected local User, team, and role targets, so a different
-selection cannot resume the same hold. After each new committed User child,
+selection cannot resume the same hold. After each new committed User or role child,
 the next Work uses only the exact owner version successor and retains the
 original deadline. An exact restart recovers the committed prefix first and
-verifies its User transitions before admitting any new suffix. A gap or an
-unrelated organization change leaves reconciliation pending. Cancellation
-can settle receipts but starts no new child. This does not add HTTP routes,
+verifies its User and role transitions against the already-observed source
+before admitting any new suffix. An unrelated change or an older pending
+role without recorded successor evidence leaves reconciliation pending.
+Cancellation can settle receipts but starts no new child. This adds no HTTP routes,
 automatic provisioning, a scheduler, or a second replay store.
 
 ### Optional SAML replay schema

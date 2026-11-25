@@ -46,7 +46,8 @@ type DirectoryMixedApplyRequest DirectoryGroupApplyRequest
 // NewDirectoryMixedSyncService borrows the configured source, primary and
 // concurrent-safe authorizers. Install both native membership/role histories as
 // selected, plus the directory membership successor history, before enabling
-// this service. Construction performs no IO or authorization calls.
+// this service. A role with a following child requires the role successor expansion.
+// Construction performs no IO or authorization calls.
 func NewDirectoryMixedSyncService(pool *database.Pool, scope DirectoryGroupSyncConfig, c DirectorySyncMixedConfig) (*DirectoryMixedSyncService, error) {
 	if c.Mapping == (scimorganization.DirectoryMixedMapper{}) || c.MaximumMembers == 0 || c.MaximumPerUser == 0 {
 		return nil, sso.ErrInvalidInput
@@ -77,7 +78,8 @@ func (s *DirectorySyncService) WithMixedChildren(c DirectorySyncMixedConfig) (*D
 
 // ApplyGeneration executes the exact mapped order under the original bounded
 // source and service-account evidence. A resumed batch recovers original
-// child receipts and verifies its committed User prefix before new effects.
+// child receipts and verifies its committed User and role transitions before
+// new effects.
 // No unresolved prefix can advance the generation checkpoint. Cancellation
 // permits receipt reconciliation but no new grant.
 func (s *DirectoryMixedSyncService) ApplyGeneration(ctx context.Context, r DirectoryMixedApplyRequest) (out sso.DirectoryApplyResult, err error) {
@@ -119,16 +121,13 @@ func (s *DirectoryMixedSyncService) ApplyGeneration(ctx context.Context, r Direc
 
 func (s *DirectoryMixedSyncService) execute(ctx context.Context, base *directorySyncChild, children []scimorganization.DirectoryMixedIntent) ([]sso.Completion, bool, error) {
 	recoveringPrefix := true
-	var historical []organizationpg.DirectoryMembershipCommittedChild
+	var historical []organizationpg.DirectorySourceCommittedChild
 	beforeNew := func() error {
 		if !base.mayDisclose() {
 			return sso.ErrForbidden
 		}
 		if recoveringPrefix && len(historical) != 0 {
-			// This read is only a comparison against retained effects. It never
-			// changes the sealed source supplied to Work or its deadlines.
-			current, err := base.organizations().ObserveCredentialAuthority(ctx, organization.CredentialAuthorityQuery{TenantID: base.batch.TenantID, OrganizationID: base.batch.OrganizationID})
-			if err != nil || base.organizations().ValidateDirectoryMembershipSuccessorChain(ctx, current, historical) != nil {
+			if err := s.core.config.Source.ValidateDirectorySourceSuccessorPrefix(ctx, base.admission.source, historical); err != nil {
 				return sso.ErrDirectoryReconciliation
 			}
 		}
@@ -139,18 +138,24 @@ func (s *DirectoryMixedSyncService) execute(ctx context.Context, base *directory
 		return nil
 	}
 	return executeDirectoryChildSequence(base, len(children), func(i int) (sso.Completion, bool, error) {
-		child, err := s.prepare(base, children[i])
+		hasSuffix := i+1 < len(children)
+		child, err := s.prepare(base, children[i], hasSuffix)
 		if err != nil {
 			return sso.Completion{}, false, err
 		}
 		receipt, absent, err := child.executeOriginalAfter(ctx, beforeNew)
-		if err != nil || absent || child.user == nil || receipt.Outcome != identity.CommitOutcomeCommitted {
+		changesOwner := child.user != nil || child.role != nil
+		if err != nil || absent || !changesOwner || receipt.Outcome != identity.CommitOutcomeCommitted {
 			return receipt, absent, err
 		}
 		if recoveringPrefix {
-			historical = append(historical, organizationpg.DirectoryMembershipCommittedChild{Source: child.user.source, Receipt: receipt})
-		} else if i+1 < len(children) {
-			advanced, err := s.core.config.Source.AdvanceDirectorySourceAfterUserCommit(ctx, base.admission.source, child.user.evidence.ResourceID, receipt)
+			prior, err := child.committedOwnerChild(receipt)
+			if err != nil {
+				return receipt, false, sso.ErrDirectoryReconciliation
+			}
+			historical = append(historical, prior)
+		} else if hasSuffix {
+			advanced, err := s.advanceSource(ctx, base.admission.source, child, receipt)
 			if err != nil {
 				return receipt, false, sso.ErrDirectoryReconciliation
 			}
@@ -160,17 +165,39 @@ func (s *DirectoryMixedSyncService) execute(ctx context.Context, base *directory
 	})
 }
 
-func (s *DirectoryMixedSyncService) prepare(base *directorySyncChild, intent scimorganization.DirectoryMixedIntent) (*directorySyncChild, error) {
+func (p *directorySyncChild) committedOwnerChild(receipt sso.Completion) (organizationpg.DirectorySourceCommittedChild, error) {
+	if p.user != nil {
+		return organizationpg.NewDirectoryMembershipCommittedChild(p.user.source, receipt)
+	}
+	return organizationpg.NewDirectoryTeamRoleCommittedChild(p.role.source, receipt)
+}
+
+func (s *DirectoryMixedSyncService) advanceSource(ctx context.Context, original scimpostgres.DirectorySourceObservation, child *directorySyncChild, receipt sso.Completion) (scimpostgres.DirectorySourceObservation, error) {
+	source := s.core.config.Source
+	if child.user != nil {
+		return source.AdvanceDirectorySourceAfterUserCommit(ctx, original, child.user.evidence.ResourceID, receipt)
+	}
+	return source.AdvanceDirectorySourceAfterRoleCommit(ctx, original, child.role.source, receipt)
+}
+
+func (s *DirectoryMixedSyncService) prepare(base *directorySyncChild, intent scimorganization.DirectoryMixedIntent, hasSuffix bool) (*directorySyncChild, error) {
 	if user, ok := intent.User(); ok {
 		child, err := base.prepareUser(user, s.limits)
 		if err != nil {
 			return nil, err
 		}
-		child.recordUserSuccessor = true
+		child.recordOwnerSuccessor = true
 		return child, nil
 	}
 	if role, ok := intent.Role(); ok {
-		return base.prepareRole(role)
+		child, err := base.prepareRole(role)
+		if err != nil {
+			return nil, err
+		}
+		// No child can consume a terminal role's successor. Keeping it unset
+		// preserves the existing role-last profile on its installed history.
+		child.recordOwnerSuccessor = hasSuffix
+		return child, nil
 	}
 	if group, ok := intent.Membership(); ok {
 		return base.prepareChild(group)

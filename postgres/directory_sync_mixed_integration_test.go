@@ -17,6 +17,7 @@ import (
 
 	"github.com/faustbrian/go-authorization/v3"
 	identity "github.com/faustbrian/go-identity"
+	migrations "github.com/faustbrian/go-migrations/v3"
 	organization "github.com/faustbrian/go-organization"
 	organizationpg "github.com/faustbrian/go-organization/postgres"
 	database "github.com/faustbrian/go-postgres"
@@ -42,6 +43,83 @@ func TestNativeDirectorySyncMixedOrderedUsersMembershipAndRole(t *testing.T) {
 	if status, err := x.sync.Status(f.ctx, journey.generation.ID); err != nil || status.Version != journey.generation.Version+2 {
 		t.Fatal("one mixed batch did not attach and settle exactly once", err)
 	}
+}
+
+func TestNativeDirectorySyncMixedAdvancesAfterRoleBeforeUser(t *testing.T) {
+	journey := newDirectoryMixedJourney(t, organizationpg.DirectoryTeamRoleSuccessorMigrationSource{Version: 692})
+	fixture := journey.fixture.provider.f
+	request, indices := journey.roleBeforeUserRequest()
+	worker := journey.worker(t, fixture.pool)
+	result, err := worker.ApplyGeneration(fixture.ctx, request)
+	for i, child := range result.ChildOutcomes {
+		if i >= len(indices) || child.Outcome != identity.CommitOutcomeCommitted || child.Binding.CommandID != journey.childIDs[indices[i]] {
+			t.Fatal("an original child did not commit in order after the role changed owner version", i, child.Outcome, err)
+		}
+	}
+	if err != nil || len(result.ChildOutcomes) != len(indices) || result.Checkpoint == ([32]byte{}) {
+		t.Fatal("mixed generation failed to settle a role followed by a mapped User", err, len(result.ChildOutcomes))
+	}
+	if replay, err := journey.worker(t, fixture.pool).ApplyGeneration(fixture.ctx, request); err != nil || !reflect.DeepEqual(result, replay) {
+		t.Fatal("fresh executor did not recover the same interleaved result", err)
+	}
+}
+
+func TestNativeDirectorySyncMixedRecoversRoleBeforeUser(t *testing.T) {
+	for _, drift := range []bool{false, true} {
+		name := "original-prefix"
+		if drift {
+			name = "unrelated-owner-transition"
+		}
+		t.Run(name, func(t *testing.T) {
+			journey := newDirectoryMixedJourney(t, organizationpg.DirectoryTeamRoleSuccessorMigrationSource{Version: 692})
+			x, fixture := journey.fixture, journey.fixture.provider.f
+			request, indices := journey.roleBeforeUserRequest()
+			loss, fault := providerLossPool(t, fixture, "INSERT INTO organization.directory_team_role_grants")
+			partial, err := journey.worker(t, loss).ApplyGeneration(fixture.ctx, request)
+			if !fault.seen.Load() || !fault.lost.Load() || !errors.Is(err, sso.ErrDirectoryReconciliation) || partial.Checkpoint != ([32]byte{}) {
+				t.Fatal("did not interrupt acknowledgment of the original committed role", err)
+			}
+			pending, err := x.sync.Status(fixture.ctx, journey.generation.ID)
+			if err != nil || pending.State != ssopg.DirectorySyncReconciling || pending.AppliedCount != 0 {
+				t.Fatal("uncertain role advanced generation before recovery", err)
+			}
+			if drift {
+				fixture.seedUser(t, x.scope.TenantID, "directory-mixed-role-late-member")
+				fixture.add(t, directoryTestTenant, "directory-mixed-role-late-member", organization.RoleMember, journey.beforeOwner+2)
+			}
+			fresh := journey.worker(t, fixture.pool)
+			result, err := fresh.ApplyGeneration(fixture.ctx, request)
+			if drift {
+				if !errors.Is(err, sso.ErrDirectoryReconciliation) || len(result.ChildOutcomes) != 2 || result.Checkpoint != ([32]byte{}) {
+					t.Fatal("unrelated owner version was accepted as a role successor", err, len(result.ChildOutcomes))
+				}
+				if status, err := x.sync.Status(fixture.ctx, pending.ID); err != nil || status != pending {
+					t.Fatal("unrelated version changed the held original generation", err)
+				}
+				return
+			}
+			if err != nil || len(result.ChildOutcomes) != len(indices) || result.Checkpoint == ([32]byte{}) {
+				t.Fatal("fresh worker could not continue after authenticating the original role prefix", err, len(result.ChildOutcomes))
+			}
+			for i, child := range result.ChildOutcomes {
+				if child.Outcome != identity.CommitOutcomeCommitted || child.Binding.CommandID != journey.childIDs[indices[i]] {
+					t.Fatal("recovery changed a child receipt or original order", i, child.Outcome)
+				}
+			}
+		})
+	}
+}
+
+func (j directoryMixedJourney) roleBeforeUserRequest() (ssopg.DirectoryMixedApplyRequest, [4]int) {
+	request := j.request
+	// The role target is the first newly admitted User. The last Group target
+	// is the second User, so neither dependent write can be moved earlier.
+	indices := [...]int{0, 3, 1, 2}
+	request.Deltas = make([]sso.DirectoryDelta, len(indices))
+	for i, index := range indices {
+		request.Deltas[i] = j.request.Deltas[index]
+	}
+	return request, indices
 }
 
 func TestNativeDirectorySyncMixedRestartsAfterSecondUserLostAcknowledgment(t *testing.T) {
@@ -184,14 +262,16 @@ type directoryMixedJourney struct {
 	beforeOwner uint64
 }
 
-func newDirectoryMixedJourney(t *testing.T) directoryMixedJourney {
+func newDirectoryMixedJourney(t *testing.T, additional ...migrations.Source) directoryMixedJourney {
 	t.Helper()
-	x := newDirectoryGroupApplyFixture(t,
+	base := []migrations.Source{
 		organizationpg.DirectoryMembershipMigrationSource{Version: 687},
 		organizationpg.DirectoryMembershipSuccessorMigrationSource{Version: 688},
 		organizationpg.DynamicRoleMigrationSource{Version: 689},
 		organizationpg.TeamRoleBindingMigrationSource{Version: 690},
-		organizationpg.DirectoryTeamRoleMigrationSource{Version: 691})
+		organizationpg.DirectoryTeamRoleMigrationSource{Version: 691},
+	}
+	x := newDirectoryGroupApplyFixture(t, append(base, additional...)...)
 	f := x.provider.f
 	f.teams = organization.TeamConfig{Version: 1, MaximumTeams: 10, MaximumMembers: 10, LifecycleVersion: 1}
 	f.dynamicRoles = organization.DynamicRoleConfig{Version: 1, MaximumRoles: 10, TeamBindingsVersion: 1,
