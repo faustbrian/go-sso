@@ -54,7 +54,7 @@ func (s *DirectoryGroupRoleSyncService) CurrentRoleSources(ctx context.Context, 
 	if len(selected) == 0 {
 		return out, nil
 	}
-	original, err := s.readDirectoryRoleProviderAuthority(ctx, provider)
+	original, err := s.core.readDirectoryProviderAuthority(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func (s *DirectoryGroupRoleSyncService) CurrentRoleSources(ctx context.Context, 
 			out[index] = live[i]
 		}
 	}
-	final, err := s.readDirectoryRoleProviderAuthority(ctx, provider)
+	final, err := s.core.readDirectoryProviderAuthority(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -144,9 +144,9 @@ type directoryRoleProviderAuthority struct {
 	version, mapping uint64
 }
 
-func (s *DirectoryGroupRoleSyncService) readDirectoryRoleProviderAuthority(ctx context.Context, provider sso.ProviderID) (directoryRoleProviderAuthority, error) {
-	rows, err := s.core.pool.Raw().Query(ctx, directoryRoleProviderAuthoritySQL,
-		string(s.core.scope.TenantID), string(s.core.scope.OrganizationID), string(provider))
+func (s *DirectoryGroupSyncService) readDirectoryProviderAuthority(ctx context.Context, provider sso.ProviderID) (directoryRoleProviderAuthority, error) {
+	rows, err := s.pool.Raw().Query(ctx, directoryRoleProviderAuthoritySQL,
+		string(s.scope.TenantID), string(s.scope.OrganizationID), string(provider))
 	if err != nil {
 		return directoryRoleProviderAuthority{}, sso.ErrUnavailable
 	}

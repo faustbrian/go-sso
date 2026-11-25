@@ -75,6 +75,16 @@ Directory withdrawal does not remove local or other-source grants. Dry-run
 execution, nested groups, role sync and HTTP/Reference composition are not
 selected by this adapter.
 
+Call `ObserveDrift` with a single mapped Group child and the exact Status
+checkpoint of a running Apply or dry-run generation. Authorize
+`identity.sso.directory-sync-inspect-drift` independently from Apply. The
+observation compares the current SCIM edge with only its attributed local
+grant; an independent local grant is reported separately. Inactive Users,
+unproven identity links and unavailable local targets are conflicts, not
+instructions to remove anything. The same original deadline bounds both
+reads, and changed authority or checkpoint yields no report. There is no
+repair, journal entry, cursor advance, or HTTP operation.
+
 ### Optional directory User membership
 
 Use `NewDirectoryUserSyncService` for a direct source worker, or

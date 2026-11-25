@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Inspect one exact Group source grant at the current generation checkpoint
+  under separate read authorization. Report local grants and unproven links
+  without writing a repair, receipt or successor.
+
 - Opt into a role-bearing directory Group edge on a native SSO generation.
   Recover the exact receipt independently of ordinary Group Apply and
   authorize organization permissions only from a current explicit mapping,

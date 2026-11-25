@@ -199,12 +199,16 @@ github.com/faustbrian/go-scim/organization v0.0.0-20261125022625-c47b22e75c7e h1
 github.com/faustbrian/go-scim/organization v0.0.0-20261125022625-c47b22e75c7e/go.mod h1:EPvdGlNzPsqsk/QTYfowu4Gy9jzXylsElZGqj9XlaSE=
 github.com/faustbrian/go-scim/organization v0.0.0-20261125031448-70a5f63d344c h1:5HcfhaB+/r2yYEDhk49seIhuEVSsIqhudydBsmlOZtM=
 github.com/faustbrian/go-scim/organization v0.0.0-20261125031448-70a5f63d344c/go.mod h1:EPvdGlNzPsqsk/QTYfowu4Gy9jzXylsElZGqj9XlaSE=
+github.com/faustbrian/go-scim/organization v0.0.0-20261125041629-f083d5b1acfc h1:PLGVDSagSOf2VMmbUjau2hfjXx79D3IgtxZ2G7cyTHQ=
+github.com/faustbrian/go-scim/organization v0.0.0-20261125041629-f083d5b1acfc/go.mod h1:EPvdGlNzPsqsk/QTYfowu4Gy9jzXylsElZGqj9XlaSE=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261124132804-3a7e6a61e856 h1:33jht1N/TrbIqiI5bOlVgJ3Ht+FGgVCKtiNpz5zRkhY=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261124132804-3a7e6a61e856/go.mod h1:fmS8i5F2AwljYb5MuBdn90vtMT/RxcR1Mdqhmh4rB/A=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261125021123-8ced90f23034 h1:D/GekRhk0xOtv5y2r9VU8QinrQb4YMSxoTo1Khsqo1s=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261125021123-8ced90f23034/go.mod h1:vf4nBubX9LhbK9lwjb8EshEzishq+rj/rQyWM2AB85g=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261125032130-31649a4f2bf8 h1:bL2jRLWhpVz91p6bmuujmqrStwA/8o+6Toc5jdlqgiY=
 github.com/faustbrian/go-scim/postgres v0.0.0-20261125032130-31649a4f2bf8/go.mod h1:yKxgSLNaED5+wPI777DHN1MjFE7CvNvTS+oxytcLLoM=
+github.com/faustbrian/go-scim/postgres v0.0.0-20261125041629-f083d5b1acfc h1:d93rUo2TSFR6bOWOnGRgrc7k+g1MIYgkSgMsOZD+dOo=
+github.com/faustbrian/go-scim/postgres v0.0.0-20261125041629-f083d5b1acfc/go.mod h1:yKxgSLNaED5+wPI777DHN1MjFE7CvNvTS+oxytcLLoM=
 github.com/faustbrian/go-secret-envelope/v2 v2.0.1 h1:1GHj2WZhKZihdhlbsU12o7T5kaA9z7IOy/1RQGu3RhA=
 github.com/faustbrian/go-secret-envelope/v2 v2.0.1/go.mod h1:X8VgGx/HsaHif3pNbS6A35sYg3SzF1+8A1YIZMd6Lnw=
 github.com/faustbrian/go-service v1.1.2 h1:8gKlxhILZzn1gQg5edVzRomlqLLaa07e2nC9dZ2rxIM=

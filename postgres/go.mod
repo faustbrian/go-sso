@@ -28,8 +28,8 @@ require (
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
 	github.com/faustbrian/go-scim v0.0.0-20261113195101-e97918aba312
-	github.com/faustbrian/go-scim/organization v0.0.0-20261125031448-70a5f63d344c
-	github.com/faustbrian/go-scim/postgres v0.0.0-20261125032130-31649a4f2bf8
+	github.com/faustbrian/go-scim/organization v0.0.0-20261125041629-f083d5b1acfc
+	github.com/faustbrian/go-scim/postgres v0.0.0-20261125041629-f083d5b1acfc
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
 	github.com/faustbrian/go-sso v0.0.0-20261125020955-e0d8d216cf33
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734

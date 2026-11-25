@@ -58,7 +58,8 @@ type DirectorySyncGroupEdgesConfig struct {
 
 // DirectorySyncGroupAuthorization observes the configured service account's
 // exact synchronization decision. The deadline is the decision's earliest
-// absolute expiry, not a lease that later checks can refresh.
+// absolute expiry, not a lease that later checks can refresh. Its drift
+// inspection action is separate from Apply and must be decided independently.
 type DirectorySyncGroupAuthorization interface {
 	ObserveDirectoryGroupAuthorization(context.Context, authorization.DecisionContext, uint64) (ProviderUpdateAuthorizationEvidence, error)
 }
