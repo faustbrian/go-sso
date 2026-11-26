@@ -178,6 +178,16 @@ role without recorded successor evidence leaves reconciliation pending.
 Cancellation can settle receipts but starts no new child. This adds no HTTP routes,
 automatic provisioning, a scheduler, or a second replay store.
 
+Call `ObserveBatchDrift` on that worker to inspect 1–128 mapped children at
+the current running checkpoint. Authorize
+`identity.sso.directory-sync-inspect-mixed-drift` separately from Apply. It
+reports typed User, Group and role observations in request order. Each
+describes current state: a preceding User candidate cannot make a later
+Group or role eligible until the User is actually admitted. The original
+source observation and deadline cover the batch. Changes detected between
+read passes return no report, and inspection never writes or advances the
+checkpoint.
+
 ### Optional SAML replay schema
 
 For IdP-initiated confirmation, apply `SAMLIDPConfirmationMigrationSource`

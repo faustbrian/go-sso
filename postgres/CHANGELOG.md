@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preview an ordered mixed batch of User, Group and role drift under
+  separate authorization. Report current state without simulating Apply;
+  changed observations return no partial report.
+
 - Preview one exact directory role contribution at its running checkpoint.
   Separate inspection authorization reports missing, stale or unexpected
   retained role rows without changing access or advancing the generation.
