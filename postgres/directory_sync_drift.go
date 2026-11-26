@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"slices"
 
 	identity "github.com/faustbrian/go-identity"
 	organization "github.com/faustbrian/go-organization"
@@ -14,20 +15,41 @@ import (
 
 const directoryGroupDriftAction = "identity.sso.directory-sync-inspect-drift"
 
+// The SCIM source reads at most 128 Group edges in one primary snapshot.
+// Splitting a preview into multiple source reads would lose that guarantee.
+const maximumDirectoryGroupDriftBatch = 128
+
 // ObserveDrift reports the exact source and local attribution for one mapped
 // Group child at the current running Apply or dry-run checkpoint. The source
 // account needs an independent directory-sync-inspect-drift decision. The
 // proposed action does not affect classification and is never executed.
 // A report is a bounded observation, not a repair permission, command
 // receipt, or checkpoint. Failure returns zero and changes no state.
-func (s *DirectoryGroupSyncService) ObserveDrift(ctx context.Context, request DirectoryGroupApplyRequest) (out scimorganization.DirectoryMembershipDrift, err error) {
+func (s *DirectoryGroupSyncService) ObserveDrift(ctx context.Context, request DirectoryGroupApplyRequest) (scimorganization.DirectoryMembershipDrift, error) {
+	if len(request.Deltas) != 1 {
+		return scimorganization.DirectoryMembershipDrift{}, sso.ErrInvalidInput
+	}
+	reports, err := s.ObserveBatchDrift(ctx, request)
+	if err != nil {
+		return scimorganization.DirectoryMembershipDrift{}, err
+	}
+	return reports[0], nil
+}
+
+// ObserveBatchDrift reports one classification per mapped Group child in input
+// order. It accepts one to 128 Group children at the same running Apply or
+// dry-run checkpoint, using the same read authorization as ObserveDrift.
+// Do not mutate request.Deltas concurrently with this call. Proposed actions
+// do not affect the report. Changed observations or authority return no
+// report. Inspection never creates a repair, receipt, or cursor successor.
+func (s *DirectoryGroupSyncService) ObserveBatchDrift(ctx context.Context, request DirectoryGroupApplyRequest) (out []scimorganization.DirectoryMembershipDrift, err error) {
 	defer func() {
 		if recover() != nil {
-			out, err = scimorganization.DirectoryMembershipDrift{}, sso.ErrUnavailable
+			out, err = nil, sso.ErrUnavailable
 		}
 	}()
 	if s == nil || s.pool == nil || ctx == nil || !providerID(string(request.ProviderID)) || request.MappingVersion == 0 ||
-		request.PredecessorCheckpoint == ([32]byte{}) || len(request.Deltas) != 1 {
+		request.PredecessorCheckpoint == ([32]byte{}) || len(request.Deltas) == 0 || len(request.Deltas) > maximumDirectoryGroupDriftBatch {
 		return out, sso.ErrInvalidInput
 	}
 	if _, err := identity.ParseCommandID(string(request.GenerationID)); err != nil {
@@ -66,32 +88,26 @@ func (s *DirectoryGroupSyncService) ObserveDrift(ctx context.Context, request Di
 	if !provider.present || !provider.enabled || provider.version != generation.ProviderVersion || provider.mapping != generation.MappingVersion {
 		return out, sso.ErrForbidden
 	}
-	member := mapped.Memberships[0]
-	edge := scimpostgres.DirectoryGroupRoleEdge{GroupID: member.GroupID, MemberResourceID: member.MemberID, UserID: member.UserID}
-	target := organizationpg.DirectoryTeamGrantScope{
-		TenantID: batch.TenantID, OrganizationID: batch.OrganizationID, ProviderID: organization.ID(batch.ProviderID),
-		ConnectionID: organization.ID(batch.ConnectionID), GroupID: organization.ID(member.GroupID), TeamID: member.TeamID, UserID: member.UserID,
+	edges := make([]scimpostgres.DirectoryGroupRoleEdge, len(mapped.Memberships))
+	targets := make([]organizationpg.DirectoryTeamGrantScope, len(mapped.Memberships))
+	for i, member := range mapped.Memberships {
+		edges[i] = scimpostgres.DirectoryGroupRoleEdge{GroupID: member.GroupID, MemberResourceID: member.MemberID, UserID: member.UserID}
+		targets[i] = organizationpg.DirectoryTeamGrantScope{
+			TenantID: batch.TenantID, OrganizationID: batch.OrganizationID, ProviderID: organization.ID(batch.ProviderID),
+			ConnectionID: organization.ID(batch.ConnectionID), GroupID: organization.ID(member.GroupID), TeamID: member.TeamID, UserID: member.UserID,
+		}
 	}
-	source, err := s.readDirectoryDriftSource(ctx, admission.source, edge)
+	first, err := s.readDirectoryGroupDrift(ctx, admission.source, edges, targets)
 	if err != nil {
 		return out, err
 	}
-	local, err := s.readDirectoryDriftProjection(ctx, target)
+	// These are repeated bounded observations, not a transaction spanning
+	// the source and organization owners.
+	currentBatch, err := s.readDirectoryGroupDrift(ctx, admission.source, edges, targets)
 	if err != nil {
 		return out, err
 	}
-	// Keep the report observational rather than retaining locks across
-	// owners. Recheck both under the original deadline; changed inputs
-	// must not become a report based on a mixed observation.
-	currentSource, err := s.readDirectoryDriftSource(ctx, admission.source, edge)
-	if err != nil {
-		return out, err
-	}
-	currentLocal, err := s.readDirectoryDriftProjection(ctx, target)
-	if err != nil {
-		return out, err
-	}
-	if currentSource != source || currentLocal != local {
+	if !slices.Equal(first, currentBatch) {
 		return out, sso.ErrDirectoryReconciliation
 	}
 	currentProvider, err := s.readDirectoryProviderAuthority(ctx, generation.Provider)
@@ -115,20 +131,48 @@ func (s *DirectoryGroupSyncService) ObserveDrift(ctx context.Context, request Di
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
-	return scimorganization.ClassifyDirectoryMembershipDrift(source, scimorganization.DirectoryLocalMembership{
-		Observed: local.observed, Attributed: local.membership.Source, Local: local.membership.Local,
-	})
+	reports := make([]scimorganization.DirectoryMembershipDrift, len(currentBatch))
+	for i, observation := range currentBatch {
+		local := observation.local
+		report, err := scimorganization.ClassifyDirectoryMembershipDrift(observation.source, scimorganization.DirectoryLocalMembership{
+			Observed: local.observed, Attributed: local.membership.Source, Local: local.membership.Local,
+		})
+		if err != nil {
+			return out, err
+		}
+		reports[i] = report
+	}
+	return reports, nil
 }
 
-func (s *DirectoryGroupSyncService) readDirectoryDriftSource(ctx context.Context, observed scimpostgres.DirectorySourceObservation, edge scimpostgres.DirectoryGroupRoleEdge) (scimorganization.DirectorySourceMembership, error) {
-	states, err := s.config.Source.ReadDirectoryGroupEdgeStates(ctx, observed, []scimpostgres.DirectoryGroupRoleEdge{edge})
+type directoryGroupDriftObservation struct {
+	source scimorganization.DirectorySourceMembership
+	local  directoryDriftProjection
+}
+
+func (s *DirectoryGroupSyncService) readDirectoryGroupDrift(ctx context.Context, observed scimpostgres.DirectorySourceObservation,
+	edges []scimpostgres.DirectoryGroupRoleEdge, targets []organizationpg.DirectoryTeamGrantScope,
+) ([]directoryGroupDriftObservation, error) {
+	states, err := s.config.Source.ReadDirectoryGroupEdgeStates(ctx, observed, edges)
 	if err != nil {
-		return 0, providerError(ctx, err)
+		return nil, providerError(ctx, err)
 	}
-	if len(states) != 1 {
-		return 0, sso.ErrUnavailable
+	if len(states) != len(targets) {
+		return nil, sso.ErrUnavailable
 	}
-	return directoryDriftSource(states[0])
+	observations := make([]directoryGroupDriftObservation, len(states))
+	for i, state := range states {
+		source, err := directoryDriftSource(state)
+		if err != nil {
+			return nil, err
+		}
+		local, err := s.readDirectoryDriftProjection(ctx, targets[i])
+		if err != nil {
+			return nil, err
+		}
+		observations[i] = directoryGroupDriftObservation{source: source, local: local}
+	}
+	return observations, nil
 }
 
 type directoryDriftProjection struct {

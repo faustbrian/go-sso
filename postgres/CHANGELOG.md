@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preview ordered drift for a bounded Group batch at one running directory
+  checkpoint. Incomplete or changed observations return no partial report and
+  never write a grant, command, or cursor.
+
 - Continue a mixed generation after an effective role change, including a
   restart recovering that original role receipt. Stale source authority
   cannot admit a suffix.

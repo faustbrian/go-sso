@@ -85,6 +85,12 @@ instructions to remove anything. The same original deadline bounds both
 reads, and changed authority or checkpoint yields no report. There is no
 repair, journal entry, cursor advance, or HTTP operation.
 
+Call `ObserveBatchDrift` to preview up to 128 mapped Group edges at the same
+predecessor. It returns one classification per input child, in input order, or
+no report on an error. Both passes use the same source authorization and
+deadline. If Apply later runs, it still obtains and checks its own authority;
+the preview is not a command receipt and cannot authorize an Apply.
+
 ### Optional directory User membership
 
 Use `NewDirectoryUserSyncService` for a direct source worker, or
