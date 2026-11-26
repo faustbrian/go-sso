@@ -21,9 +21,9 @@ const directoryRoleApplyAction = "identity.sso.directory-sync-apply-role"
 // command scope without enabling membership-only Group Apply.
 type DirectoryGroupRoleSyncConfig DirectoryGroupSyncConfig
 
-// DirectorySyncRoleAuthorization authorizes the exact configured source
-// service account to apply a role-bearing edge to the selected generation.
-// Its original deadline is preserved throughout the protected command.
+// DirectorySyncRoleAuthorization authorizes the configured source account for
+// the requested role action on the exact generation. Apply and inspection
+// use distinct actions and preserve the decision's original deadline.
 type DirectorySyncRoleAuthorization interface {
 	ObserveDirectoryRoleAuthorization(context.Context, authorization.DecisionContext, uint64) (ProviderUpdateAuthorizationEvidence, error)
 }
@@ -85,7 +85,8 @@ func (s *DirectorySyncService) WithGroupRoles(c DirectorySyncGroupRolesConfig) (
 }
 
 // DirectoryGroupRoleApplyRequest binds one exact Group delta to the opaque
-// generation, mapping and predecessor. Retry with the original request.
+// generation, mapping and predecessor for Apply or read-only inspection.
+// For an Apply retry, keep the original request.
 type DirectoryGroupRoleApplyRequest struct {
 	GenerationID          identity.CommandID
 	ProviderID            sso.ProviderID

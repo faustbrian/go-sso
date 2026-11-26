@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preview one exact directory role contribution at its running checkpoint.
+  Separate inspection authorization reports missing, stale or unexpected
+  retained role rows without changing access or advancing the generation.
+
 - Preview exact SCIM User membership drift under independent authorization,
   preserving source revisions and local or other-source attribution.
 

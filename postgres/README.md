@@ -139,6 +139,15 @@ cannot advance a role batch, and recovering a committed role change does not
 readmit it or recreate a missing binding. Mixed and multi-edge role batches
 are not selected. This adds no HTTP route.
 
+Call `ObserveDrift` on the same role worker to preview that exact mapping at
+the current running checkpoint. Grant the configured service account
+`identity.sso.directory-sync-inspect-role-drift` separately from Apply. The
+report distinguishes a missing contribution from an unexpected or stale
+retained row. Independent local team membership is not a source role. An
+unproven source or unavailable target is a conflict, not a deletion signal.
+Changed observations, authorization or checkpoint return no report. Inspection
+does not execute the proposed action, change access or advance the cursor.
+
 Opt the organization repository into permission reads with
 `WithDirectoryTeamRoles(roles.CurrentRoleSources)`. This checks the retained
 exact mapping, current provider and live direct SCIM membership against the
