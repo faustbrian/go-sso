@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Preview exact SCIM User membership drift under independent authorization,
+  preserving source revisions and local or other-source attribution.
+
 - Preview ordered drift for a bounded Group batch at one running directory
   checkpoint. Incomplete or changed observations return no partial report and
   never write a grant, command, or cursor.

@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/faustbrian/go-audit v1.0.0
-	github.com/faustbrian/go-audit/postgres v1.0.2-0.20261015062502-d62df280d85e
+	github.com/faustbrian/go-audit/postgres v1.1.1-0.20261126052105-2c40e1bc7d58
 	github.com/faustbrian/go-authentication/v2 v2.0.2-0.20261015052822-d9f5132c7f68
 	github.com/faustbrian/go-authorization/v3 v3.0.1-0.20261015052455-a55bbebb1060
 	github.com/faustbrian/go-capability/postgres/identity v0.0.0-20261124084308-14a0a4a45bb1
@@ -17,19 +17,19 @@ require (
 	github.com/faustbrian/go-identity/mfa/postgres v0.0.0-20261123153514-abe47bf75461
 	github.com/faustbrian/go-identity/oauth v0.0.0-20261123033150-16bb95b21f95
 	github.com/faustbrian/go-identity/password/postgres v0.0.0-20261028082559-7ca5d4db76d2
-	github.com/faustbrian/go-identity/postgres v0.0.0-20261124105449-b80eb17a2361
+	github.com/faustbrian/go-identity/postgres v0.0.0-20261126095329-3c5c71d20a70
 	github.com/faustbrian/go-identity/risk v0.0.0-20261124135856-92af48b3c9fc
 	github.com/faustbrian/go-identity/risk/postgres v0.0.0-20261124125758-d8bd5f7b074a
 	github.com/faustbrian/go-identity/session v0.0.0-20261123125537-8d9afa5e1a45
 	github.com/faustbrian/go-identity/session/postgres v0.0.0-20261124104504-c56933838be6
 	github.com/faustbrian/go-migrations/v3 v3.1.1-0.20261015110643-ca105f265cfc
 	github.com/faustbrian/go-organization v0.0.0-20261122135635-30af6abd1547
-	github.com/faustbrian/go-organization/postgres v0.0.0-20261125064514-0db635e0981d
+	github.com/faustbrian/go-organization/postgres v0.0.0-20261126111753-f6576948b93b
 	github.com/faustbrian/go-postgres v1.1.1-0.20260912090843-61261695bcc7
 	github.com/faustbrian/go-rate-limit/v2 v2.0.1-0.20261015090634-0ebce3975fe1
-	github.com/faustbrian/go-scim v0.0.0-20261113195101-e97918aba312
+	github.com/faustbrian/go-scim v0.0.0-20261126100726-3ed06a762b19
 	github.com/faustbrian/go-scim/organization v0.0.0-20261125045503-4dffc1be962c
-	github.com/faustbrian/go-scim/postgres v0.0.0-20261125065233-742b005c1b00
+	github.com/faustbrian/go-scim/postgres v0.0.0-20261126111821-5de1e6d3f215
 	github.com/faustbrian/go-secret-envelope/v2 v2.0.1
 	github.com/faustbrian/go-sso v0.0.0-20261125020955-e0d8d216cf33
 	github.com/faustbrian/go-sso/domain-verification v0.0.0-20261114033730-562e61a62734

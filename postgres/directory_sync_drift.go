@@ -81,12 +81,9 @@ func (s *DirectoryGroupSyncService) ObserveBatchDrift(ctx context.Context, reque
 		}
 		return out, sso.ErrForbidden
 	}
-	provider, err := s.readDirectoryProviderAuthority(ctx, generation.Provider)
+	provider, err := s.readDirectoryDriftProvider(ctx, generation)
 	if err != nil {
 		return out, err
-	}
-	if !provider.present || !provider.enabled || provider.version != generation.ProviderVersion || provider.mapping != generation.MappingVersion {
-		return out, sso.ErrForbidden
 	}
 	edges := make([]scimpostgres.DirectoryGroupRoleEdge, len(mapped.Memberships))
 	targets := make([]organizationpg.DirectoryTeamGrantScope, len(mapped.Memberships))
@@ -110,25 +107,7 @@ func (s *DirectoryGroupSyncService) ObserveBatchDrift(ctx context.Context, reque
 	if !slices.Equal(first, currentBatch) {
 		return out, sso.ErrDirectoryReconciliation
 	}
-	currentProvider, err := s.readDirectoryProviderAuthority(ctx, generation.Provider)
-	if err != nil {
-		return out, err
-	}
-	if currentProvider != provider {
-		return out, sso.ErrForbidden
-	}
-	current, err := readDirectoryGeneration(ctx, s.pool, generation.ID, batch.TenantID, string(batch.OrganizationID), batch.ConnectionID)
-	if err != nil {
-		return out, providerError(ctx, err)
-	}
-	if current != resolved.stored {
-		return out, sso.ErrDirectoryReconciliation
-	}
-	epoch, err := s.authority.Get(ctx, admission.scope)
-	if err != nil || epoch.Version != admission.epoch || !s.scope.Clock.Now().Before(admission.validUntil) {
-		return out, sso.ErrForbidden
-	}
-	if err := ctx.Err(); err != nil {
+	if err := s.recheckDirectoryDrift(ctx, batch, resolved, provider); err != nil {
 		return out, err
 	}
 	reports := make([]scimorganization.DirectoryMembershipDrift, len(currentBatch))
@@ -143,6 +122,40 @@ func (s *DirectoryGroupSyncService) ObserveBatchDrift(ctx context.Context, reque
 		reports[i] = report
 	}
 	return reports, nil
+}
+
+func (s *DirectoryGroupSyncService) readDirectoryDriftProvider(ctx context.Context, generation DirectorySyncGeneration) (directoryRoleProviderAuthority, error) {
+	provider, err := s.readDirectoryProviderAuthority(ctx, generation.Provider)
+	if err != nil {
+		return directoryRoleProviderAuthority{}, err
+	}
+	if !provider.present || !provider.enabled || provider.version != generation.ProviderVersion || provider.mapping != generation.MappingVersion {
+		return directoryRoleProviderAuthority{}, sso.ErrForbidden
+	}
+	return provider, nil
+}
+
+func (s *DirectoryGroupSyncService) recheckDirectoryDrift(ctx context.Context, batch sso.DirectoryDeltaBatch, resolved directoryGroupResolution, provider directoryRoleProviderAuthority) error {
+	generation, admission := resolved.stored.current, resolved.admission
+	currentProvider, err := s.readDirectoryProviderAuthority(ctx, generation.Provider)
+	if err != nil {
+		return err
+	}
+	if currentProvider != provider {
+		return sso.ErrForbidden
+	}
+	current, err := readDirectoryGeneration(ctx, s.pool, generation.ID, batch.TenantID, string(batch.OrganizationID), batch.ConnectionID)
+	if err != nil {
+		return providerError(ctx, err)
+	}
+	if current != resolved.stored {
+		return sso.ErrDirectoryReconciliation
+	}
+	epoch, err := s.authority.Get(ctx, admission.scope)
+	if err != nil || epoch.Version != admission.epoch || !s.scope.Clock.Now().Before(admission.validUntil) {
+		return sso.ErrForbidden
+	}
+	return ctx.Err()
 }
 
 type directoryGroupDriftObservation struct {

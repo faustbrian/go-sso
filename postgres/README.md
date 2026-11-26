@@ -113,6 +113,14 @@ proved, the generation retains the predecessor checkpoint. After
 cancellation settles that exact successor, retry remains read-only; a
 canceled generation does not admit a new User command.
 
+Call `ObserveDrift` on the User worker to compare one mapped, versioned User
+with its exact organization contribution at the current running checkpoint.
+The source account needs `identity.sso.directory-sync-inspect-user-drift`
+separately from Apply. An unproven source is a conflict, not a deletion; a
+changed revision or contradictory action returns no report. The read preserves
+independent local and other-source membership. It never repairs drift, changes
+access, creates a receipt or advances the cursor.
+
 ### Optional directory team roles
 
 Use `WithGroupRoles` on native generation administration or
